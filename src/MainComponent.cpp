@@ -1,10 +1,8 @@
 #include "MainComponent.h"
 
-// Windows-specific includes and definitions
 #ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
-#include <cstdio>
 #endif
 
 MainComponent::MainComponent()
@@ -22,12 +20,31 @@ MainComponent::MainComponent()
     addAndMakeVisible(loadButton);
     loadButton.addListener(this);
     
+    addAndMakeVisible(audioSettingsButton);
+    audioSettingsButton.addListener(this);
+    audioSettingsButton.setButtonText("Audio Settings");
+    
     addAndMakeVisible(fileNameLabel);
     fileNameLabel.setText("No file loaded", juce::dontSendNotification);
     fileNameLabel.setJustificationType(juce::Justification::centredLeft);
     
-    // Initialize audio device manager
+    addAndMakeVisible(audioDeviceInfoLabel);
+    audioDeviceInfoLabel.setJustificationType(juce::Justification::centredLeft);
+    
+    addAndMakeVisible(cpuUsageLabel);
+    cpuUsageLabel.setJustificationType(juce::Justification::centredRight);
+    
+    // Initialize audio device manager with default devices
     deviceManager.initialiseWithDefaultDevices(0, 2);
+    
+    // Listen for audio device changes
+    deviceManager.addChangeListener(this);
+    
+    // Start timer for CPU usage updates (every 100ms)
+    cpuTimer.startTimer(100);
+    
+    // Update device info display
+    updateDeviceInfo();
     
     // Make sure window is visible
     setVisible(true);
@@ -39,6 +56,8 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    cpuTimer.stopTimer();
+    deviceManager.removeChangeListener(this);
     shutdownAudio();
 }
 
@@ -52,25 +71,31 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
 {
     bufferToFill.clearActiveBufferRegion();
     
-    // Create a MIDI buffer
+    // Create a MIDI buffer for test notes
     juce::MidiBuffer midiMessages;
     
-    // Add a test note if we have a sound loaded
+    // Test note generation (only if we have a sound loaded)
     static double time = 0.0;
-    static bool noteOn = false;
+    static bool noteIsPlaying = false;
     
-    if (sampler.getNumSounds() > 0 && !noteOn)
+    if (sampler.getNumSounds() > 0 && !noteIsPlaying)
     {
         midiMessages.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8)100), 0);
-        noteOn = true;
+        noteIsPlaying = true;
+        time = 0.0;
+        printf("Playing test note\n");
+        fflush(stdout);
     }
     
-    time += bufferToFill.numSamples / sampler.getSampleRate();
-    if (time > 1.0 && noteOn)
+    // FIXED: Use sampler.getSampleRate()
+    time += (double)bufferToFill.numSamples / sampler.getSampleRate();
+    
+    if (time > 1.0 && noteIsPlaying)
     {
         midiMessages.addEvent(juce::MidiMessage::noteOff(1, 60), bufferToFill.numSamples - 1);
-        noteOn = false;
-        time = 0.0;
+        noteIsPlaying = false;
+        printf("Note off\n");
+        fflush(stdout);
     }
     
     // Render audio
@@ -93,9 +118,21 @@ void MainComponent::paint(juce::Graphics& g)
 void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced(20);
-    auto buttonArea = area.removeFromTop(40);
-    loadButton.setBounds(buttonArea.removeFromLeft(120).reduced(2));
-    fileNameLabel.setBounds(buttonArea);
+    
+    // Top button row
+    auto buttonRow = area.removeFromTop(40);
+    loadButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
+    audioSettingsButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
+    
+    // File name label
+    fileNameLabel.setBounds(area.removeFromTop(30));
+    
+    // Audio device info area
+    auto infoArea = area.removeFromTop(80);
+    audioDeviceInfoLabel.setBounds(infoArea);
+    
+    // CPU usage at bottom
+    cpuUsageLabel.setBounds(area.removeFromBottom(30));
 }
 
 void MainComponent::buttonClicked(juce::Button* button)
@@ -106,7 +143,6 @@ void MainComponent::buttonClicked(juce::Button* button)
         fflush(stdout);
         
 #ifdef _WIN32
-        // Use Windows native file dialog
         OPENFILENAMEA ofn = {0};
         char fileName[MAX_PATH] = {0};
         
@@ -126,37 +162,100 @@ void MainComponent::buttonClicked(juce::Button* button)
             printf("File selected: %s\n", fileName);
             fflush(stdout);
             
-            // Convert to JUCE File and load
             juce::File selectedFile(fileName);
             loadSampleFile(selectedFile);
         }
         else
         {
-            // User cancelled or error
-            printf("File dialog cancelled or no file selected\n");
+            printf("File dialog cancelled\n");
             fflush(stdout);
         }
-#else
-        // Fallback for non-Windows platforms
-        juce::FileChooser chooser("Select a sample file...",
-                                  juce::File::getSpecialLocation(juce::File::userDesktopDirectory),
-                                  "*.wav;*.aiff;*.mp3");
-        
-        chooser.launchAsync(juce::FileBrowserComponent::openMode | 
-                           juce::FileBrowserComponent::canSelectFiles,
-            [this](const juce::FileChooser& fc)
-            {
-                auto results = fc.getResults();
-                if (results.size() > 0)
-                {
-                    loadSampleFile(results[0]);
-                }
-            });
 #endif
-        
-        printf("Button click handling complete\n");
-        fflush(stdout);
     }
+    else if (button == &audioSettingsButton)
+    {
+        showAudioDeviceSettings();
+    }
+}
+
+void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
+{
+    if (source == &deviceManager)
+    {
+        // Audio device settings changed - update display
+        updateDeviceInfo();
+    }
+}
+
+void MainComponent::showAudioDeviceSettings()
+{
+    printf("Opening audio device settings...\n");
+    fflush(stdout);
+    
+    // Create the selector component
+    auto* selector = new juce::AudioDeviceSelectorComponent(
+        deviceManager,
+        0,        // minAudioInputChannels
+        256,      // maxAudioInputChannels
+        0,        // minAudioOutputChannels
+        2,        // maxAudioOutputChannels
+        false,    // showMidiInputOptions
+        false,    // showMidiOutputSelector
+        false,    // showChannelsAsStereoPairs
+        false     // hideAdvancedOptionsWithButton
+    );
+    
+    selector->setSize(500, 400);
+    
+    // Create a dialog that will close properly
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(selector);
+    options.dialogTitle = "Audio Device Settings";
+    options.dialogBackgroundColour = juce::Colours::lightgrey;
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    
+    // This makes it a proper modal dialog that closes with ESC or Close button
+    options.launchAsync();
+    
+    updateDeviceInfo();
+    
+    printf("Audio settings launched - click Close or press ESC to exit\n");
+    fflush(stdout);
+}
+
+void MainComponent::updateDeviceInfo()
+{
+    juce::String info;
+    
+    if (auto* currentDevice = deviceManager.getCurrentAudioDevice())
+    {
+        info += "Device: " + currentDevice->getName() + "\n";
+        info += "Sample Rate: " + juce::String(currentDevice->getCurrentSampleRate()) + " Hz\n";
+        info += "Buffer Size: " + juce::String(currentDevice->getCurrentBufferSizeSamples()) + " samples\n";
+        
+        auto activeInputs = currentDevice->getActiveInputChannels();
+        auto activeOutputs = currentDevice->getActiveOutputChannels();
+        
+        info += "Inputs: " + juce::String(activeInputs.countNumberOfSetBits()) + " channels\n";
+        info += "Outputs: " + juce::String(activeOutputs.countNumberOfSetBits()) + " channels\n";
+        
+        if (auto* deviceType = deviceManager.getCurrentDeviceTypeObject())
+        {
+            info += "Type: " + deviceType->getTypeName();
+        }
+    }
+    else
+    {
+        info = "No audio device selected";
+    }
+    
+    audioDeviceInfoLabel.setText(info, juce::dontSendNotification);
+    
+    // Update CPU usage
+    double cpu = deviceManager.getCpuUsage() * 100.0;
+    cpuUsageLabel.setText("CPU: " + juce::String(cpu, 2) + "%", juce::dontSendNotification);
 }
 
 void MainComponent::loadSampleFile(const juce::File& file)
@@ -164,10 +263,8 @@ void MainComponent::loadSampleFile(const juce::File& file)
     printf("Loading file: %s\n", file.getFullPathName().toRawUTF8());
     fflush(stdout);
     
-    // Clear any existing sounds
     sampler.clearSounds();
     
-    // Create a reader for the file
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     
     if (reader != nullptr)
@@ -175,8 +272,7 @@ void MainComponent::loadSampleFile(const juce::File& file)
         printf("File loaded successfully, creating sound...\n");
         fflush(stdout);
         
-        // Create the sound
-        auto sound = new juce::SamplerSound(
+        auto* sound = new juce::SamplerSound(
             "Sample",
             *reader,
             juce::BigInteger().setRange(0, 128, true),
@@ -187,8 +283,6 @@ void MainComponent::loadSampleFile(const juce::File& file)
         );
         
         sampler.addSound(sound);
-        
-        // Update UI
         fileNameLabel.setText(file.getFileName(), juce::dontSendNotification);
         
         printf("Sound loaded and ready to play\n");

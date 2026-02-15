@@ -23,5 +23,11 @@ cmake --build build --config Debug
 o en una linea: 
 cmake --build build --config Debug; & "./build/MySampler_artefacts/Debug/My Sampler.exe"
 
+Para compilar cambios
+cmake --build build --config Debug
+
 Para escribir errores en consola:
 & "./build/MySampler_artefacts/Debug/My Sampler.exe" | Write-Host
+
+para comprobar versión de JUCE
+Get-Content "C:\Users\vlarr\Documents\SW\juce-projects\mysampler\lib\JUCE\CHANGE_LIST.md" -Head 10
