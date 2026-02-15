@@ -9,7 +9,8 @@
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
-                      public juce::ChangeListener  // Add this to listen for device changes
+                      public juce::ChangeListener,
+                      public juce::MidiInputCallback  // Add this for MIDI input
 {
 public:
     MainComponent();
@@ -25,19 +26,26 @@ public:
     // Button listener callback
     void buttonClicked(juce::Button* button) override;
     
-    // Change listener callback for audio device changes
+    // Change listener callback
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
+    
+    // MIDI input callback
+    void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
 
 private:
     void loadSampleFile(const juce::File& file);
     void showAudioDeviceSettings();
+    void showMidiDeviceSettings();  // New method for MIDI settings
     void updateDeviceInfo();
+    void updateMidiDeviceList();    // New method to scan MIDI devices
     
     // UI Components
     juce::TextButton loadButton{ "Load Sample" };
     juce::TextButton audioSettingsButton{ "Audio Settings" };
+    juce::TextButton midiSettingsButton{ "MIDI Settings" };  // New button
     juce::Label fileNameLabel;
     juce::Label audioDeviceInfoLabel;
+    juce::Label midiDeviceInfoLabel;  // New label for MIDI info
     juce::Label cpuUsageLabel;
     
     // Audio components
@@ -45,7 +53,12 @@ private:
     juce::AudioFormatManager formatManager;
     juce::MidiMessageCollector midiCollector;
     
-    // Timer for updating CPU usage
+    // MIDI components
+    std::unique_ptr<juce::MidiInput> midiInput;
+    juce::StringArray midiInputNames;
+    juce::String currentMidiDeviceName;
+    
+    // Timer for updates
     class CpuTimer : public juce::Timer
     {
     public:

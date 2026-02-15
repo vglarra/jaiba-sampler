@@ -12,8 +12,8 @@ MainComponent::MainComponent()
     // Initialize audio format manager
     formatManager.registerBasicFormats();
     
-    // Set up the sampler with 4 voices
-    for (int i = 0; i < 4; ++i)
+    // Set up the sampler with 16 voices for polyphony
+    for (int i = 0; i < 16; ++i)
         sampler.addVoice(new juce::SamplerVoice());
     
     // Configure UI
@@ -24,12 +24,19 @@ MainComponent::MainComponent()
     audioSettingsButton.addListener(this);
     audioSettingsButton.setButtonText("Audio Settings");
     
+    addAndMakeVisible(midiSettingsButton);  // Add MIDI button
+    midiSettingsButton.addListener(this);
+    midiSettingsButton.setButtonText("MIDI Settings");
+    
     addAndMakeVisible(fileNameLabel);
     fileNameLabel.setText("No file loaded", juce::dontSendNotification);
     fileNameLabel.setJustificationType(juce::Justification::centredLeft);
     
     addAndMakeVisible(audioDeviceInfoLabel);
     audioDeviceInfoLabel.setJustificationType(juce::Justification::centredLeft);
+    
+    addAndMakeVisible(midiDeviceInfoLabel);  // Add MIDI info label
+    midiDeviceInfoLabel.setJustificationType(juce::Justification::centredLeft);
     
     addAndMakeVisible(cpuUsageLabel);
     cpuUsageLabel.setJustificationType(juce::Justification::centredRight);
@@ -40,13 +47,13 @@ MainComponent::MainComponent()
     // Listen for audio device changes
     deviceManager.addChangeListener(this);
     
-    // Start timer for CPU usage updates (every 100ms)
+    // Start timer for CPU usage updates
     cpuTimer.startTimer(100);
     
     // Update device info display
     updateDeviceInfo();
+    updateMidiDeviceList();  // Scan for MIDI devices
     
-    // Make sure window is visible
     setVisible(true);
     toFront(true);
     
@@ -64,17 +71,17 @@ MainComponent::~MainComponent()
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
     sampler.setCurrentPlaybackSampleRate(sampleRate);
-    midiCollector.reset(sampleRate);
+    midiCollector.reset(sampleRate);  // This is correct
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
     bufferToFill.clearActiveBufferRegion();
     
-    // Create a MIDI buffer for test notes
+    // Create a MIDI buffer for both test notes AND incoming MIDI
     juce::MidiBuffer midiMessages;
     
-    // Test note generation (only if we have a sound loaded)
+    // === PART 1: Test note generation (your existing code) ===
     static double time = 0.0;
     static bool noteIsPlaying = false;
     
@@ -87,7 +94,6 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         fflush(stdout);
     }
     
-    // FIXED: Use sampler.getSampleRate()
     time += (double)bufferToFill.numSamples / sampler.getSampleRate();
     
     if (time > 1.0 && noteIsPlaying)
@@ -98,7 +104,15 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         fflush(stdout);
     }
     
-    // Render audio
+    // === PART 2: Incoming MIDI from keyboard (NEW) ===
+    // Add any pending MIDI messages from the MIDI input
+    juce::MidiBuffer incomingMidi;
+    midiCollector.removeNextBlockOfMessages(incomingMidi, bufferToFill.numSamples);
+    
+    // Merge incoming MIDI with test notes
+    midiMessages.addEvents(incomingMidi, 0, bufferToFill.numSamples, 0);
+    
+    // === PART 3: Render audio with all MIDI messages ===
     sampler.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
 }
 
@@ -119,17 +133,19 @@ void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced(20);
     
-    // Top button row
+    // Top button row - now with 3 buttons
     auto buttonRow = area.removeFromTop(40);
     loadButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
     audioSettingsButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
+    midiSettingsButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));  // New button
     
     // File name label
     fileNameLabel.setBounds(area.removeFromTop(30));
     
     // Audio device info area
     auto infoArea = area.removeFromTop(80);
-    audioDeviceInfoLabel.setBounds(infoArea);
+    audioDeviceInfoLabel.setBounds(infoArea.removeFromTop(40));
+    midiDeviceInfoLabel.setBounds(infoArea);  // MIDI info below audio info
     
     // CPU usage at bottom
     cpuUsageLabel.setBounds(area.removeFromBottom(30));
@@ -175,6 +191,10 @@ void MainComponent::buttonClicked(juce::Button* button)
     else if (button == &audioSettingsButton)
     {
         showAudioDeviceSettings();
+    }
+    else if (button == &midiSettingsButton)  // New MIDI button handler
+    {
+        showMidiDeviceSettings();
     }
 }
 
@@ -253,9 +273,18 @@ void MainComponent::updateDeviceInfo()
     
     audioDeviceInfoLabel.setText(info, juce::dontSendNotification);
     
-    // Update CPU usage
-    double cpu = deviceManager.getCpuUsage() * 100.0;
-    cpuUsageLabel.setText("CPU: " + juce::String(cpu, 2) + "%", juce::dontSendNotification);
+    // Update MIDI device info - FIXED: different API for JUCE 8
+    juce::String midiInfo = "MIDI: ";
+    if (midiInput != nullptr)
+        midiInfo += currentMidiDeviceName + " (Connected)";
+    else
+        midiInfo += "No device selected";
+    
+    midiDeviceInfoLabel.setText(midiInfo, juce::dontSendNotification);
+    
+    // Update CPU usage - FIXED: removed duplicate declaration
+    double cpuUsage = deviceManager.getCpuUsage() * 100.0;
+    cpuUsageLabel.setText("CPU: " + juce::String(cpuUsage, 2) + "%", juce::dontSendNotification);
 }
 
 void MainComponent::loadSampleFile(const juce::File& file)
@@ -296,5 +325,169 @@ void MainComponent::loadSampleFile(const juce::File& file)
         printf("Failed to load file: unsupported format\n");
         fflush(stdout);
         fileNameLabel.setText("Unsupported file format", juce::dontSendNotification);
+    }
+}
+
+void MainComponent::updateMidiDeviceList()
+{
+    midiInputNames.clear();
+    
+    // Get all available MIDI inputs
+    auto devices = juce::MidiInput::getAvailableDevices();
+    
+    for (auto& device : devices)
+    {
+        midiInputNames.add(device.name);
+    }
+    
+    printf("Found %d MIDI input devices\n", devices.size());
+    fflush(stdout);
+}
+
+void MainComponent::showMidiDeviceSettings()
+{
+    printf("Opening MIDI device settings...\n");
+    fflush(stdout);
+    
+    // Update the device list first
+    updateMidiDeviceList();
+    
+    // Create a dialog with MIDI device selector
+    class MidiSelectorComponent : public juce::Component,
+                                   public juce::ComboBox::Listener
+    {
+    public:
+        MidiSelectorComponent(MainComponent& owner, const juce::StringArray& devices, const juce::String& current)
+            : mainOwner(owner), midiDevices(devices)
+        {
+            addAndMakeVisible(instructionLabel);
+            instructionLabel.setText("Select MIDI Input Device:", juce::dontSendNotification);
+            instructionLabel.setJustificationType(juce::Justification::centredLeft);
+            
+            addAndMakeVisible(deviceCombo);
+            deviceCombo.addItem("None (Disabled)", 1);
+            
+            for (int i = 0; i < devices.size(); ++i)
+            {
+                deviceCombo.addItem(devices[i], i + 2);
+            }
+            
+            // Set current selection
+            if (current.isEmpty())
+                deviceCombo.setSelectedId(1);
+            else
+            {
+                for (int i = 0; i < devices.size(); ++i)
+                {
+                    if (devices[i] == current)
+                    {
+                        deviceCombo.setSelectedId(i + 2);
+                        break;
+                    }
+                }
+            }
+            
+            deviceCombo.addListener(this);
+            
+            addAndMakeVisible(statusLabel);
+            updateStatusLabel();
+            
+            setSize(400, 150);
+        }
+        
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(10);
+            instructionLabel.setBounds(area.removeFromTop(25));
+            deviceCombo.setBounds(area.removeFromTop(30));
+            statusLabel.setBounds(area.removeFromTop(50));
+        }
+        
+        void comboBoxChanged(juce::ComboBox* combo) override
+        {
+            int selectedId = combo->getSelectedId();
+            
+            if (selectedId == 1)
+            {
+                // Disable MIDI input
+                mainOwner.currentMidiDeviceName = "";
+                mainOwner.midiCollector.reset(mainOwner.sampler.getSampleRate());
+                statusLabel.setText("MIDI Input: Disabled", juce::dontSendNotification);
+            }
+            else
+            {
+                juce::String deviceName = combo->getText();
+                mainOwner.currentMidiDeviceName = deviceName;
+                statusLabel.setText("MIDI Input: " + deviceName, juce::dontSendNotification);
+                
+                // Find and open the device
+                auto devices = juce::MidiInput::getAvailableDevices();
+                for (auto& device : devices)
+                {
+                    if (device.name == deviceName)
+                    {
+                        // FIXED: openDevice returns a unique_ptr in JUCE 8
+                        mainOwner.midiInput = juce::MidiInput::openDevice(device.identifier, &mainOwner);
+                        if (mainOwner.midiInput != nullptr)
+                            mainOwner.midiInput->start();
+                        break;
+                    }
+                }
+            }
+            updateStatusLabel();
+        }
+        
+    private:
+        void updateStatusLabel()
+        {
+            juce::String status = "Status: ";
+            // FIXED: removed isOpen() check - in JUCE 8, if unique_ptr is not null, it's open
+            if (mainOwner.midiInput != nullptr)
+                status += "Connected and ready";
+            else
+                status += "Not connected";
+            statusLabel.setText(status, juce::dontSendNotification);
+        }
+        
+        MainComponent& mainOwner;
+        const juce::StringArray& midiDevices;
+        juce::Label instructionLabel;
+        juce::ComboBox deviceCombo;
+        juce::Label statusLabel;
+    };
+    
+    // Create and show the dialog
+    auto* selector = new MidiSelectorComponent(*this, midiInputNames, currentMidiDeviceName);
+    selector->setSize(400, 150);
+    
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(selector);
+    options.dialogTitle = "MIDI Input Settings";
+    options.dialogBackgroundColour = juce::Colours::lightgrey;
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    
+    options.launchAsync();
+    
+    printf("MIDI settings launched\n");
+    fflush(stdout);
+}
+
+void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
+{
+    // Add incoming MIDI messages to the collector
+    midiCollector.addMessageToQueue(message);
+    
+    // Optional: Print MIDI activity for debugging
+    if (message.isNoteOn())
+    {
+        printf("MIDI Note On: %d, Velocity: %d\n", message.getNoteNumber(), message.getVelocity());
+        fflush(stdout);
+    }
+    else if (message.isNoteOff())
+    {
+        printf("MIDI Note Off: %d\n", message.getNoteNumber());
+        fflush(stdout);
     }
 }
