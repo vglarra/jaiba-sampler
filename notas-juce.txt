@@ -1,0 +1,27 @@
+como actualizar el Log para AI:
+
+@"
+## Progress Update: 2026-02-15
+- ✅ Added Load Sample button
+- ✅ Implemented file browser dialog
+- ✅ Added audio format support (WAV/AIFF/MP3)
+- ✅ Sample plays on middle C (test note)
+"@ | Out-File -FilePath ai_deepseek_log.txt -Encoding utf8 -Append
+
+
+*******************************************
+Para recompilar en c++
+
+# Clean and build
+Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+cmake -S . -B build -G "Visual Studio 17 2022"
+cmake --build build --config Debug
+
+# Run
+./build/MySampler_artefacts/Debug/"My Sampler.exe"
+
+o en una linea: 
+cmake --build build --config Debug; & "./build/MySampler_artefacts/Debug/My Sampler.exe"
+
+Para escribir errores en consola:
+& "./build/MySampler_artefacts/Debug/My Sampler.exe" | Write-Host
