@@ -1,0 +1,50 @@
+@"
+# Build directories
+build/
+Builds/
+*.build/
+*.artefacts/
+
+# JUCE submodule (track reference only)
+/lib/JUCE/
+!/lib/JUCE/.git
+
+# IDE files
+.vs/
+.vscode/
+*.sln
+*.suo
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+.DS_Store
+
+# Compiled output
+*.exe
+*.dll
+*.lib
+*.a
+*.so
+*.dylib
+*.app
+*.pdb
+*.ilk
+*.exp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CMakeUserPresets.json
+_deps/
+
+# Temp files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+Thumbs.db
+"@ | Out-File -FilePath .gitignore -Encoding utf8
