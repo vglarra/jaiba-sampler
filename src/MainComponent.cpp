@@ -93,34 +93,17 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     
     juce::MidiBuffer midiMessages;
     
-    static double time = 0.0;
-    static bool noteIsPlaying = false;
+    // 🚫 REMOVED the automatic test note generator that was causing looping
     
-    if (sampler.getNumSounds() > 0 && !noteIsPlaying)
-    {
-        midiMessages.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8)100), 0);
-        noteIsPlaying = true;
-        time = 0.0;
-        printf("Playing test note\n");
-        fflush(stdout);
-    }
-    
-    time += (double)bufferToFill.numSamples / sampler.getSampleRate();
-    
-    if (time > 1.0 && noteIsPlaying)
-    {
-        midiMessages.addEvent(juce::MidiMessage::noteOff(1, 60), bufferToFill.numSamples - 1);
-        noteIsPlaying = false;
-        printf("Note off\n");
-        fflush(stdout);
-    }
-    
+    // Get incoming MIDI from keyboard
     juce::MidiBuffer incomingMidi;
     midiCollector.removeNextBlockOfMessages(incomingMidi, bufferToFill.numSamples);
     midiMessages.addEvents(incomingMidi, 0, bufferToFill.numSamples, 0);
     
+    // Render sampler audio with MIDI messages
     sampler.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
     
+    // Add sine wave if active
     if (sineWaveActive)
     {
         const double sampleRate = sampler.getSampleRate();
@@ -138,7 +121,6 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                 
                 for (int i = 0; i < bufferToFill.numSamples; ++i)
                 {
-                    // Use the pre-calculated sample or update per sample for continuous phase
                     channelData[i] += (float)(std::sin(sineWavePhase + i * phaseIncrement) * sineWaveAmplitude);
                 }
             }
@@ -389,23 +371,55 @@ void MainComponent::loadSampleFile(const juce::File& file)
         printf("File loaded successfully, creating sound...\n");
         fflush(stdout);
         
-        juce::BigInteger allNotes;
-        allNotes.setRange(0, 128, true);
+        // Define note range: C3 (48) to C4 (60) - one full octave
+        int lowestNote = 48;  // C3
+        int highestNote = 60; // C4
+        int rootNote = 60;    // Middle C (original pitch)
+        
+        // Create note range
+        juce::BigInteger noteRange;
+        noteRange.setRange(0, 128, false);                 // Clear all notes
+        noteRange.setRange(lowestNote,                      // Start at C3
+                          (highestNote - lowestNote + 1),   // Number of notes
+                          true);                             // Enable this range
         
         auto* sound = new juce::SamplerSound(
             "Sample",
             *reader,
-            allNotes,
-            60, 0.1, 0.1, 10.0
+            noteRange,           // Notes C3 through C4 will trigger the sample
+            rootNote,            // Middle C plays at original pitch
+            0.1,                 // attack
+            0.1,                 // release
+            10.0                 // max length
         );
         
         sampler.addSound(sound);
         fileNameLabel.setText(file.getFileName(), juce::dontSendNotification);
         
-        printf("Sound loaded and ready to play\n");
+        printf("Sound mapped to notes %d-%d (C3 to C4)\n", lowestNote, highestNote);
+        printf("  Root note: %d (Middle C) - plays at original pitch\n", rootNote);
+        printf("  Notes below root: play slower/lower\n");
+        printf("  Notes above root: play faster/higher\n");
+        printf("  Range covers one full octave!\n");
         fflush(stdout);
         
-        sampler.noteOn(1, 60, 0.8f);
+        // Play a short test note (200ms) so you know it loaded
+        printf(">>> PLAYING TEST NOTE (should stop in 200ms)\n");
+        sampler.noteOn(1, rootNote, 0.8f);
+
+        juce::Timer::callAfterDelay(200, [this]() {
+            printf(">>> TURNING TEST NOTE OFF\n");
+            sampler.noteOff(1, 60, 0.0f, true);
+            
+            // Double-check by turning off all notes on all channels
+            for (int channel = 1; channel <= 16; ++channel)
+            {
+                sampler.allNotesOff(channel, true);
+            }
+            
+            printf("Test note ended - ready to play!\n");
+            fflush(stdout);
+        });
     }
     else
     {
