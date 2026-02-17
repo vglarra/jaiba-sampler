@@ -10,7 +10,7 @@
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
                       public juce::ChangeListener,
-                      public juce::MidiInputCallback  // Add this for MIDI input
+                      public juce::MidiInputCallback
 {
 public:
     MainComponent();
@@ -23,29 +23,27 @@ public:
     void paint(juce::Graphics& g) override;
     void resized() override;
     
-    // Button listener callback
     void buttonClicked(juce::Button* button) override;
-    
-    // Change listener callback
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
-    
-    // MIDI input callback
     void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
 
 private:
     void loadSampleFile(const juce::File& file);
     void showAudioDeviceSettings();
-    void showMidiDeviceSettings();  // New method for MIDI settings
+    void showMidiDeviceSettings();
     void updateDeviceInfo();
-    void updateMidiDeviceList();    // New method to scan MIDI devices
+    void updateMidiDeviceList();
+    void toggleSineWave();  // New method for sine wave
+
     
     // UI Components
     juce::TextButton loadButton{ "Load Sample" };
     juce::TextButton audioSettingsButton{ "Audio Settings" };
-    juce::TextButton midiSettingsButton{ "MIDI Settings" };  // New button
+    juce::TextButton midiSettingsButton{ "MIDI Settings" };
+    juce::TextButton sineWaveButton{ "Test Sine Wave" };  // NEW BUTTON
     juce::Label fileNameLabel;
     juce::Label audioDeviceInfoLabel;
-    juce::Label midiDeviceInfoLabel;  // New label for MIDI info
+    juce::Label midiDeviceInfoLabel;
     juce::Label cpuUsageLabel;
     
     // Audio components
@@ -57,6 +55,12 @@ private:
     std::unique_ptr<juce::MidiInput> midiInput;
     juce::StringArray midiInputNames;
     juce::String currentMidiDeviceName;
+    
+    // Sine wave generation
+    bool sineWaveActive = false;
+    double sineWavePhase = 0.0;
+    double sineWaveFrequency = 440.0;  // A440
+    float sineWaveAmplitude = 0.2f;    // Reduced amplitude to avoid clipping
     
     // Timer for updates
     class CpuTimer : public juce::Timer

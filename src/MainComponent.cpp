@@ -1,4 +1,8 @@
 #include "MainComponent.h"
+#include <juce_audio_devices/juce_audio_devices.h>
+#include <string>
+#include <vector>
+#include <cstring>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -9,10 +13,8 @@ MainComponent::MainComponent()
 {
     setSize(800, 600);
     
-    // Initialize audio format manager
     formatManager.registerBasicFormats();
     
-    // Set up the sampler with 16 voices for polyphony
     for (int i = 0; i < 16; ++i)
         sampler.addVoice(new juce::SamplerVoice());
     
@@ -24,9 +26,14 @@ MainComponent::MainComponent()
     audioSettingsButton.addListener(this);
     audioSettingsButton.setButtonText("Audio Settings");
     
-    addAndMakeVisible(midiSettingsButton);  // Add MIDI button
+    addAndMakeVisible(midiSettingsButton);
     midiSettingsButton.addListener(this);
     midiSettingsButton.setButtonText("MIDI Settings");
+    
+    addAndMakeVisible(sineWaveButton);
+    sineWaveButton.addListener(this);
+    sineWaveButton.setButtonText("Test Sine Wave");
+    sineWaveButton.setColour(juce::TextButton::buttonColourId, juce::Colours::lightblue);
     
     addAndMakeVisible(fileNameLabel);
     fileNameLabel.setText("No file loaded", juce::dontSendNotification);
@@ -35,29 +42,23 @@ MainComponent::MainComponent()
     addAndMakeVisible(audioDeviceInfoLabel);
     audioDeviceInfoLabel.setJustificationType(juce::Justification::centredLeft);
     
-    addAndMakeVisible(midiDeviceInfoLabel);  // Add MIDI info label
+    addAndMakeVisible(midiDeviceInfoLabel);
     midiDeviceInfoLabel.setJustificationType(juce::Justification::centredLeft);
     
     addAndMakeVisible(cpuUsageLabel);
     cpuUsageLabel.setJustificationType(juce::Justification::centredRight);
     
-    // Initialize audio device manager with default devices
-    deviceManager.initialiseWithDefaultDevices(0, 2);
-    
-    // Listen for audio device changes
-    deviceManager.addChangeListener(this);
-    
-    // Start timer for CPU usage updates
-    cpuTimer.startTimer(100);
-    
-    // Update device info display
-    updateDeviceInfo();
-    updateMidiDeviceList();  // Scan for MIDI devices
-    
-    setVisible(true);
-    toFront(true);
-    
-    printf("MainComponent initialized\n");
+    // Set up audio with 2 output channels
+    setAudioChannels(0, 2);
+
+    // Don't force any specific configuration - let the user choose
+    // Just set a reasonable buffer size
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager.getAudioDeviceSetup(setup);
+    setup.bufferSize = 512;  // Stable buffer size
+    deviceManager.setAudioDeviceSetup(setup, true);
+
+    printf("Audio initialized - Use Audio Settings to configure\n");
     fflush(stdout);
 }
 
@@ -71,17 +72,27 @@ MainComponent::~MainComponent()
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
     sampler.setCurrentPlaybackSampleRate(sampleRate);
-    midiCollector.reset(sampleRate);  // This is correct
+    midiCollector.reset(sampleRate);
+    
+    printf("PREPARE TO PLAY: sampleRate=%.0f, blockSize=%d\n", 
+           sampleRate, samplesPerBlockExpected);
+    fflush(stdout);
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
     bufferToFill.clearActiveBufferRegion();
     
-    // Create a MIDI buffer for both test notes AND incoming MIDI
+    static int blockCounter = 0;
+    if (++blockCounter % 100 == 0)
+    {
+        printf("Audio callback running (block %d), sineWaveActive=%d\n", 
+               blockCounter, sineWaveActive ? 1 : 0);
+        fflush(stdout);
+    }
+    
     juce::MidiBuffer midiMessages;
     
-    // === PART 1: Test note generation (your existing code) ===
     static double time = 0.0;
     static bool noteIsPlaying = false;
     
@@ -104,20 +115,55 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         fflush(stdout);
     }
     
-    // === PART 2: Incoming MIDI from keyboard (NEW) ===
-    // Add any pending MIDI messages from the MIDI input
     juce::MidiBuffer incomingMidi;
     midiCollector.removeNextBlockOfMessages(incomingMidi, bufferToFill.numSamples);
-    
-    // Merge incoming MIDI with test notes
     midiMessages.addEvents(incomingMidi, 0, bufferToFill.numSamples, 0);
     
-    // === PART 3: Render audio with all MIDI messages ===
     sampler.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
+    
+    if (sineWaveActive)
+    {
+        const double sampleRate = sampler.getSampleRate();
+        if (sampleRate > 0)
+        {
+            const double phaseIncrement = sineWaveFrequency * juce::MathConstants<double>::twoPi / sampleRate;
+            
+            // Generate mono sine wave
+            float sample = (float)(std::sin(sineWavePhase) * sineWaveAmplitude);
+            
+            // Write the same sample to ALL active channels (stereo)
+            for (int channel = 0; channel < bufferToFill.buffer->getNumChannels(); ++channel)
+            {
+                float* channelData = bufferToFill.buffer->getWritePointer(channel);
+                
+                for (int i = 0; i < bufferToFill.numSamples; ++i)
+                {
+                    // Use the pre-calculated sample or update per sample for continuous phase
+                    channelData[i] += (float)(std::sin(sineWavePhase + i * phaseIncrement) * sineWaveAmplitude);
+                }
+            }
+            
+            // Update phase for next block
+            sineWavePhase += phaseIncrement * bufferToFill.numSamples;
+            while (sineWavePhase >= juce::MathConstants<double>::twoPi)
+                sineWavePhase -= juce::MathConstants<double>::twoPi;
+            
+            // Debug output
+            static int sineCounter = 0;
+            if (++sineCounter % 100 == 0)
+            {
+                printf("Sine wave: phase=%.2f, channels=%d\n", 
+                    sineWavePhase, bufferToFill.buffer->getNumChannels());
+                fflush(stdout);
+            }
+        }
+    }
 }
 
 void MainComponent::releaseResources()
 {
+    printf("Audio resources released\n");
+    fflush(stdout);
 }
 
 void MainComponent::paint(juce::Graphics& g)
@@ -133,21 +179,18 @@ void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced(20);
     
-    // Top button row - now with 3 buttons
     auto buttonRow = area.removeFromTop(40);
     loadButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
     audioSettingsButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
-    midiSettingsButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));  // New button
+    midiSettingsButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
+    sineWaveButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
     
-    // File name label
     fileNameLabel.setBounds(area.removeFromTop(30));
     
-    // Audio device info area
     auto infoArea = area.removeFromTop(80);
     audioDeviceInfoLabel.setBounds(infoArea.removeFromTop(40));
-    midiDeviceInfoLabel.setBounds(infoArea);  // MIDI info below audio info
+    midiDeviceInfoLabel.setBounds(infoArea);
     
-    // CPU usage at bottom
     cpuUsageLabel.setBounds(area.removeFromBottom(30));
 }
 
@@ -192,9 +235,45 @@ void MainComponent::buttonClicked(juce::Button* button)
     {
         showAudioDeviceSettings();
     }
-    else if (button == &midiSettingsButton)  // New MIDI button handler
+    else if (button == &midiSettingsButton)
     {
         showMidiDeviceSettings();
+    }
+    else if (button == &sineWaveButton)
+    {
+        toggleSineWave();
+    }
+}
+
+void MainComponent::toggleSineWave()
+{
+    sineWaveActive = !sineWaveActive;
+    
+    if (sineWaveActive)
+    {
+        sineWavePhase = 0.0;
+        sineWaveButton.setButtonText("Stop Sine Wave");
+        sineWaveButton.setColour(juce::TextButton::buttonColourId, juce::Colours::lightcoral);
+        printf("Sine wave ON (440Hz) - checking audio device...\n");
+        
+        if (auto* currentDevice = deviceManager.getCurrentAudioDevice())
+        {
+            printf("  Audio device: %s\n", currentDevice->getName().toRawUTF8());
+            printf("  Sample rate: %.0f Hz\n", currentDevice->getCurrentSampleRate());
+            printf("  Buffer size: %d samples\n", currentDevice->getCurrentBufferSizeSamples());
+        }
+        else
+        {
+            printf("  WARNING: No audio device selected!\n");
+        }
+        fflush(stdout);
+    }
+    else
+    {
+        sineWaveButton.setButtonText("Test Sine Wave");
+        sineWaveButton.setColour(juce::TextButton::buttonColourId, juce::Colours::lightblue);
+        printf("Sine wave OFF\n");
+        fflush(stdout);
     }
 }
 
@@ -202,8 +281,8 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
 {
     if (source == &deviceManager)
     {
-        // Audio device settings changed - update display
         updateDeviceInfo();
+        // forceStereoConfiguration();
     }
 }
 
@@ -212,22 +291,21 @@ void MainComponent::showAudioDeviceSettings()
     printf("Opening audio device settings...\n");
     fflush(stdout);
     
-    // Create the selector component
+    // Full featured selector - let user choose everything
     auto* selector = new juce::AudioDeviceSelectorComponent(
         deviceManager,
         0,        // minAudioInputChannels
         256,      // maxAudioInputChannels
         0,        // minAudioOutputChannels
         2,        // maxAudioOutputChannels
-        false,    // showMidiInputOptions
-        false,    // showMidiOutputSelector
+        true,     // showMidiInputOptions
+        true,     // showMidiOutputSelector
         false,    // showChannelsAsStereoPairs
         false     // hideAdvancedOptionsWithButton
     );
     
     selector->setSize(500, 400);
     
-    // Create a dialog that will close properly
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned(selector);
     options.dialogTitle = "Audio Device Settings";
@@ -236,12 +314,11 @@ void MainComponent::showAudioDeviceSettings()
     options.useNativeTitleBar = true;
     options.resizable = false;
     
-    // This makes it a proper modal dialog that closes with ESC or Close button
     options.launchAsync();
     
     updateDeviceInfo();
     
-    printf("Audio settings launched - click Close or press ESC to exit\n");
+    printf("Audio settings launched\n");
     fflush(stdout);
 }
 
@@ -273,16 +350,27 @@ void MainComponent::updateDeviceInfo()
     
     audioDeviceInfoLabel.setText(info, juce::dontSendNotification);
     
-    // Update MIDI device info - FIXED: different API for JUCE 8
+    // ✅ FIXED: Explicit isEmpty() check
     juce::String midiInfo = "MIDI: ";
     if (midiInput != nullptr)
-        midiInfo += currentMidiDeviceName + " (Connected)";
+    {
+        if (currentMidiDeviceName.isEmpty())
+        {
+            midiInfo += "No device selected";
+        }
+        else
+        {
+            midiInfo += currentMidiDeviceName;
+            midiInfo += " (Connected)";
+        }
+    }
     else
+    {
         midiInfo += "No device selected";
+    }
     
     midiDeviceInfoLabel.setText(midiInfo, juce::dontSendNotification);
     
-    // Update CPU usage - FIXED: removed duplicate declaration
     double cpuUsage = deviceManager.getCpuUsage() * 100.0;
     cpuUsageLabel.setText("CPU: " + juce::String(cpuUsage, 2) + "%", juce::dontSendNotification);
 }
@@ -301,14 +389,14 @@ void MainComponent::loadSampleFile(const juce::File& file)
         printf("File loaded successfully, creating sound...\n");
         fflush(stdout);
         
+        juce::BigInteger allNotes;
+        allNotes.setRange(0, 128, true);
+        
         auto* sound = new juce::SamplerSound(
             "Sample",
             *reader,
-            juce::BigInteger().setRange(0, 128, true),
-            60,     // root note middle C
-            0.1,    // attack
-            0.1,    // release
-            10.0    // max length
+            allNotes,
+            60, 0.1, 0.1, 10.0
         );
         
         sampler.addSound(sound);
@@ -317,7 +405,6 @@ void MainComponent::loadSampleFile(const juce::File& file)
         printf("Sound loaded and ready to play\n");
         fflush(stdout);
         
-        // Play test note
         sampler.noteOn(1, 60, 0.8f);
     }
     else
@@ -332,7 +419,6 @@ void MainComponent::updateMidiDeviceList()
 {
     midiInputNames.clear();
     
-    // Get all available MIDI inputs
     auto devices = juce::MidiInput::getAvailableDevices();
     
     for (auto& device : devices)
@@ -349,137 +435,34 @@ void MainComponent::showMidiDeviceSettings()
     printf("Opening MIDI device settings...\n");
     fflush(stdout);
     
-    // Update the device list first
+    // Simple message - no string building, no comparisons
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::AlertWindow::NoIcon,
+        "MIDI Input Settings",
+        "MIDI device selection temporarily disabled while fixing compiler issues.\n\nPlease use the console to see available devices.",
+        "OK"
+    );
+    
+    // Just print to console
     updateMidiDeviceList();
-    
-    // Create a dialog with MIDI device selector
-    class MidiSelectorComponent : public juce::Component,
-                                   public juce::ComboBox::Listener
+    printf("Available MIDI devices:\n");
+    for (int i = 0; i < midiInputNames.size(); ++i)
     {
-    public:
-        MidiSelectorComponent(MainComponent& owner, const juce::StringArray& devices, const juce::String& current)
-            : mainOwner(owner), midiDevices(devices)
-        {
-            addAndMakeVisible(instructionLabel);
-            instructionLabel.setText("Select MIDI Input Device:", juce::dontSendNotification);
-            instructionLabel.setJustificationType(juce::Justification::centredLeft);
-            
-            addAndMakeVisible(deviceCombo);
-            deviceCombo.addItem("None (Disabled)", 1);
-            
-            for (int i = 0; i < devices.size(); ++i)
-            {
-                deviceCombo.addItem(devices[i], i + 2);
-            }
-            
-            // Set current selection
-            if (current.isEmpty())
-                deviceCombo.setSelectedId(1);
-            else
-            {
-                for (int i = 0; i < devices.size(); ++i)
-                {
-                    if (devices[i] == current)
-                    {
-                        deviceCombo.setSelectedId(i + 2);
-                        break;
-                    }
-                }
-            }
-            
-            deviceCombo.addListener(this);
-            
-            addAndMakeVisible(statusLabel);
-            updateStatusLabel();
-            
-            setSize(400, 150);
-        }
-        
-        void resized() override
-        {
-            auto area = getLocalBounds().reduced(10);
-            instructionLabel.setBounds(area.removeFromTop(25));
-            deviceCombo.setBounds(area.removeFromTop(30));
-            statusLabel.setBounds(area.removeFromTop(50));
-        }
-        
-        void comboBoxChanged(juce::ComboBox* combo) override
-        {
-            int selectedId = combo->getSelectedId();
-            
-            if (selectedId == 1)
-            {
-                // Disable MIDI input
-                mainOwner.currentMidiDeviceName = "";
-                mainOwner.midiCollector.reset(mainOwner.sampler.getSampleRate());
-                statusLabel.setText("MIDI Input: Disabled", juce::dontSendNotification);
-            }
-            else
-            {
-                juce::String deviceName = combo->getText();
-                mainOwner.currentMidiDeviceName = deviceName;
-                statusLabel.setText("MIDI Input: " + deviceName, juce::dontSendNotification);
-                
-                // Find and open the device
-                auto devices = juce::MidiInput::getAvailableDevices();
-                for (auto& device : devices)
-                {
-                    if (device.name == deviceName)
-                    {
-                        // FIXED: openDevice returns a unique_ptr in JUCE 8
-                        mainOwner.midiInput = juce::MidiInput::openDevice(device.identifier, &mainOwner);
-                        if (mainOwner.midiInput != nullptr)
-                            mainOwner.midiInput->start();
-                        break;
-                    }
-                }
-            }
-            updateStatusLabel();
-        }
-        
-    private:
-        void updateStatusLabel()
-        {
-            juce::String status = "Status: ";
-            // FIXED: removed isOpen() check - in JUCE 8, if unique_ptr is not null, it's open
-            if (mainOwner.midiInput != nullptr)
-                status += "Connected and ready";
-            else
-                status += "Not connected";
-            statusLabel.setText(status, juce::dontSendNotification);
-        }
-        
-        MainComponent& mainOwner;
-        const juce::StringArray& midiDevices;
-        juce::Label instructionLabel;
-        juce::ComboBox deviceCombo;
-        juce::Label statusLabel;
-    };
+        printf("  %d: %s\n", i+1, midiInputNames[i].toRawUTF8());
+    }
+    printf("Current device: %s\n", 
+           currentMidiDeviceName.isEmpty() ? "None" : currentMidiDeviceName.toRawUTF8());
+    fflush(stdout);
     
-    // Create and show the dialog
-    auto* selector = new MidiSelectorComponent(*this, midiInputNames, currentMidiDeviceName);
-    selector->setSize(400, 150);
-    
-    juce::DialogWindow::LaunchOptions options;
-    options.content.setOwned(selector);
-    options.dialogTitle = "MIDI Input Settings";
-    options.dialogBackgroundColour = juce::Colours::lightgrey;
-    options.escapeKeyTriggersCloseButton = true;
-    options.useNativeTitleBar = true;
-    options.resizable = false;
-    
-    options.launchAsync();
-    
-    printf("MIDI settings launched\n");
+    printf("MIDI settings launched (console-only mode)\n");
     fflush(stdout);
 }
 
+
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
-    // Add incoming MIDI messages to the collector
     midiCollector.addMessageToQueue(message);
     
-    // Optional: Print MIDI activity for debugging
     if (message.isNoteOn())
     {
         printf("MIDI Note On: %d, Velocity: %d\n", message.getNoteNumber(), message.getVelocity());
@@ -491,3 +474,4 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
         fflush(stdout);
     }
 }
+
