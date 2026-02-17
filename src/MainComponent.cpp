@@ -435,42 +435,203 @@ void MainComponent::showMidiDeviceSettings()
     printf("Opening MIDI device settings...\n");
     fflush(stdout);
     
-    // Simple message - no string building, no comparisons
-    juce::AlertWindow::showMessageBoxAsync(
-        juce::AlertWindow::NoIcon,
-        "MIDI Input Settings",
-        "MIDI device selection temporarily disabled while fixing compiler issues.\n\nPlease use the console to see available devices.",
-        "OK"
-    );
-    
-    // Just print to console
     updateMidiDeviceList();
-    printf("Available MIDI devices:\n");
-    for (int i = 0; i < midiInputNames.size(); ++i)
-    {
-        printf("  %d: %s\n", i+1, midiInputNames[i].toRawUTF8());
-    }
-    printf("Current device: %s\n", 
-           currentMidiDeviceName.isEmpty() ? "None" : currentMidiDeviceName.toRawUTF8());
-    fflush(stdout);
     
-    printf("MIDI settings launched (console-only mode)\n");
+    // Create a dialog with MIDI device selector
+    class MidiSelectorComponent : public juce::Component,
+                                   public juce::ComboBox::Listener
+    {
+    public:
+        MidiSelectorComponent(MainComponent& owner, const juce::StringArray& devices, const juce::String& current)
+            : mainOwner(owner)
+        {
+            addAndMakeVisible(instructionLabel);
+            instructionLabel.setText("Select MIDI Input Device:", juce::dontSendNotification);
+            instructionLabel.setJustificationType(juce::Justification::centredLeft);
+            
+            addAndMakeVisible(deviceCombo);
+            deviceCombo.addItem("None (Disabled)", 1);
+            
+            // Store device names for safe comparison
+            for (int i = 0; i < devices.size(); ++i)
+            {
+                deviceNames.add(devices[i]);
+                deviceCombo.addItem(devices[i], i + 2);
+            }
+            
+            // Set current selection using std::string comparison
+            int selectedIndex = -1;
+            if (!current.isEmpty())
+            {
+                std::string currentStr = current.toStdString();
+                for (int i = 0; i < deviceNames.size(); ++i)
+                {
+                    if (deviceNames[i].toStdString() == currentStr)
+                    {
+                        selectedIndex = i;
+                        break;
+                    }
+                }
+            }
+            
+            if (selectedIndex >= 0)
+                deviceCombo.setSelectedId(selectedIndex + 2);
+            else
+                deviceCombo.setSelectedId(1);
+            
+            deviceCombo.addListener(this);
+            
+            addAndMakeVisible(statusLabel);
+            updateStatusLabel();
+            
+            setSize(400, 200);
+        }
+        
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(10);
+            instructionLabel.setBounds(area.removeFromTop(25));
+            deviceCombo.setBounds(area.removeFromTop(30));
+            statusLabel.setBounds(area.removeFromTop(50));
+        }
+        
+        void comboBoxChanged(juce::ComboBox* combo) override
+        {
+            int selectedId = combo->getSelectedId();
+            
+            if (selectedId == 1)
+            {
+                // Disable MIDI input
+                mainOwner.currentMidiDeviceName = juce::String();
+                mainOwner.midiCollector.reset(mainOwner.sampler.getSampleRate());
+                
+                // Close any open MIDI input
+                if (mainOwner.midiInput != nullptr)
+                {
+                    mainOwner.midiInput->stop();
+                    mainOwner.midiInput.reset();
+                }
+                
+                statusLabel.setText("MIDI Input: Disabled", juce::dontSendNotification);
+            }
+            else
+            {
+                int index = selectedId - 2;
+                if (index >= 0 && index < deviceNames.size())
+                {
+                    juce::String deviceName = deviceNames[index];
+                    mainOwner.currentMidiDeviceName = deviceName;
+                    
+                    // Update status text
+                    statusLabel.setText("MIDI Input: " + deviceName, juce::dontSendNotification);
+                    
+                    // Close existing MIDI input if open
+                    if (mainOwner.midiInput != nullptr)
+                    {
+                        mainOwner.midiInput->stop();
+                        mainOwner.midiInput.reset();
+                    }
+                    
+                    // Open the new MIDI device
+                    auto devices = juce::MidiInput::getAvailableDevices();
+                    for (auto& device : devices)
+                    {
+                        if (device.name == deviceName)
+                        {
+                            mainOwner.midiInput = juce::MidiInput::openDevice(device.identifier, &mainOwner);
+                            if (mainOwner.midiInput != nullptr)
+                            {
+                                mainOwner.midiInput->start();
+                                printf("MIDI device opened: %s\n", deviceName.toRawUTF8());
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            updateStatusLabel();
+            mainOwner.updateDeviceInfo(); // Update the main display
+        }
+        
+    private:
+        void updateStatusLabel()
+        {
+            juce::String statusText;
+            // In JUCE 8, if the unique_ptr is not null, the device is open
+            if (mainOwner.midiInput != nullptr)
+                statusText = "Status: Connected and ready";
+            else
+                statusText = "Status: Not connected";
+            
+            statusLabel.setText(statusText, juce::dontSendNotification);
+        }
+        
+        MainComponent& mainOwner;
+        juce::StringArray deviceNames;
+        juce::Label instructionLabel;
+        juce::ComboBox deviceCombo;
+        juce::Label statusLabel;
+    };
+    
+    // Create and show the dialog
+    auto* selector = new MidiSelectorComponent(*this, midiInputNames, currentMidiDeviceName);
+    selector->setSize(400, 200);
+    
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(selector);
+    options.dialogTitle = "MIDI Input Settings";
+    options.dialogBackgroundColour = juce::Colours::lightgrey;
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    
+    options.launchAsync();
+    
+    printf("MIDI settings launched\n");
     fflush(stdout);
 }
 
 
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
+    // Add incoming MIDI messages to the collector for timed playback
     midiCollector.addMessageToQueue(message);
     
+    // Also trigger the sampler directly for immediate response
     if (message.isNoteOn())
     {
-        printf("MIDI Note On: %d, Velocity: %d\n", message.getNoteNumber(), message.getVelocity());
+        printf("MIDI Note On: %d, Velocity: %d, Channel: %d\n", 
+               message.getNoteNumber(), 
+               message.getVelocity(),
+               message.getChannel());
         fflush(stdout);
+        
+        // Trigger the note with normalized velocity (0.0 to 1.0)
+        float velocity = message.getVelocity() / 127.0f;
+        sampler.noteOn(message.getChannel(), message.getNoteNumber(), velocity);
     }
     else if (message.isNoteOff())
     {
-        printf("MIDI Note Off: %d\n", message.getNoteNumber());
+        printf("MIDI Note Off: %d, Channel: %d\n", 
+               message.getNoteNumber(),
+               message.getChannel());
+        fflush(stdout);
+        
+        sampler.noteOff(message.getChannel(), message.getNoteNumber(), 0.0f, true);
+    }
+    else if (message.isPitchWheel())
+    {
+        // Optional: handle pitch bend
+        int pitchValue = message.getPitchWheelValue();
+        float pitchBend = (pitchValue - 8192) / 8192.0f; // Range -1.0 to 1.0
+        // You could add pitch bend processing here
+    }
+    else if (message.isController())
+    {
+        // Optional: handle MIDI controllers (mod wheel, etc.)
+        int controller = message.getControllerNumber();
+        int value = message.getControllerValue();
+        printf("MIDI Controller: %d, Value: %d\n", controller, value);
         fflush(stdout);
     }
 }
