@@ -3,62 +3,105 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <algorithm>
+#include <memory>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
 #endif
 
+//==============================================================================
 MainComponent::MainComponent()
+    : sampleListBox("samples", nullptr),
+      cpuTimer(*this)
 {
-    setSize(800, 600);
+    printf("DEBUG: MainComponent constructor started\n");
+    fflush(stdout);
+    
+    // Create the model
+    sampleListModel = std::make_unique<SampleListModel>(*this);
+    sampleListBox.setModel(sampleListModel.get());
+    
+    setSize(900, 700);
     
     formatManager.registerBasicFormats();
     
+    // Add sampler voices
     for (int i = 0; i < 16; ++i)
         sampler.addVoice(new juce::SamplerVoice());
     
-    // Configure UI
+    // Configure buttons
+    loadButton.setButtonText("Load Sample");
+    loadButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+    loadButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     addAndMakeVisible(loadButton);
     loadButton.addListener(this);
     
+    audioSettingsButton.setButtonText("Audio Settings");
+    audioSettingsButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+    audioSettingsButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     addAndMakeVisible(audioSettingsButton);
     audioSettingsButton.addListener(this);
-    audioSettingsButton.setButtonText("Audio Settings");
     
+    midiSettingsButton.setButtonText("MIDI Settings");
+    midiSettingsButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+    midiSettingsButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     addAndMakeVisible(midiSettingsButton);
     midiSettingsButton.addListener(this);
-    midiSettingsButton.setButtonText("MIDI Settings");
     
-    addAndMakeVisible(sineWaveButton);
-    sineWaveButton.addListener(this);
     sineWaveButton.setButtonText("Test Sine Wave");
     sineWaveButton.setColour(juce::TextButton::buttonColourId, juce::Colours::lightblue);
+    sineWaveButton.setColour(juce::TextButton::textColourOffId, juce::Colours::black);
+    addAndMakeVisible(sineWaveButton);
+    sineWaveButton.addListener(this);
     
+    mapRangeButton.setButtonText("Map Samples");
+    mapRangeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF6A4A3A));
+    mapRangeButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    addAndMakeVisible(mapRangeButton);
+    mapRangeButton.addListener(this);
+    
+    // Configure labels
     addAndMakeVisible(fileNameLabel);
-    fileNameLabel.setText("No file loaded", juce::dontSendNotification);
-    fileNameLabel.setJustificationType(juce::Justification::centredLeft);
+    fileNameLabel.setText("No sample loaded", juce::dontSendNotification);
+    fileNameLabel.setJustificationType(juce::Justification::centred);
+    fileNameLabel.setFont(juce::Font(18.0f, juce::Font::bold));
+    fileNameLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
     
     addAndMakeVisible(audioDeviceInfoLabel);
-    audioDeviceInfoLabel.setJustificationType(juce::Justification::centredLeft);
+    audioDeviceInfoLabel.setJustificationType(juce::Justification::left);
+    audioDeviceInfoLabel.setFont(juce::Font(12.0f));
+    audioDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
     
     addAndMakeVisible(midiDeviceInfoLabel);
-    midiDeviceInfoLabel.setJustificationType(juce::Justification::centredLeft);
+    midiDeviceInfoLabel.setJustificationType(juce::Justification::left);
+    midiDeviceInfoLabel.setFont(juce::Font(12.0f));
+    midiDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
     
     addAndMakeVisible(cpuUsageLabel);
-    cpuUsageLabel.setJustificationType(juce::Justification::centredRight);
+    cpuUsageLabel.setJustificationType(juce::Justification::right);
+    cpuUsageLabel.setFont(juce::Font(12.0f, juce::Font::bold));
+    cpuUsageLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
     
-    // Set up audio with 2 output channels
+    // Configure sliders
+    lowNoteSlider.setRange(0, 127, 1);
+    highNoteSlider.setRange(0, 127, 1);
+    rootNoteSlider.setRange(0, 127, 1);
+    
+    lowNoteSlider.addListener(this);
+    highNoteSlider.addListener(this);
+    rootNoteSlider.addListener(this);
+    
+    // Set up audio
     setAudioChannels(0, 2);
-
-    // Don't force any specific configuration - let the user choose
-    // Just set a reasonable buffer size
+    
     juce::AudioDeviceManager::AudioDeviceSetup setup;
     deviceManager.getAudioDeviceSetup(setup);
-    setup.bufferSize = 512;  // Stable buffer size
+    setup.bufferSize = 512;
     deviceManager.setAudioDeviceSetup(setup, true);
-
-    printf("Audio initialized - Use Audio Settings to configure\n");
+    
+    printf("DEBUG: MainComponent constructor completed\n");
     fflush(stdout);
 }
 
@@ -69,41 +112,24 @@ MainComponent::~MainComponent()
     shutdownAudio();
 }
 
+//==============================================================================
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
     sampler.setCurrentPlaybackSampleRate(sampleRate);
     midiCollector.reset(sampleRate);
-    
-    printf("PREPARE TO PLAY: sampleRate=%.0f, blockSize=%d\n", 
-           sampleRate, samplesPerBlockExpected);
-    fflush(stdout);
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
     bufferToFill.clearActiveBufferRegion();
     
-    static int blockCounter = 0;
-    if (++blockCounter % 100 == 0)
-    {
-        printf("Audio callback running (block %d), sineWaveActive=%d\n", 
-               blockCounter, sineWaveActive ? 1 : 0);
-        fflush(stdout);
-    }
-    
     juce::MidiBuffer midiMessages;
-    
-    // 🚫 REMOVED the automatic test note generator that was causing looping
-    
-    // Get incoming MIDI from keyboard
     juce::MidiBuffer incomingMidi;
     midiCollector.removeNextBlockOfMessages(incomingMidi, bufferToFill.numSamples);
     midiMessages.addEvents(incomingMidi, 0, bufferToFill.numSamples, 0);
     
-    // Render sampler audio with MIDI messages
     sampler.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
     
-    // Add sine wave if active
     if (sineWaveActive)
     {
         const double sampleRate = sampler.getSampleRate();
@@ -111,10 +137,6 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         {
             const double phaseIncrement = sineWaveFrequency * juce::MathConstants<double>::twoPi / sampleRate;
             
-            // Generate mono sine wave
-            float sample = (float)(std::sin(sineWavePhase) * sineWaveAmplitude);
-            
-            // Write the same sample to ALL active channels (stereo)
             for (int channel = 0; channel < bufferToFill.buffer->getNumChannels(); ++channel)
             {
                 float* channelData = bufferToFill.buffer->getWritePointer(channel);
@@ -125,64 +147,72 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                 }
             }
             
-            // Update phase for next block
             sineWavePhase += phaseIncrement * bufferToFill.numSamples;
             while (sineWavePhase >= juce::MathConstants<double>::twoPi)
                 sineWavePhase -= juce::MathConstants<double>::twoPi;
-            
-            // Debug output
-            static int sineCounter = 0;
-            if (++sineCounter % 100 == 0)
-            {
-                printf("Sine wave: phase=%.2f, channels=%d\n", 
-                    sineWavePhase, bufferToFill.buffer->getNumChannels());
-                fflush(stdout);
-            }
         }
     }
 }
 
 void MainComponent::releaseResources()
 {
-    printf("Audio resources released\n");
-    fflush(stdout);
 }
 
+//==============================================================================
 void MainComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colours::darkgrey);
+    g.fillAll(juce::Colour(0xFF2A2A2A));
     
     g.setColour(juce::Colours::white);
-    g.drawText("My Sampler", getLocalBounds().removeFromTop(40), 
-               juce::Justification::centred, true);
+    g.setFont(juce::Font(24.0f, juce::Font::bold));
+    
+    auto titleArea = getLocalBounds().reduced(20).removeFromTop(50);
+    g.drawText("My Sampler", titleArea, juce::Justification::centred, true);
+    
+    g.setColour(juce::Colours::darkgrey);
+    auto lineY = titleArea.getBottom() + 5;
+    g.drawHorizontalLine(lineY, 20, getWidth() - 20);
+    
+    auto footerY = getHeight() - 110;
+    g.drawHorizontalLine(footerY, 20, getWidth() - 20);
 }
 
 void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced(20);
     
-    auto buttonRow = area.removeFromTop(40);
-    loadButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
-    audioSettingsButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
-    midiSettingsButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
-    sineWaveButton.setBounds(buttonRow.removeFromLeft(120).reduced(2));
+    auto buttonRow = area.removeFromTop(50);
+    const int buttonWidth = 120;
+    const int buttonHeight = 30;
     
-    fileNameLabel.setBounds(area.removeFromTop(30));
+    auto buttonArea = buttonRow.withSizeKeepingCentre(buttonWidth * 5 + 20, buttonHeight);
     
-    auto infoArea = area.removeFromTop(80);
-    audioDeviceInfoLabel.setBounds(infoArea.removeFromTop(40));
-    midiDeviceInfoLabel.setBounds(infoArea);
+    loadButton.setBounds(buttonArea.removeFromLeft(buttonWidth).reduced(2));
+    audioSettingsButton.setBounds(buttonArea.removeFromLeft(buttonWidth).reduced(2));
+    midiSettingsButton.setBounds(buttonArea.removeFromLeft(buttonWidth).reduced(2));
+    sineWaveButton.setBounds(buttonArea.removeFromLeft(buttonWidth).reduced(2));
+    mapRangeButton.setBounds(buttonArea.removeFromLeft(buttonWidth).reduced(2));
     
-    cpuUsageLabel.setBounds(area.removeFromBottom(30));
+    auto contentArea = area.reduced(20, 10);
+    auto currentSampleArea = contentArea.removeFromTop(60);
+    fileNameLabel.setBounds(currentSampleArea.reduced(5));
+    
+    auto footerArea = area.removeFromBottom(100);
+    
+    auto audioFooter = footerArea.removeFromTop(40);
+    audioDeviceInfoLabel.setBounds(audioFooter.reduced(5));
+    
+    auto midiFooter = footerArea.removeFromTop(40);
+    midiDeviceInfoLabel.setBounds(midiFooter.reduced(5));
+    
+    cpuUsageLabel.setBounds(footerArea.removeFromBottom(30).removeFromRight(200));
 }
 
+//==============================================================================
 void MainComponent::buttonClicked(juce::Button* button)
 {
     if (button == &loadButton)
     {
-        printf("Load button clicked!\n");
-        fflush(stdout);
-        
 #ifdef _WIN32
         OPENFILENAMEA ofn = {0};
         char fileName[MAX_PATH] = {0};
@@ -193,23 +223,11 @@ void MainComponent::buttonClicked(juce::Button* button)
         ofn.lpstrFile = fileName;
         ofn.nMaxFile = MAX_PATH;
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
-        ofn.lpstrTitle = "Select a sample file";
-        
-        printf("Opening Windows file dialog...\n");
-        fflush(stdout);
         
         if (GetOpenFileNameA(&ofn))
         {
-            printf("File selected: %s\n", fileName);
-            fflush(stdout);
-            
             juce::File selectedFile(fileName);
             loadSampleFile(selectedFile);
-        }
-        else
-        {
-            printf("File dialog cancelled\n");
-            fflush(stdout);
         }
 #endif
     }
@@ -225,6 +243,10 @@ void MainComponent::buttonClicked(juce::Button* button)
     {
         toggleSineWave();
     }
+    else if (button == &mapRangeButton)
+    {
+        showMappingInterface();
+    }
 }
 
 void MainComponent::toggleSineWave()
@@ -236,26 +258,11 @@ void MainComponent::toggleSineWave()
         sineWavePhase = 0.0;
         sineWaveButton.setButtonText("Stop Sine Wave");
         sineWaveButton.setColour(juce::TextButton::buttonColourId, juce::Colours::lightcoral);
-        printf("Sine wave ON (440Hz) - checking audio device...\n");
-        
-        if (auto* currentDevice = deviceManager.getCurrentAudioDevice())
-        {
-            printf("  Audio device: %s\n", currentDevice->getName().toRawUTF8());
-            printf("  Sample rate: %.0f Hz\n", currentDevice->getCurrentSampleRate());
-            printf("  Buffer size: %d samples\n", currentDevice->getCurrentBufferSizeSamples());
-        }
-        else
-        {
-            printf("  WARNING: No audio device selected!\n");
-        }
-        fflush(stdout);
     }
     else
     {
         sineWaveButton.setButtonText("Test Sine Wave");
         sineWaveButton.setColour(juce::TextButton::buttonColourId, juce::Colours::lightblue);
-        printf("Sine wave OFF\n");
-        fflush(stdout);
     }
 }
 
@@ -264,26 +271,15 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
     if (source == &deviceManager)
     {
         updateDeviceInfo();
-        // forceStereoConfiguration();
     }
 }
 
+//==============================================================================
 void MainComponent::showAudioDeviceSettings()
 {
-    printf("Opening audio device settings...\n");
-    fflush(stdout);
-    
-    // Full featured selector - let user choose everything
     auto* selector = new juce::AudioDeviceSelectorComponent(
         deviceManager,
-        0,        // minAudioInputChannels
-        256,      // maxAudioInputChannels
-        0,        // minAudioOutputChannels
-        2,        // maxAudioOutputChannels
-        true,     // showMidiInputOptions
-        true,     // showMidiOutputSelector
-        false,    // showChannelsAsStereoPairs
-        false     // hideAdvancedOptionsWithButton
+        0, 256, 0, 2, true, true, false, false
     );
     
     selector->setSize(500, 400);
@@ -297,11 +293,7 @@ void MainComponent::showAudioDeviceSettings()
     options.resizable = false;
     
     options.launchAsync();
-    
     updateDeviceInfo();
-    
-    printf("Audio settings launched\n");
-    fflush(stdout);
 }
 
 void MainComponent::updateDeviceInfo()
@@ -314,16 +306,8 @@ void MainComponent::updateDeviceInfo()
         info += "Sample Rate: " + juce::String(currentDevice->getCurrentSampleRate()) + " Hz\n";
         info += "Buffer Size: " + juce::String(currentDevice->getCurrentBufferSizeSamples()) + " samples\n";
         
-        auto activeInputs = currentDevice->getActiveInputChannels();
         auto activeOutputs = currentDevice->getActiveOutputChannels();
-        
-        info += "Inputs: " + juce::String(activeInputs.countNumberOfSetBits()) + " channels\n";
         info += "Outputs: " + juce::String(activeOutputs.countNumberOfSetBits()) + " channels\n";
-        
-        if (auto* deviceType = deviceManager.getCurrentDeviceTypeObject())
-        {
-            info += "Type: " + deviceType->getTypeName();
-        }
     }
     else
     {
@@ -332,19 +316,10 @@ void MainComponent::updateDeviceInfo()
     
     audioDeviceInfoLabel.setText(info, juce::dontSendNotification);
     
-    // ✅ FIXED: Explicit isEmpty() check
     juce::String midiInfo = "MIDI: ";
-    if (midiInput != nullptr)
+    if (midiInput != nullptr && !currentMidiDeviceName.isEmpty())
     {
-        if (currentMidiDeviceName.isEmpty())
-        {
-            midiInfo += "No device selected";
-        }
-        else
-        {
-            midiInfo += currentMidiDeviceName;
-            midiInfo += " (Connected)";
-        }
+        midiInfo += currentMidiDeviceName + " (Connected)";
     }
     else
     {
@@ -357,77 +332,50 @@ void MainComponent::updateDeviceInfo()
     cpuUsageLabel.setText("CPU: " + juce::String(cpuUsage, 2) + "%", juce::dontSendNotification);
 }
 
+//==============================================================================
 void MainComponent::loadSampleFile(const juce::File& file)
 {
-    printf("Loading file: %s\n", file.getFullPathName().toRawUTF8());
-    fflush(stdout);
-    
-    sampler.clearSounds();
-    
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
     
     if (reader != nullptr)
     {
-        printf("File loaded successfully, creating sound...\n");
-        fflush(stdout);
+        auto* sample = new MappedSample();
+        sample->file = file;
+        sample->name = file.getFileName();
         
-        // Define note range: C3 (48) to C4 (60) - one full octave
-        int lowestNote = 48;  // C3
-        int highestNote = 60; // C4
-        int rootNote = 60;    // Middle C (original pitch)
-        
-        // Create note range
-        juce::BigInteger noteRange;
-        noteRange.setRange(0, 128, false);                 // Clear all notes
-        noteRange.setRange(lowestNote,                      // Start at C3
-                          (highestNote - lowestNote + 1),   // Number of notes
-                          true);                             // Enable this range
-        
-        auto* sound = new juce::SamplerSound(
-            "Sample",
-            *reader,
-            noteRange,           // Notes C3 through C4 will trigger the sample
-            rootNote,            // Middle C plays at original pitch
-            0.1,                 // attack
-            0.1,                 // release
-            10.0                 // max length
-        );
-        
-        sampler.addSound(sound);
-        fileNameLabel.setText(file.getFileName(), juce::dontSendNotification);
-        
-        printf("Sound mapped to notes %d-%d (C3 to C4)\n", lowestNote, highestNote);
-        printf("  Root note: %d (Middle C) - plays at original pitch\n", rootNote);
-        printf("  Notes below root: play slower/lower\n");
-        printf("  Notes above root: play faster/higher\n");
-        printf("  Range covers one full octave!\n");
-        fflush(stdout);
-        
-        // Play a short test note (200ms) so you know it loaded
-        printf(">>> PLAYING TEST NOTE (should stop in 200ms)\n");
-        sampler.noteOn(1, rootNote, 0.8f);
-
-        juce::Timer::callAfterDelay(200, [this]() {
-            printf(">>> TURNING TEST NOTE OFF\n");
-            sampler.noteOff(1, 60, 0.0f, true);
+        if (samples.isEmpty())
+        {
+            sample->lowNote = 36;
+            sample->highNote = 48;
+            sample->rootNote = 42;
+        }
+        else
+        {
+            auto* lastSample = samples.getLast();
+            sample->lowNote = lastSample->highNote + 1;
             
-            // Double-check by turning off all notes on all channels
-            for (int channel = 1; channel <= 16; ++channel)
+            if (sample->lowNote > 127)
             {
-                sampler.allNotesOff(channel, true);
+                delete sample;
+                return;
             }
             
-            printf("Test note ended - ready to play!\n");
-            fflush(stdout);
-        });
-    }
-    else
-    {
-        printf("Failed to load file: unsupported format\n");
-        fflush(stdout);
-        fileNameLabel.setText("Unsupported file format", juce::dontSendNotification);
+            int potentialHigh = sample->lowNote + 11;
+            sample->highNote = (potentialHigh < 127) ? potentialHigh : 127;
+            sample->rootNote = sample->lowNote + (sample->highNote - sample->lowNote) / 2;
+        }
+        
+        samples.add(sample);
+        updateSamplerSounds();
+        fileNameLabel.setText(file.getFileName(), juce::dontSendNotification);
     }
 }
+
+//==============================================================================
+// Add all other method implementations here (showMidiDeviceSettings, 
+// handleIncomingMidiMessage, SampleListModel methods, sliderValueChanged,
+// updateMappingUI, showMappingInterface, addSampleToMap, removeSelectedSample,
+// clearAllSamples, updateSamplerSounds, etc.)
 
 void MainComponent::updateMidiDeviceList()
 {
@@ -648,5 +596,352 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
         printf("MIDI Controller: %d, Value: %d\n", controller, value);
         fflush(stdout);
     }
+}
+
+int MainComponent::SampleListModel::getNumRows()
+{
+    return mainOwner.samples.size();
+}
+
+void MainComponent::SampleListModel::paintListBoxItem(int rowNumber, juce::Graphics& g, 
+                                                      int width, int height, bool rowIsSelected)
+{
+    if (rowNumber >= 0 && rowNumber < mainOwner.samples.size())
+    {
+        auto* sample = mainOwner.samples[rowNumber];
+        
+        if (rowIsSelected)
+            g.fillAll(juce::Colours::lightblue);
+        
+        juce::String text = sample->name;
+        text += " [" + juce::String(sample->lowNote) + "-" + 
+                juce::String(sample->highNote) + "] root:" + 
+                juce::String(sample->rootNote);
+        
+        g.setColour(juce::Colours::black);
+        g.drawText(text, 2, 0, width - 4, height, 
+                  juce::Justification::centredLeft, true);
+    }
+}
+
+void MainComponent::SampleListModel::selectedRowsChanged(int lastRowSelected)
+{
+    mainOwner.selectedSampleIndex = lastRowSelected;
+    mainOwner.updateMappingUI();
+}
+
+void MainComponent::sliderValueChanged(juce::Slider* slider)
+{
+    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    {
+        auto* sample = samples[selectedSampleIndex];
+        
+        if (slider == &lowNoteSlider)
+        {
+            int newLow = (int)lowNoteSlider.getValue();
+            // Manual bounds checking to avoid macro conflict
+            if (newLow < 0) newLow = 0;
+            if (newLow > 127) newLow = 127;
+            
+            if (newLow <= sample->highNote)
+            {
+                sample->lowNote = newLow;
+                printf("Sample %s: low note set to %d\n", sample->name.toRawUTF8(), newLow);
+            }
+            else
+            {
+                lowNoteSlider.setValue(sample->lowNote);
+            }
+        }
+        else if (slider == &highNoteSlider)
+        {
+            int newHigh = (int)highNoteSlider.getValue();
+            if (newHigh >= sample->lowNote)
+            {
+                sample->highNote = newHigh;
+                printf("Sample %s: high note set to %d\n", sample->name.toRawUTF8(), newHigh);
+            }
+            else
+            {
+                highNoteSlider.setValue(sample->highNote);
+            }
+        }
+        else if (slider == &rootNoteSlider)
+        {
+            sample->rootNote = (int)rootNoteSlider.getValue();
+            printf("Sample %s: root note set to %d\n", sample->name.toRawUTF8(), sample->rootNote);
+        }
+        
+        // Update sampler with new mapping
+        updateSamplerSounds();
+        sampleListBox.updateContent();
+    }
+    fflush(stdout);
+}
+
+void MainComponent::updateMappingUI()
+{
+    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    {
+        auto* sample = samples[selectedSampleIndex];
+        
+        lowNoteSlider.setValue(sample->lowNote, juce::dontSendNotification);
+        highNoteSlider.setValue(sample->highNote, juce::dontSendNotification);
+        rootNoteSlider.setValue(sample->rootNote, juce::dontSendNotification);
+        
+        lowNoteSlider.setEnabled(true);
+        highNoteSlider.setEnabled(true);
+        rootNoteSlider.setEnabled(true);
+    }
+    else
+    {
+        lowNoteSlider.setEnabled(false);
+        highNoteSlider.setEnabled(false);
+        rootNoteSlider.setEnabled(false);
+    }
+}
+
+// Also make sure you have these methods implemented (they might be missing too):
+
+void MainComponent::showMappingInterface()
+{
+    printf("Opening sample mapping interface...\n");
+    fflush(stdout);
+    
+    class MappingComponent : public juce::Component,
+                             public juce::Button::Listener
+    {
+    public:
+        MappingComponent(MainComponent& owner) : mainOwner(owner)
+        {
+            // Set up the UI
+            addAndMakeVisible(mainOwner.sampleListBox);
+            mainOwner.sampleListBox.setColour(juce::ListBox::backgroundColourId, juce::Colours::white);
+            
+            addAndMakeVisible(mainOwner.addSampleButton);
+            mainOwner.addSampleButton.addListener(this);
+            
+            addAndMakeVisible(mainOwner.removeSampleButton);
+            mainOwner.removeSampleButton.addListener(this);
+            
+            addAndMakeVisible(mainOwner.clearAllButton);
+            mainOwner.clearAllButton.addListener(this);
+            
+            // Note range controls
+            addAndMakeVisible(mainOwner.lowNoteLabel);
+            mainOwner.lowNoteLabel.attachToComponent(&mainOwner.lowNoteSlider, true);
+            
+            addAndMakeVisible(mainOwner.lowNoteSlider);
+            mainOwner.lowNoteSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+            mainOwner.lowNoteSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+            
+            addAndMakeVisible(mainOwner.highNoteLabel);
+            mainOwner.highNoteLabel.attachToComponent(&mainOwner.highNoteSlider, true);
+            
+            addAndMakeVisible(mainOwner.highNoteSlider);
+            mainOwner.highNoteSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+            mainOwner.highNoteSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+            
+            addAndMakeVisible(mainOwner.rootNoteLabel);
+            mainOwner.rootNoteLabel.attachToComponent(&mainOwner.rootNoteSlider, true);
+            
+            addAndMakeVisible(mainOwner.rootNoteSlider);
+            mainOwner.rootNoteSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+            mainOwner.rootNoteSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
+            
+            addAndMakeVisible(mainOwner.mappingInstructions);
+            mainOwner.mappingInstructions.setText(
+                "Instructions:\n"
+                "• Click 'Add Sample' to load audio files\n"
+                "• Select a sample from the list\n"
+                "• Adjust the note range sliders\n"
+                "• Low/High notes determine which keys trigger this sample\n"
+                "• Root note is the original pitch of the sample\n"
+                "• Multiple samples can be loaded for different key ranges",
+                juce::dontSendNotification);
+            mainOwner.mappingInstructions.setJustificationType(juce::Justification::topLeft);
+            
+            setSize(700, 500);
+            
+            // Update UI with current selection
+            mainOwner.updateMappingUI();
+        }
+        
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced(10);
+            
+            // Sample list on left (40% width)
+            auto listArea = area.removeFromLeft(area.getWidth() * 0.4f);
+            mainOwner.sampleListBox.setBounds(listArea.reduced(5));
+            
+            // Buttons below list
+            auto buttonArea = listArea.removeFromBottom(80).reduced(5);
+            mainOwner.addSampleButton.setBounds(buttonArea.removeFromTop(25).reduced(2));
+            mainOwner.removeSampleButton.setBounds(buttonArea.removeFromTop(25).reduced(2));
+            mainOwner.clearAllButton.setBounds(buttonArea.removeFromTop(25).reduced(2));
+            
+            // Controls on right (60% width)
+            auto controlsArea = area.reduced(10);
+            
+            // Sliders
+            auto sliderArea = controlsArea.removeFromTop(200);
+            mainOwner.lowNoteSlider.setBounds(sliderArea.removeFromTop(50).withTrimmedLeft(70));
+            mainOwner.highNoteSlider.setBounds(sliderArea.removeFromTop(50).withTrimmedLeft(70));
+            mainOwner.rootNoteSlider.setBounds(sliderArea.removeFromTop(50).withTrimmedLeft(70));
+            
+            // Instructions at bottom
+            mainOwner.mappingInstructions.setBounds(controlsArea.reduced(5));
+        }
+        
+        void buttonClicked(juce::Button* button) override
+        {
+            if (button == &mainOwner.addSampleButton)
+                mainOwner.addSampleToMap();
+            else if (button == &mainOwner.removeSampleButton)
+                mainOwner.removeSelectedSample();
+            else if (button == &mainOwner.clearAllButton)
+                mainOwner.clearAllSamples();
+        }
+        
+    private:
+        MainComponent& mainOwner;
+    };
+    
+    auto* mappingUI = new MappingComponent(*this);
+    
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(mappingUI);
+    options.dialogTitle = "Sample Mapping";
+    options.dialogBackgroundColour = juce::Colours::lightgrey;
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    
+    options.launchAsync();
+    
+    printf("Mapping interface launched\n");
+    fflush(stdout);
+}
+
+void MainComponent::addSampleToMap()
+{
+#ifdef _WIN32
+    OPENFILENAMEA ofn = {0};
+    char fileName[MAX_PATH] = {0};
+    
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = GetActiveWindow();
+    ofn.lpstrFilter = "Audio Files\0*.wav;*.aiff;*.mp3\0All Files\0*.*\0";
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR | OFN_ALLOWMULTISELECT;
+    ofn.lpstrTitle = "Select sample files";
+    
+    if (GetOpenFileNameA(&ofn))
+    {
+        // Handle multiple files
+        char* filePtr = fileName;
+        std::string directory(filePtr);
+        filePtr += directory.length() + 1;
+        
+        if (*filePtr == 0)
+        {
+            // Single file
+            juce::File selectedFile(fileName);
+            loadSampleFile(selectedFile);
+        }
+        else
+        {
+            // Multiple files
+            while (*filePtr)
+            {
+                std::string filename(filePtr);
+                juce::File fullPath = juce::File(directory).getChildFile(filename);
+                loadSampleFile(fullPath);
+                filePtr += filename.length() + 1;
+            }
+        }
+        
+        sampleListBox.updateContent();
+        updateMappingUI();
+    }
+#endif
+}
+
+void MainComponent::removeSelectedSample()
+{
+    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    {
+        juce::String sampleName = samples[selectedSampleIndex]->name;
+        samples.remove(selectedSampleIndex);
+        selectedSampleIndex = -1;
+        updateSamplerSounds();
+        sampleListBox.updateContent();
+        updateMappingUI();
+        
+        printf("Sample '%s' removed. Total samples: %d\n", 
+               sampleName.toRawUTF8(), samples.size());
+        fflush(stdout);
+    }
+}
+
+void MainComponent::clearAllSamples()
+{
+    samples.clear();
+    selectedSampleIndex = -1;
+    sampler.clearSounds();
+    sampleListBox.updateContent();
+    updateMappingUI();
+    
+    printf("All samples cleared\n");
+    fflush(stdout);
+}
+
+void MainComponent::updateSamplerSounds()
+{
+    sampler.clearSounds();
+    
+    for (auto* sample : samples)
+    {
+        if (sample == nullptr) continue;  // Safety check
+        
+        std::unique_ptr<juce::AudioFormatReader> reader(
+            formatManager.createReaderFor(sample->file));
+        
+        if (reader != nullptr)
+        {
+            juce::BigInteger noteRange;
+            noteRange.setRange(0, 128, false);
+            noteRange.setRange(sample->lowNote, 
+                              (sample->highNote - sample->lowNote + 1), 
+                              true);
+            
+            auto* sound = new juce::SamplerSound(
+                sample->name,
+                *reader,
+                noteRange,
+                sample->rootNote,
+                sample->attack,
+                sample->release,
+                10.0
+            );
+            
+            sampler.addSound(sound);
+            
+            printf("Added sound: %s (notes %d-%d, root %d)\n", 
+                   sample->name.toRawUTF8(),
+                   sample->lowNote, sample->highNote,
+                   sample->rootNote);
+        }
+        else
+        {
+            printf("Warning: Could not load sample: %s\n", 
+                   sample->file.getFullPathName().toRawUTF8());
+        }
+    }
+    
+    printf("Sampler updated with %d sounds\n", samples.size());
+    fflush(stdout);
 }
 
