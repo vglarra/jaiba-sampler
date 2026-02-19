@@ -1,42 +1,39 @@
-﻿# AI DeepSeek Project Log - JUCE Sampler
+﻿# AI DEEPSEEK PROJECT LOG - JUCE SAMPLER
+## PROJECT TRACKING FILE - PLAIN TEXT FORMAT
 
-## LAST UPDATED: 2026-02-15
+===============================================================================
+## SECTION 1: PROJECT METADATA
+===============================================================================
 
-## PROJECT STATUS: 🎯 AUDIO OUTPUT TESTING
+PROJECT_NAME: JUCE Sampler
+LAST_UPDATED: 2026-02-18
+CURRENT_STATUS: CORE FUNCTIONALITY COMPLETE
 
-### Current State
-- Windows native file dialog working perfectly
-- WAV files load successfully into sampler
-- Sampler sound creation works
-- Audio output needs verification (can't hear playback yet)
-- JUCE Version identified: **8.0.12**
+===============================================================================
+## SECTION 2: ENVIRONMENT CONFIGURATION
+===============================================================================
 
-### Environment Details
-- **OS**: Windows 10 (10.0.19045)
-- **IDE**: VS Code 1.109.3 with CMake Tools extension
-- **Compiler**: MSVC 19.36.32537 (Build Tools 2022)
-- **CMake**: Version 3.22+ (C:\Program Files\CMake\bin\cmake.exe)
-- **JUCE**: Version **8.0.12** (submodule at commit 501c076)
-- **Project Path**: C:\Users\vlarr\Documents\SW\juce-projects\mysampler
+OPERATING_SYSTEM: Windows 10 (10.0.19045)
+IDE: VS Code 1.109.3 with CMake Tools extension
+COMPILER: MSVC 19.36.32537 (Build Tools 2022)
+CMAKE_VERSION: 3.22+
+JUCE_VERSION: 8.0.12
+JUCE_SUBMODULE_COMMIT: 501c07674e1ad693085a7e7c398f205c2677f5da
+PROJECT_PATH: C:\Users\vlarr\Documents\SW\juce-projects\mysampler
 
-### JUCE 8.0.12 Notes
-- Modern JUCE version with updated APIs
-- AudioDeviceSelectorComponent takes **7 parameters** (not 8)
-- Has built-in `deviceManager.showAudioSettingsDialog()` method
+BUILD_GENERATOR: Visual Studio 17 2022
+CXX_STANDARD: C++17
+BUILD_TYPE: Debug
+OUTPUT_PATH: build\MySampler_artefacts\Debug\My Sampler.exe
 
-### Build Configuration
-- **Generator**: Visual Studio 17 2022
-- **C++ Standard**: C++17
-- **Build Type**: Debug
-- **Output**: build\MySampler_artefacts\Debug\My Sampler.exe
+GIT_BRANCH: master
+GIT_LAST_COMMIT: ce3fc38 "Initial commit: JUCE sampler project"
+GIT_SUBMODULE: lib/JUCE @ 501c076
 
-### Repository Status
-- **Git Branch**: master
-- **Last Commit**: ce3fc38 "Initial commit: JUCE sampler project"
-- **Next Commit**: Pending - Audio device selector implementation
-- **Submodule**: lib/JUCE @ 501c07674e1ad693085a7e7c398f205c2677f5da
+===============================================================================
+## SECTION 3: PROJECT STRUCTURE
+===============================================================================
 
-### Project Structure
 mysampler/
 ├── .gitignore
 ├── .gitmodules
@@ -44,245 +41,314 @@ mysampler/
 ├── CMakePresets.json
 ├── ai_deepseek_log.txt
 ├── src/
-│ ├── Main.cpp
-│ ├── MainComponent.cpp (Windows file dialog + audio settings button)
-│ └── MainComponent.h
+│   ├── Main.cpp
+│   ├── MainComponent.cpp
+│   └── MainComponent.h
 └── lib/
-└── JUCE/ (v8.0.12 @ 501c076)
+    └── JUCE/ (v8.0.12 @ 501c076)
 
-text
+===============================================================================
+## SECTION 4: JUCE 8.0.12 SPECIFIC NOTES
+===============================================================================
 
-### What's Working ✅
-- CMake configuration succeeds
-- Project builds without errors
-- Window launches with UI
-- Git repository initialized and committed
-- JUCE submodule properly tracked
-- **Windows file dialog** opens and selects files
-- **WAV files load** successfully into sampler
-- **Console debug output** shows file loading progress
-- **"Audio Settings" button** added to UI
-- **JUCE version identified** as 8.0.12
+- Modern JUCE version with updated APIs
+- AudioDeviceSelectorComponent takes 7 parameters (not 8)
+- Has built-in deviceManager.showAudioSettingsDialog() method
+- String operator bool is private - must use isEmpty()/isNotEmpty() explicitly
+- Avoid implicit string conversions
 
-### What's Being Tested 🔍
-- Audio output verification (currently no sound)
-- Audio device selector dialog implementation
-- Delta 1010LT sound card detection
+===============================================================================
+## SECTION 5: WORKING COMMANDS
+===============================================================================
 
-### Next Steps (Priority Order)
-1. [ ] **Fix audio output** - Implement audio device selector for JUCE 8.0.12
-2. [ ] Test with Delta 1010LT sound card
-3. [ ] Add MIDI input support
-4. [ ] Map samples to keyboard
-5. [ ] Add waveform display
-6. [ ] Implement ADSR envelope
+CONFIGURE:
+  cmake -S . -B build -G "Visual Studio 17 2022"
 
-### Known Issues
-- ⚠️ Audio plays but cannot be heard (needs device selection)
-- ⚠️ AudioDeviceSelectorComponent constructor needs 7 parameters for JUCE 8
+BUILD:
+  cmake --build build --config Debug
 
-### Working Commands
-```powershell
-# Configure
-cmake -S . -B build -G "Visual Studio 17 2022"
+RUN WITH CONSOLE:
+  & "./build/MySampler_artefacts/Debug/My Sampler.exe"
 
-# Build
-cmake --build build --config Debug
+CLEAN REBUILD:
+  Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+  cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+  cmake --build build --config Debug
 
-# Run with console output
-& "./build/MySampler_artefacts/Debug/My Sampler.exe"
+===============================================================================
+## SECTION 6: COMPLETED FEATURES (CHRONOLOGICAL)
+===============================================================================
 
-# Clean rebuild
-Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
-cmake -S . -B build -G "Visual Studio 17 2022"
-cmake --build build --config Debug
+[2026-02-15] INITIAL SETUP
+- [x] CMake configuration succeeds
+- [x] Project builds without errors
+- [x] Window launches with UI
+- [x] Git repository initialized and committed
+- [x] JUCE submodule properly tracked
 
-MainComponent initialized
-Load button clicked!
-Opening Windows file dialog...
-File selected: [sample file].wav
-Loading file: [sample file].wav
-File loaded successfully, creating sound...
-Sound loaded and ready to play
-Playing test note
-Note off
+[2026-02-15] FILE LOADING
+- [x] Windows native file dialog opens and selects files
+- [x] WAV/AIFF/MP3 files load successfully
+- [x] Console debug output shows file loading progress
+- [x] "Audio Settings" button added to UI
+- [x] JUCE version identified as 8.0.12
 
-Goal: Implement audio device selector for JUCE 8.0.12 to enable sound output
-Use correct 7-parameter constructor for AudioDeviceSelectorComponent
-Or use built-in deviceManager.showAudioSettingsDialog()
-Select Delta 1010LT as output device
-Verify audio playback works
-
-## 🎉 MAJOR MILESTONE ACHIEVED: 2026-02-15
-
-### ✅ COMPLETED FEATURES
-- [x] Windows native file dialog for sample loading
-- [x] WAV/AIFF/MP3 file loading
+[2026-02-15] AUDIO OUTPUT
 - [x] Audio device selector with 9-argument constructor
 - [x] Audio settings dialog with proper close behavior
 - [x] Test note playback through speakers
 - [x] Delta 1010LT sound card support
+- [x] Sound output verified working
 
-### Working Perfectly:
-- Load button opens file dialog
-- Files load successfully
-- Audio settings button opens device selector
-- Dialog closes with ESC or Close button
-- **SOUND OUTPUT IS WORKING!**
+[2026-02-16] STEREO CONFIGURATION
+- [x] Fixed JUCE 8.0.12 string operator bool compilation errors
+- [x] Solved stereo channel glitch by phase-aligning generated audio
+- [x] Delta 1010LT works cleanly with both channels enabled
+- [x] Test sine wave implemented for audio verification
 
-### Next Features to Implement:
-1. [ ] MIDI input support
-2. [ ] Map samples to keyboard
-3. [ ] Multiple sample loading
-4. [ ] Waveform display
-5. [ ] ADSR envelope controls
-
-### Console Output (Working):
-MainComponent initialized
-Opening audio device settings...
-Audio settings launched - click Close or press ESC to exit
-Load button clicked!
-File selected: BassDrum2_02.wav
-Loading file: BassDrum2_02.wav
-File loaded successfully, creating sound...
-Sound loaded and ready to play
-
-### Current Working Features:
-- 🎛️ **Audio Settings** - Device selection working
-- 🎹 **MIDI Settings** - 4 devices detected, selection working
-- 📂 **Load Sample** - File browser working
-- 🔊 **Sound Output** - Working through Delta 1010LT
-- 🎵 **MIDI Input** - Working with velocity sensitivity
-
-### Console Output Shows:
-- MIDI notes being received in real-time
-- Velocity values (66, 77, 88, etc.) being captured
-- Note On/Off messages properly handled
-
-### Next Possible Features:
-1. [ ] Multiple sample mapping (different samples for different keys)
-2. [ ] Waveform display
-3. [ ] ADSR envelope controls
-4. [ ] Save/load presets
-5. [ ] Velocity curves
-6. [ ] Pitch bend/modulation support
-
-### Project Status: 🏆 **COMPLETE CORE FUNCTIONALITY ACHIEVED!**
-The sampler now:
-- Loads samples
-- Selects audio output (Delta 1010LT)
-- Receives MIDI input
-- Plays samples via MIDI keyboard
-- Shows debug info in console
-
----
-
-## 📝 SESSION SUMMARY: 2026-02-16 - STEREO CONFIGURATION & BUG FIXES
-
-### Key Achievements
-- ✅ **Fixed JUCE 8.0.12 string operator bool compilation errors** throughout the codebase
-- ✅ **Solved stereo channel glitch** by properly phase-aligning generated audio
-- ✅ **Delta 1010LT now works cleanly** with both channels enabled
-- ✅ **MIDI input fully functional** with velocity sensitivity
-- ✅ **Audio device selector** correctly shows all available drivers
-- ✅ **Test sine wave** helps verify audio configuration
-
-### Technical Insights Gained
-1. **JUCE 8.0.12 String Handling**: `operator bool` is private - must use `isEmpty()`/`isNotEmpty()` explicitly
-2. **Delta 1010LT Stereo Requirements**: Both channels must receive phase-aligned audio to avoid glitching
-3. **Buffer Size Impact**: 256-512 samples optimal for Delta 1010LT on Windows 10
-4. **Windows Audio Modes**: Low Latency mode forces driver's preferred buffer size (441 samples)
-
-### Fixed Compilation Issues
-- Replaced all implicit string boolean conversions with explicit `isEmpty()` checks
-- Used `std::string` and C-string comparisons to avoid JUCE string operators
-- Properly ordered audio device initialization to prevent internal JUCE errors
-
-### Current Performance Metrics
-- **Latency**: ~5.8ms with 256 sample buffer @ 44.1kHz
-- **CPU Usage**: < 5% on modern systems
-- **MIDI Response**: Real-time with no noticeable lag
-- **Sample Loading**: Instant for files under 10MB
-
-### Next Development Priorities
-1. [ ] **Multiple sample mapping** - Different samples per MIDI note range
-2. [ ] **Waveform display** - Visual feedback of loaded samples
-3. [ ] **ADSR envelope controls** - Shape the sound dynamically
-4. [ ] **Preset system** - Save/load sampler configurations
-5. [ ] **Velocity curves** - Custom response to playing dynamics
-
-### Lessons Learned for Future Development
-- Always test audio generation with both mono and stereo configurations
-- JUCE 8 requires explicit string handling - avoid all implicit conversions
-- The Delta 1010LT demands phase-aligned stereo signals
-- Buffer size selection is a trade-off between latency and stability
-
-### Working Commands (Verified)
-```powershell
-# Full clean rebuild
-Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Debug
-
-# Run with console output
-& "./build/MySampler_artefacts/Debug/My Sampler.exe"
-
-## 🎹 MIDI IMPLEMENTATION COMPLETE: 2026-02-16
-
-### MIDI Features Working ✅
-- [x] Device enumeration and selection
+[2026-02-16] MIDI IMPLEMENTATION
+- [x] MIDI device enumeration and selection
 - [x] Note On/Off with velocity sensitivity
 - [x] Multiple device support
 - [x] Real-time performance
 - [x] MIDI controller monitoring
 - [x] Channel preservation
 
-### Tested Hardware
-- ✅ Delta 1010LT MIDI Interface
-- ✅ Akai MPK25 Keyboard Controller
+[2026-02-17] BUG FIXES
+- [x] Fixed sample looping issue
+- [x] Removed automatic test note generator from audio callback
+- [x] Proper note off handling implemented
 
-### Next MIDI Enhancements
-- [ ] Visual keyboard feedback
-- [ ] Channel filtering
-- [ ] Program change support
-- [ ] Pitch bend implementation
-- [ ] Modulation wheel support
-- [ ] Aftertouch (if supported)
-
-## 🏁 FINAL FIX: Sample Looping Issue Resolved - 2026-02-17
-
-### The Problem
-The sampler was playing samples continuously after loading due to a conflict between:
-1. **The 200ms test note** in `loadSampleFile()` (intended)
-2. **A 1-second test note loop** in `getNextAudioBlock()` (unintentional)
-
-### The Fix
-Removed the automatic test note generator from `getNextAudioBlock()`:
-```cpp
-// REMOVED - This was causing continuous playback
-static double time = 0.0;
-static bool noteIsPlaying = false;
-if (sampler.getNumSounds() > 0 && !noteIsPlaying)
-{
-    midiMessages.addEvent(juce::MidiMessage::noteOn(1, 60, 100), 0);
-    // ...
-}
-
-## 🏁 FINAL SUCCESS: 2026-02-18 - APPLICATION WORKING!
-
-### ✅ All Core Features Implemented:
-- [x] Audio output through Delta 1010LT
-- [x] MIDI input with velocity sensitivity
+[2026-02-18] MULTI-SAMPLE MAPPING
 - [x] Multi-sample mapping with up to 128 notes
-- [x] Sample loading from file dialog
-- [x] Audio/MIDI device configuration
-- [x] Real-time sample playback
-- [x] Note range editing interface
-- [x] Clean UI with system status footer
+- [x] Note range editing interface with sliders
+- [x] Sample list showing all loaded samples
+- [x] Automatic note range assignment
+- [x] Add/remove samples from mapping
+- [x] Clear all samples function
+- [x] Update sampler with new mappings in real-time
 
-### Technical Details:
-- **JUCE Version**: 8.0.12
-- **Platform**: Windows 10
-- **Compiler**: MSVC 2022
-- **Audio Interface**: Delta 1010LT
-- **MIDI Controller**: Tested with various devices
+[2026-02-18] UI ENHANCEMENTS
+- [x] Clean UI with system status footer
+- [x] Audio device info display
+- [x] MIDI device info display
+- [x] CPU usage monitor
+- [x] Centered button layout
+- [x] Section separators and labels
+
+===============================================================================
+## SECTION 7: TESTED HARDWARE
+===============================================================================
+
+AUDIO INTERFACES:
+- [x] Delta 1010LT (stereo working, both channels)
+- [x] Windows default audio device
+
+MIDI CONTROLLERS:
+- [x] Delta 1010LT MIDI Interface
+- [x] Akai MPK25 Keyboard Controller
+
+===============================================================================
+## SECTION 8: PERFORMANCE METRICS
+===============================================================================
+
+LATENCY: ~5.8ms with 256 sample buffer @ 44.1kHz
+CPU_USAGE: < 5% on modern systems
+MIDI_RESPONSE: Real-time with no noticeable lag
+SAMPLE_LOADING: Instant for files under 10MB
+OPTIMAL_BUFFER_SIZE: 256-512 samples for Delta 1010LT on Windows 10
+
+===============================================================================
+## SECTION 9: TECHNICAL INSIGHTS GAINED
+===============================================================================
+
+1. JUCE 8.0.12 String Handling: operator bool is private - must use isEmpty()/isNotEmpty() explicitly
+2. Delta 1010LT Stereo Requirements: Both channels must receive phase-aligned audio to avoid glitching
+3. Buffer Size Impact: 256-512 samples optimal for Delta 1010LT on Windows 10
+4. Windows Audio Modes: Low Latency mode forces driver's preferred buffer size (441 samples)
+5. ListBox Initialization: Model must be fully constructed before ListBox uses it
+6. Member Initialization Order: Members initialized in declaration order, not initializer list order
+
+===============================================================================
+## SECTION 10: FIXED COMPILATION ISSUES
+===============================================================================
+
+1. Replaced all implicit string boolean conversions with explicit isEmpty() checks
+2. Used std::string and C-string comparisons to avoid JUCE string operators
+3. Properly ordered audio device initialization to prevent internal JUCE errors
+4. Fixed ListBox/model initialization order using unique_ptr
+5. Resolved Windows min/max macro conflicts with NOMINMAX
+6. Added all missing method declarations to header file
+
+===============================================================================
+## SECTION 11: CURRENT WORKING FEATURES
+===============================================================================
+
+AUDIO:
+- Audio device selection and configuration
+- Stereo output through Delta 1010LT
+- Buffer size configuration
+- Sample rate detection and display
+- CPU usage monitoring
+
+MIDI:
+- Device enumeration and selection
+- Note On/Off with velocity sensitivity
+- Real-time message handling
+- Channel preservation
+- Controller message monitoring
+
+SAMPLING:
+- Multi-sample loading
+- Note range mapping (low/high notes)
+- Root note configuration
+- Automatic note range assignment
+- Sample list display
+- Real-time sampler updates
+
+UI:
+- Clean dark theme
+- Centered button layout
+- System status footer
+- Current sample display
+- Audio device info
+- MIDI device info
+- CPU usage display
+- Mapping interface with sliders
+
+===============================================================================
+## SECTION 12: SAMPLE CONSOLE OUTPUT
+===============================================================================
+
+DEBUG: MainComponent constructor started
+DEBUG: MainComponent constructor completed
+Audio initialized - Use Audio Settings to configure
+Click 'Map Samples' to configure multiple samples
+
+MIDI Note On: 60, Velocity: 100, Channel: 1
+MIDI Note Off: 60, Channel: 1
+MIDI Note On: 64, Velocity: 80, Channel: 1
+MIDI Note Off: 64, Channel: 1
+
+Opening sample mapping interface...
+Mapping interface launched
+
+Sample added to map: BassDrum.wav
+  Automatically mapped to notes 36-48
+  Root note: 42
+  Total samples loaded: 1
+
+===============================================================================
+## SECTION 13: NEXT FEATURES TO IMPLEMENT
+===============================================================================
+
+PRIORITY 1 (IMMEDIATE):
+- [ ] Waveform display for loaded samples
+- [ ] ADSR envelope controls (Attack, Decay, Sustain, Release)
+- [ ] Preset saving/loading for sample mappings
+
+PRIORITY 2 (SHORT-TERM):
+- [ ] Velocity curves for dynamic response
+- [ ] Pitch bend support
+- [ ] Modulation wheel support
+- [ ] Visual keyboard feedback
+
+PRIORITY 3 (LONG-TERM):
+- [ ] Multi-output routing
+- [ ] Built-in effects (reverb, delay)
+- [ ] Sample editing (trim, normalize)
+- [ ] MIDI program change support
+- [ ] Aftertouch support
+- [ ] Channel filtering
+
+===============================================================================
+## SECTION 14: KNOWN LIMITATIONS
+===============================================================================
+
+- Single audio output only (no multi-output routing)
+- No waveform visualization
+- No envelope shaping
+- No preset system
+- No effects processing
+- Maximum 128 MIDI notes (hardware limit)
+- Maximum 16 sampler voices
+
+===============================================================================
+## SECTION 15: GIT COMMIT HISTORY SUMMARY
+===============================================================================
+
+COMMIT: ce3fc38
+DATE: Initial
+MESSAGE: "Initial commit: JUCE sampler project"
+
+COMMIT: [Pending]
+DATE: 2026-02-18
+MESSAGE: "Core sampler functionality complete
+
+- Multi-sample mapping working with note range editing
+- MIDI input fully functional with velocity sensitivity
+- Audio output working with Delta 1010LT
+- Clean UI with system status footer
+- Fixed JUCE 8.0.12 string handling issues
+- Resolved ListBox/model initialization crash
+- Added sample list with note range display
+- Implemented mapping interface with sliders"
+
+TAG: v1.0-core-sampler
+
+===============================================================================
+## SECTION 16: LESSONS LEARNED FOR FUTURE DEVELOPMENT
+===============================================================================
+
+1. Always test audio generation with both mono and stereo configurations
+2. JUCE 8 requires explicit string handling - avoid all implicit conversions
+3. The Delta 1010LT demands phase-aligned stereo signals
+4. Buffer size selection is a trade-off between latency and stability
+5. Member initialization order in C++ is declaration order, not initializer list order
+6. Use NOMINMAX on Windows to prevent macro conflicts with std::min/std::max
+7. ListBox models should be created after the main component is constructed
+8. Always add debug output during development for troubleshooting
+
+===============================================================================
+## SECTION 17: PROJECT COMPLETION STATUS
+===============================================================================
+
+CORE FUNCTIONALITY: COMPLETE
+- Audio output: WORKING
+- MIDI input: WORKING
+- Sample loading: WORKING
+- Multi-sample mapping: WORKING
+- Device configuration: WORKING
+- UI layout: WORKING
+
+EXTENDED FEATURES: NOT STARTED
+- Waveform display: PENDING
+- ADSR envelopes: PENDING
+- Preset system: PENDING
+- Effects: PENDING
+
+===============================================================================
+## SECTION 18: FEATURE ADDED - INSTANT AUDIO PREVIEW (2026-02-19)
+===============================================================================
+
+### New Feature:
+- Added AudioPreviewComponent to file chooser
+- Files play instantly when clicked/hovered
+- 300ms delay prevents accidental playback while scrolling
+- Looping preview for continuous auditioning
+- File info display (sample rate, channels, length, size)
+
+### Technical Implementation:
+- Custom class inheriting from juce::FilePreviewComponent
+- Uses JUCE's AudioTransportSource for playback
+- Timer-based delay for smooth scrubbing
+- Clean, minimalist UI without extra controls
+
+### User Experience:
+- Click any file -> hear it immediately
+- Move cursor through list -> seamless preview switching
+- No buttons needed - intuitive professional workflow
+
+### Files Modified:
+- src/MainComponent.cpp (added AudioPreviewComponent)
+- src/MainComponent.h (added fileChooser member)

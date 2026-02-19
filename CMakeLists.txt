@@ -35,5 +35,10 @@ target_link_libraries(MySampler
         juce::juce_gui_extra
 )
 
+# Add Windows-specific libraries HERE (after JUCE modules)
+if (WIN32)
+    target_link_libraries(MySampler PRIVATE vfw32.lib)
+endif()
+
 # Generate JUCE header
 juce_generate_juce_header(MySampler)

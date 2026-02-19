@@ -83,6 +83,7 @@ private:
     juce::Label audioDeviceInfoLabel;
     juce::Label midiDeviceInfoLabel;
     juce::Label cpuUsageLabel;
+    std::unique_ptr<juce::FileChooser> fileChooser;
     
     //==============================================================================
     // Audio components

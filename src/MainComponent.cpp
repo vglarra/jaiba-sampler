@@ -9,7 +9,81 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
+#include <vfw.h>  // Add this for GetOpenFileNamePreviewA
 #endif
+
+
+class AudioPreviewComponent : public juce::FilePreviewComponent
+{
+public:
+    AudioPreviewComponent(juce::AudioFormatManager& fm) : formatManager(fm)
+    {
+        addAndMakeVisible(playButton);
+        addAndMakeVisible(stopButton);
+        addAndMakeVisible(infoLabel);
+        
+        playButton.onClick = [this] { playPreview(); };
+        stopButton.onClick = [this] { stopPreview(); };
+        
+        // Initialize audio for preview
+        deviceManager.initialiseWithDefaultDevices(0, 2);
+        deviceManager.addAudioCallback(&audioSourcePlayer);
+        audioSourcePlayer.setSource(&transportSource);
+    }
+    
+    void selectedFileChanged(const juce::File& newFile) override
+    {
+        currentFile = newFile;
+        if (newFile.existsAsFile())
+        {
+            auto* reader = formatManager.createReaderFor(newFile);
+            if (reader)
+            {
+                double lengthInSeconds = reader->lengthInSamples / reader->sampleRate;
+                infoLabel.setText(
+                    newFile.getFileName() + "\n" +
+                    juce::String(reader->sampleRate / 1000.0, 1) + " kHz, " +
+                    juce::String(reader->numChannels) + " ch, " +
+                    juce::String(lengthInSeconds, 1) + " s",
+                    juce::dontSendNotification
+                );
+                delete reader;
+            }
+            
+            // AUTO-PLAY when file is selected!
+            playPreview();
+        }
+    }
+    
+private:
+    void playPreview()
+    {
+        stopPreview();  // Stop any currently playing preview
+        
+        auto* reader = formatManager.createReaderFor(currentFile);
+        if (reader)
+        {
+            auto* source = new juce::AudioFormatReaderSource(reader, true);
+            transportSource.setSource(source, 0, nullptr, reader->sampleRate);
+            transportSource.start();
+        }
+    }
+    
+    void stopPreview()
+    {
+        transportSource.stop();
+        transportSource.setSource(nullptr);
+    }
+    
+    juce::AudioFormatManager& formatManager;
+    juce::File currentFile;
+    juce::TextButton playButton{"Play"}, stopButton{"Stop"};
+    juce::Label infoLabel;
+    juce::AudioDeviceManager deviceManager;
+    juce::AudioSourcePlayer audioSourcePlayer;
+    juce::AudioTransportSource transportSource;
+};
+
 
 //==============================================================================
 MainComponent::MainComponent()
@@ -211,7 +285,7 @@ void MainComponent::resized()
 //==============================================================================
 void MainComponent::buttonClicked(juce::Button* button)
 {
-    if (button == &loadButton)
+/*     if (button == &loadButton)
     {
 #ifdef _WIN32
         OPENFILENAMEA ofn = {0};
@@ -224,12 +298,37 @@ void MainComponent::buttonClicked(juce::Button* button)
         ofn.nMaxFile = MAX_PATH;
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
         
-        if (GetOpenFileNameA(&ofn))
+        if (GetOpenFileNamePreviewA(&ofn))
         {
             juce::File selectedFile(fileName);
             loadSampleFile(selectedFile);
         }
 #endif
+    } */
+
+    if (button == &loadButton)
+    {
+        auto* previewComp = new AudioPreviewComponent(formatManager);
+        
+        fileChooser = std::make_unique<juce::FileChooser>(
+            "Select samples",
+            juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+            "*.wav;*.aiff;*.mp3"
+        );
+        
+        fileChooser->launchAsync(
+            juce::FileBrowserComponent::openMode | 
+            juce::FileBrowserComponent::canSelectMultipleItems,
+            [this](const juce::FileChooser& fc)
+            {
+                auto results = fc.getResults();
+                for (auto& file : results)
+                {
+                    loadSampleFile(file);
+                }
+            },
+            previewComp  // Now this works because AudioPreviewComponent is a FilePreviewComponent
+        );
     }
     else if (button == &audioSettingsButton)
     {
