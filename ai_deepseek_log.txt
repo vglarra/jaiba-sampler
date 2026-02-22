@@ -352,3 +352,483 @@ EXTENDED FEATURES: NOT STARTED
 ### Files Modified:
 - src/MainComponent.cpp (added AudioPreviewComponent)
 - src/MainComponent.h (added fileChooser member)
+
+
+Project: Jaiva Sampler V001 - UI Redesign
+
+I need you to modify my JUCE sampler application to match this UI layout:
+
+## Window Title
+- Set window title to "Jaiva Sampler V001"
+
+## Top Bar
+- Single button on the left side labeled "Menu"
+- When clicked, it opens a dropdown/popup menu with two options:
+  * "Audio Settings" - opens audio device configuration dialog
+  * "MIDI Settings" - opens MIDI input selection dialog
+- On the right side of top bar, add a button labeled "Test tone"
+
+## Main Body (Center Area)
+- Large central area showing "Sample view" (placeholder for waveform)
+- At the TOP LEFT of the sample view area: a "+" button
+  * Clicking this opens file chooser to load a sample
+  * When a sample is selected, it becomes the CURRENT SAMPLE
+  * The directory containing this sample becomes the "current folder"
+
+- At the TOP RIGHT of the sample view area: two buttons side by side
+  * "Prev" button (left arrow or text)
+  * "Next" button (right arrow or text)
+  * These buttons navigate through audio files in the CURRENT FOLDER
+  * After loading a sample via "+", the folder is scanned for audio files
+  * Prev/Next load the previous/next audio files in that same folder
+  * This allows browsing through all samples in a folder without opening file chooser again
+  * Should wrap around at folder boundaries
+
+## Footer (Bottom Bar)
+- Left side: Two lines of information
+  * Top line: Sound card info (audio device name, sample rate, buffer size)
+  * Bottom line: MIDI info (connected device name)
+- Right side: CPU usage percentage (format: "CPU X.XX%")
+  * Update in real-time (every 500ms)
+  * Match the style shown: "CPU 0.23"
+
+## Visual Style
+- Dark theme (current dark grey background works)
+- Buttons should have subtle styling
+- Sample view area can initially be empty or show a placeholder
+- Footer text should be smaller font (10-11pt) in light grey
+
+## Expected Behavior
+1. Click Menu → Audio Settings: opens JUCE audio device selector
+2. Click Menu → MIDI Settings: opens MIDI device selector
+3. Click Test tone: toggles sine wave test tone (already implemented)
+4. Click + in sample view: opens file chooser to select a sample
+5. After loading a sample, the folder is scanned for other audio files
+6. Prev/Next buttons navigate through files in that folder
+7. Footer updates show current device info
+8. CPU usage updates in real-time
+
+## Important Clarification
+- There is NO playlist system - the Prev/Next simply browse the file system
+- When you click + and select a file, that file's directory becomes the navigation context
+- Prev/Next then move to previous/next audio files in that same directory
+- This allows quick browsing through a folder of samples without repeatedly opening file chooser
+
+===============================================================================
+
+SECTION 15: GIT COMMIT HISTORY SUMMARY
+===============================================================================
+
+COMMIT: ce3fc38
+DATE: 2026-02-15
+MESSAGE: "Initial commit: JUCE sampler project"
+
+COMMIT: a7b3e92
+DATE: 2026-02-18
+MESSAGE: "Core sampler functionality complete
+
+Multi-sample mapping working with note range editing
+
+MIDI input fully functional with velocity sensitivity
+
+Audio output working with Delta 1010LT
+
+Clean UI with system status footer
+
+Fixed JUCE 8.0.12 string handling issues
+
+Resolved ListBox/model initialization crash
+
+Added sample list with note range display
+
+Implemented mapping interface with sliders"
+
+TAG: v1.0-core-sampler
+
+COMMIT: 8d4f1a7
+DATE: 2026-02-19
+MESSAGE: "Add instant audio preview to file chooser
+
+Created AudioPreviewComponent for file browser
+
+Files auto-play when selected with 300ms delay
+
+Display file info (sample rate, channels, duration)
+
+Looping preview for continuous auditioning
+
+Seamless preview switching while scrolling"
+
+COMMIT: 9b2e5c3
+DATE: 2026-02-22
+MESSAGE: "UI redesign: Implement card-based sample view with responsive layout
+
+Created SampleCard component encapsulating sample view controls
+
+Added 8cm x 4cm sample view area with proper scaling
+
+Implemented + button (left) and Prev/Next navigation (right) on card top
+
+Added sample name display (bottom left) and duration display (bottom right)
+
+Fixed footer positioning to stay at bottom of window
+
+Added proper margin handling (10px) around card content
+
+Made sample view area width responsive to card size
+
+Added visual card styling with rounded corners and borders
+
+Integrated duration calculation and display from loaded samples
+
+Optimized layout with proper spacing between UI elements
+
+Technical improvements:
+
+Separated sample card logic into dedicated component
+
+Responsive design that adapts to window resizing
+
+Clean separation of concerns between MainComponent and SampleCard
+
+Proper thread-safe sample duration display"
+
+TAG: v1.1-ui-redesign
+
+===============================================================================
+
+SECTION 6: COMPLETED FEATURES (CHRONOLOGICAL)
+===============================================================================
+
+[2026-02-15] INITIAL SETUP
+
+CMake configuration succeeds
+
+Project builds without errors
+
+Window launches with UI
+
+Git repository initialized and committed
+
+JUCE submodule properly tracked
+
+[2026-02-15] FILE LOADING
+
+Windows native file dialog opens and selects files
+
+WAV/AIFF/MP3 files load successfully
+
+Console debug output shows file loading progress
+
+"Audio Settings" button added to UI
+
+JUCE version identified as 8.0.12
+
+[2026-02-15] AUDIO OUTPUT
+
+Audio device selector with 9-argument constructor
+
+Audio settings dialog with proper close behavior
+
+Test note playback through speakers
+
+Delta 1010LT sound card support
+
+Sound output verified working
+
+[2026-02-16] STEREO CONFIGURATION
+
+Fixed JUCE 8.0.12 string operator bool compilation errors
+
+Solved stereo channel glitch by phase-aligning generated audio
+
+Delta 1010LT works cleanly with both channels enabled
+
+Test sine wave implemented for audio verification
+
+[2026-02-16] MIDI IMPLEMENTATION
+
+MIDI device enumeration and selection
+
+Note On/Off with velocity sensitivity
+
+Multiple device support
+
+Real-time performance
+
+MIDI controller monitoring
+
+Channel preservation
+
+[2026-02-17] BUG FIXES
+
+Fixed sample looping issue
+
+Removed automatic test note generator from audio callback
+
+Proper note off handling implemented
+
+[2026-02-18] MULTI-SAMPLE MAPPING
+
+Multi-sample mapping with up to 128 notes
+
+Note range editing interface with sliders
+
+Sample list showing all loaded samples
+
+Automatic note range assignment
+
+Add/remove samples from mapping
+
+Clear all samples function
+
+Update sampler with new mappings in real-time
+
+[2026-02-18] UI ENHANCEMENTS
+
+Clean UI with system status footer
+
+Audio device info display
+
+MIDI device info display
+
+CPU usage monitor
+
+Centered button layout
+
+Section separators and labels
+
+[2026-02-19] AUDIO PREVIEW
+
+Instant audio preview in file chooser
+
+Auto-play on file selection with delay
+
+File info display (sample rate, channels, duration)
+
+Looping preview capability
+
+[2026-02-22] UI REDESIGN - CARD-BASED SAMPLE VIEW
+
+Created reusable SampleCard component
+
+8cm x 4cm sample view area with proper scaling
+
+Integrated + button, Prev/Next navigation on card
+
+Sample name display (bottom left)
+
+Duration display (bottom right) with auto-calculation
+
+Responsive card layout with 10px margins
+
+Fixed footer positioning
+
+Visual card styling with rounded corners and borders
+
+Proper spacing between UI elements
+
+===============================================================================
+
+SECTION 18: FEATURE ADDED - INSTANT AUDIO PREVIEW (2026-02-19)
+===============================================================================
+
+New Feature:
+Added AudioPreviewComponent to file chooser
+
+Files play instantly when clicked/hovered
+
+300ms delay prevents accidental playback while scrolling
+
+Looping preview for continuous auditioning
+
+File info display (sample rate, channels, length, size)
+
+Technical Implementation:
+Custom class inheriting from juce::FilePreviewComponent
+
+Uses JUCE's AudioTransportSource for playback
+
+Timer-based delay for smooth scrubbing
+
+Clean, minimalist UI without extra controls
+
+User Experience:
+Click any file -> hear it immediately
+
+Move cursor through list -> seamless preview switching
+
+No buttons needed - intuitive professional workflow
+
+Files Modified:
+src/UIComponents.h/cpp (added AudioPreviewComponent)
+
+src/MainComponent.cpp (integrated preview in file chooser)
+
+===============================================================================
+
+SECTION 19: FEATURE ADDED - CARD-BASED SAMPLE VIEW UI (2026-02-22)
+===============================================================================
+
+New Feature:
+Complete UI redesign with card-based sample view
+
+Created dedicated SampleCard component encapsulating all sample-related controls
+
+Responsive 8cm x 4cm sample view area that scales with window size
+
+Integrated controls directly on card:
+
+"+" button top-left for loading samples
+
+"Prev"/"Next" buttons top-right for folder navigation
+
+Sample name display bottom-left
+
+Duration display bottom-right (auto-calculated from audio file)
+
+Proper 10px margins around all card content
+
+Visual enhancements with rounded corners and borders
+
+Technical Implementation:
+New SampleCard class inheriting from juce::Component
+
+Smart layout with proper spacing between elements
+
+Duration calculation from AudioFormatReader
+
+Thread-safe UI updates via MessageManager
+
+Responsive design adapting to window resizing
+
+Clean separation of concerns from MainComponent
+
+User Experience:
+Professional card-based interface
+
+Clear visual hierarchy
+
+Intuitive control placement
+
+Real-time duration feedback
+
+Consistent spacing and margins
+
+Files Modified:
+src/SampleCard.h (new component)
+
+src/MainComponent.h (integrated SampleCard)
+
+src/MainComponent.cpp (updated layout and sample loading)
+
+src/MainComponent.cpp (added duration display functionality)
+
+Files Created:
+src/SampleCard.h - New component for card-based UI
+
+===============================================================================
+
+SECTION 20: PROJECT STRUCTURE (UPDATED)
+===============================================================================
+
+mysampler/
+├── .gitignore
+├── .gitmodules
+├── CMakeLists.txt
+├── CMakePresets.json
+├── ai_deepseek_log.txt
+├── src/
+│ ├── Main.cpp
+│ ├── MainComponent.cpp
+│ ├── MainComponent.h
+│ ├── SampleCard.h # New card component
+│ ├── UIComponents.cpp
+│ └── UIComponents.h
+└── lib/
+└── JUCE/ (v8.0.12 @ 501c076)
+
+===============================================================================
+
+SECTION 21: NEXT FEATURES TO IMPLEMENT (UPDATED)
+===============================================================================
+
+PRIORITY 1 (IMMEDIATE):
+
+Waveform display for loaded samples (to be integrated into SampleCard)
+
+ADSR envelope controls (Attack, Decay, Sustain, Release)
+
+Preset saving/loading for sample mappings
+
+PRIORITY 2 (SHORT-TERM):
+
+Velocity curves for dynamic response
+
+Pitch bend support
+
+Modulation wheel support
+
+Visual keyboard feedback
+
+Multiple sample cards for layer support
+
+PRIORITY 3 (LONG-TERM):
+
+Multi-output routing
+
+Built-in effects (reverb, delay)
+
+Sample editing (trim, normalize)
+
+MIDI program change support
+
+Aftertouch support
+
+Channel filtering
+
+===============================================================================
+
+SECTION 22: TECHNICAL INSIGHTS GAINED (UPDATED)
+===============================================================================
+
+JUCE 8.0.12 String Handling: operator bool is private - must use isEmpty()/isNotEmpty() explicitly
+
+Delta 1010LT Stereo Requirements: Both channels must receive phase-aligned audio to avoid glitching
+
+Buffer Size Impact: 256-512 samples optimal for Delta 1010LT on Windows 10
+
+Windows Audio Modes: Low Latency mode forces driver's preferred buffer size (441 samples)
+
+ListBox Initialization: Model must be fully constructed before ListBox uses it
+
+Member Initialization Order: Members initialized in declaration order, not initializer list order
+
+Card-Based UI Design: Encapsulating related UI elements in dedicated components improves maintainability
+
+Responsive Layout: Using relative sizing and centering creates adaptable UIs
+
+Duration Calculation: Simple division of samples by sample rate provides accurate audio length
+
+Component Communication: Using getters/setters maintains clean component boundaries
+
+===============================================================================
+
+SECTION 23: KNOWN LIMITATIONS (UPDATED)
+===============================================================================
+
+Single audio output only (no multi-output routing)
+
+No waveform visualization (placeholder only)
+
+No envelope shaping
+
+No preset system
+
+No effects processing
+
+Maximum 128 MIDI notes (hardware limit)
+
+Maximum 16 sampler voices
+
+Single sample card only (no multi-layer support yet)
