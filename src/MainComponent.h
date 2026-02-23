@@ -109,7 +109,7 @@ private:
     // UI Components
     juce::TextButton menuButton{ "Menu" };
     juce::TextButton testToneButton{ "Test tone" };
-    SampleCard sampleCard;  // New card component
+    SampleCard sampleCard{formatManager};  // New card component with waveform support
     juce::Label audioDeviceInfoLabel;
     juce::Label midiDeviceInfoLabel;
     juce::Label cpuUsageLabel;

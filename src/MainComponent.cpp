@@ -437,6 +437,7 @@ void MainComponent::loadSampleFile(const juce::File& file)
         samples.add(sample);
         updateSamplerSounds();
         sampleCard.setSampleName(file.getFileName());
+        sampleCard.setWaveform(file);  // Set the waveform
         
         // Calculate duration
         double durationInSeconds = reader->lengthInSamples / reader->sampleRate;
@@ -674,6 +675,9 @@ void MainComponent::clearAllSamples()
     sampler.clearSounds();
     sampleListBox.updateContent();
     updateMappingUI();
+    sampleCard.clearWaveform();  // Clear the waveform
+    sampleCard.setSampleName("No sample loaded");
+    sampleCard.setDuration(0.0);
     
     printf("All samples cleared\n");
     fflush(stdout);
@@ -919,6 +923,13 @@ void MainComponent::loadSampleFileAsync(const juce::File& file)
         }
         
         sampleCard.setSampleName(file.getFileName());
+        
+        // Debug: verify file exists before setting waveform
+        printf("Setting waveform for file: %s (exists: %d)\n", 
+               file.getFullPathName().toRawUTF8(), 
+               file.existsAsFile() ? 1 : 0);
+        
+        sampleCard.setWaveform(file);  // Set the waveform
         
         // Calculate and set duration
         double durationInSeconds = sample->lengthInSamples / sample->sampleRate;

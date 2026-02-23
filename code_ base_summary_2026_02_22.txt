@@ -520,6 +520,7 @@ void MainComponent::loadSampleFile(const juce::File& file)
         samples.add(sample);
         updateSamplerSounds();
         sampleCard.setSampleName(file.getFileName());
+        sampleCard.setWaveform(file);  // Set the waveform
         
         // Calculate duration
         double durationInSeconds = reader->lengthInSamples / reader->sampleRate;
@@ -757,6 +758,9 @@ void MainComponent::clearAllSamples()
     sampler.clearSounds();
     sampleListBox.updateContent();
     updateMappingUI();
+    sampleCard.clearWaveform();  // Clear the waveform
+    sampleCard.setSampleName("No sample loaded");
+    sampleCard.setDuration(0.0);
     
     printf("All samples cleared\n");
     fflush(stdout);
@@ -1002,6 +1006,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file)
         }
         
         sampleCard.setSampleName(file.getFileName());
+        sampleCard.setWaveform(file);  // Set the waveform
         
         // Calculate and set duration
         double durationInSeconds = sample->lengthInSamples / sample->sampleRate;
@@ -1163,7 +1168,7 @@ private:
     // UI Components
     juce::TextButton menuButton{ "Menu" };
     juce::TextButton testToneButton{ "Test tone" };
-    SampleCard sampleCard;  // New card component
+    SampleCard sampleCard{formatManager};  // New card component with waveform support
     juce::Label audioDeviceInfoLabel;
     juce::Label midiDeviceInfoLabel;
     juce::Label cpuUsageLabel;
@@ -1316,11 +1321,15 @@ private:
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_formats/juce_audio_formats.h>
 
-class SampleCard : public juce::Component
+class SampleCard : public juce::Component,
+                   private juce::ChangeListener
 {
 public:
-    SampleCard()
+    SampleCard(juce::AudioFormatManager& formatManager)
+        : thumbnailCache(5),  // Cache 5 thumbnails
+          thumbnail(512, formatManager, thumbnailCache)
     {
         // Configure + button
         addButton.setButtonText("+");
@@ -1340,10 +1349,10 @@ public:
         nextButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
         addAndMakeVisible(nextButton);
         
-        // Configure sample view area (this will be the waveform display area)
-        sampleViewArea.setOpaque(true);
-        sampleViewArea.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
-        addAndMakeVisible(sampleViewArea);
+        // Configure waveform area (replaces sampleViewArea)
+        waveformArea.setOpaque(true);
+        waveformArea.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+        addAndMakeVisible(waveformArea);
         
         // Configure sample name label
         sampleNameLabel.setJustificationType(juce::Justification::centredLeft);
@@ -1356,6 +1365,14 @@ public:
         durationLabel.setFont(juce::Font(12.0f));
         durationLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(durationLabel);
+        
+        // Set up thumbnail listener
+        thumbnail.addChangeListener(this);
+    }
+    
+    ~SampleCard() override
+    {
+        thumbnail.removeChangeListener(this);
     }
     
     void resized() override
@@ -1376,24 +1393,21 @@ public:
         prevButton.setBounds(navArea.removeFromLeft(60).reduced(2));
         nextButton.setBounds(navArea.removeFromLeft(60).reduced(2));
         
-        // Add 5px margin between buttons and sample view
+        // Add 5px margin between buttons and waveform
         area.removeFromTop(5);
         
-        // Calculate sample view height based on 4cm at 96 DPI (fixed height)
-        const int sampleViewHeight = static_cast<int>(4 * 37.8); // ~151px
+        // Calculate waveform height based on 4cm at 96 DPI (fixed height)
+        const int waveformHeight = static_cast<int>(4 * 37.8); // ~151px
         
-        // Sample view area width = card width minus margins (already reduced)
-        // Use the full width of the remaining area with 10px margin on each side
-        auto sampleViewRect = area.removeFromTop(sampleViewHeight);
+        // Waveform area takes full width with margins
+        auto waveformRect = area.removeFromTop(waveformHeight);
+        waveformRect.reduce(10, 0);
+        waveformArea.setBounds(waveformRect);
         
-        // Add a small margin on the sides (10px) for the sample view
-        sampleViewRect.reduce(10, 0);
-        sampleViewArea.setBounds(sampleViewRect);
-        
-        // Add 5px margin between sample view and bottom row
+        // Add 5px margin between waveform and bottom row
         area.removeFromTop(5);
         
-        // Bottom row: sample name and duration (takes remaining space)
+        // Bottom row: sample name and duration
         auto bottomRow = area.removeFromBottom(25);
         
         // Sample name on left
@@ -1413,25 +1427,28 @@ public:
         g.setColour(juce::Colour(0xFF4A4A4A));
         g.drawRoundedRectangle(getLocalBounds().toFloat(), 8.0f, 1.5f);
         
-        // Draw sample view area border
+        // Draw waveform border
         g.setColour(juce::Colours::lightgrey);
-        g.drawRect(sampleViewArea.getBounds(), 2);
+        g.drawRect(waveformArea.getBounds(), 2);
         
-        // Draw inner margin guides (optional - for debugging, can remove later)
-        g.setColour(juce::Colours::darkgrey.withAlpha(0.3f));
-        g.drawRect(getLocalBounds().reduced(10), 1);
-        
-        // Draw "Sample view" placeholder text if no sample loaded
-        if (sampleNameLabel.getText().isEmpty() || sampleNameLabel.getText() == "No sample loaded")
+        // Draw waveform if loaded
+        if (thumbnail.getTotalLength() > 0.0)
         {
+            // Draw waveform inside the waveformArea
+            auto waveformBounds = waveformArea.getBounds();
+            thumbnail.drawChannel(g, waveformBounds.reduced(2), 0.0, thumbnail.getTotalLength(), 0, 1.0f);
+        }
+        else
+        {
+            // Draw "No waveform" placeholder
             g.setColour(juce::Colours::darkgrey);
             g.setFont(juce::Font(14.0f, juce::Font::italic));
-            g.drawText("Sample view", sampleViewArea.getBounds(), 
+            g.drawText("No waveform", waveformArea.getBounds(), 
                       juce::Justification::centred, true);
         }
     }
     
-    // Public methods to access buttons and update content
+    // Public methods
     juce::TextButton& getAddButton() { return addButton; }
     juce::TextButton& getPrevButton() { return prevButton; }
     juce::TextButton& getNextButton() { return nextButton; }
@@ -1447,16 +1464,50 @@ public:
         durationLabel.setText(juce::String(seconds, 2) + " s", juce::dontSendNotification);
     }
     
-    juce::Rectangle<int> getSampleViewArea() const { return sampleViewArea.getBounds(); }
+    void setWaveform(const juce::File& audioFile)
+    {
+        // Clear existing thumbnail
+        thumbnail.clear();
+        
+        // Create new thumbnail from file
+        if (audioFile.existsAsFile())
+        {
+            thumbnail.setSource(new juce::FileInputSource(audioFile));
+        }
+    }
+    
+    void clearWaveform()
+    {
+        thumbnail.clear();
+        repaint();
+    }
+    
+    juce::Rectangle<int> getWaveformArea() const { return waveformArea.getBounds(); }
 
 private:
+    // AudioThumbnail requires a listener implementation
+    void changeListenerCallback(juce::ChangeBroadcaster* source) override
+    {
+        if (source == &thumbnail)
+        {
+            // Thumbnail has been updated, repaint
+            repaint();
+        }
+    }
+    
+    // UI Components
     juce::TextButton addButton{"+"};
     juce::TextButton prevButton{"Prev"};
     juce::TextButton nextButton{"Next"};
-    juce::Label sampleViewArea;
+    juce::Label waveformArea;
     juce::Label sampleNameLabel;
     juce::Label durationLabel;
+    
+    // Waveform components
+    juce::AudioThumbnailCache thumbnailCache;
+    juce::AudioThumbnail thumbnail;
 };
+
 
 #include "UIComponents.h"
 #include "MainComponent.h"
