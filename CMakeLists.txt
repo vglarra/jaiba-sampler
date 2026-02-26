@@ -22,8 +22,11 @@ target_sources(MySampler
         src/Main.cpp
         src/MainComponent.cpp
         src/MainComponent.h
+        src/SampleCard.h
         src/UIComponents.cpp
         src/UIComponents.h
+        src/ConfigurationManager.h
+        src/MidiActivityLight.h
 )
 
 # Link required JUCE modules

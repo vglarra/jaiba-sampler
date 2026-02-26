@@ -50,6 +50,7 @@ public:
         virtual void stopMidiInput() = 0;
         virtual void startMidiInput(const juce::String& deviceName) = 0;
         virtual void updateDeviceInfo() = 0;
+        virtual void midiDeviceChanged(const juce::String& newDevice) = 0;
     };
     
     MidiSelectorComponent(OwnerInterface& owner, const juce::StringArray& devices);

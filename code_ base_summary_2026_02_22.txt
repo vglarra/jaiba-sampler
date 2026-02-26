@@ -1,3 +1,91 @@
+#pragma once
+
+#include <juce_core/juce_core.h>
+#include "SampleCard.h"
+
+class ConfigurationManager
+{
+public:
+    ConfigurationManager()
+    {
+        // Set up the properties file
+        juce::PropertiesFile::Options options;
+        options.applicationName = "JaivaSampler";
+        options.filenameSuffix = ".settings";
+        options.folderName = "JaivaSampler";
+        options.osxLibrarySubFolder = "Application Support";
+        
+        propertiesFile = std::make_unique<juce::PropertiesFile>(options);
+    }
+    
+    ~ConfigurationManager()
+    {
+        propertiesFile->saveIfNeeded();
+    }
+    
+    void saveLastDirectory(const juce::File& directory)
+    {
+        propertiesFile->setValue("lastDirectory", directory.getFullPathName());
+        propertiesFile->saveIfNeeded();
+    }
+    
+    juce::File getLastDirectory()
+    {
+        juce::String path = propertiesFile->getValue("lastDirectory");
+        if (path.isNotEmpty())
+        {
+            juce::File dir(path);
+            if (dir.exists() && dir.isDirectory())
+                return dir;
+        }
+        return juce::File::getSpecialLocation(juce::File::userHomeDirectory);
+    }
+    
+    void saveLastSample(const juce::File& sample)
+    {
+        propertiesFile->setValue("lastSample", sample.getFullPathName());
+        propertiesFile->saveIfNeeded();
+    }
+    
+    juce::File getLastSample()
+    {
+        juce::String path = propertiesFile->getValue("lastSample");
+        if (path.isNotEmpty())
+        {
+            juce::File file(path);
+            if (file.existsAsFile())
+                return file;
+        }
+        return juce::File();
+    }
+    
+    void saveMidiSettings(int midiNote, int midiChannel, const juce::String& midiDevice)
+    {
+        propertiesFile->setValue("midiNote", midiNote);
+        propertiesFile->setValue("midiChannel", midiChannel);
+        propertiesFile->setValue("midiDevice", midiDevice);
+        propertiesFile->saveIfNeeded();
+    }
+    
+    int getMidiNote()
+    {
+        return propertiesFile->getIntValue("midiNote", 60); // Default to middle C
+    }
+    
+    int getMidiChannel()
+    {
+        return propertiesFile->getIntValue("midiChannel", 1); // Default to channel 1
+    }
+    
+    juce::String getMidiDevice()
+    {
+        return propertiesFile->getValue("midiDevice");
+    }
+    
+private:
+    std::unique_ptr<juce::PropertiesFile> propertiesFile;
+};
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "MainComponent.h"
 #include <cstdio>
@@ -105,6 +193,9 @@ MainComponent::MainComponent()
     printf("DEBUG: MainComponent constructor started\n");
     fflush(stdout);
     
+    // Create configuration manager for session persistence
+    configManager = std::make_unique<ConfigurationManager>();
+    
     // Create the model
     sampleListModel = std::make_unique<SampleListModel>(*this);
     sampleListBox.setModel(sampleListModel.get());
@@ -127,37 +218,43 @@ MainComponent::MainComponent()
     addAndMakeVisible(menuButton);
     menuButton.addListener(this);
     
-    testToneButton.setButtonText("Test tone");
-    testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-    testToneButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-    addAndMakeVisible(testToneButton);
-    testToneButton.addListener(this);
-    
-    // Add the sample card
-    addAndMakeVisible(sampleCard);
-    
-    // Add listeners for the card buttons
-    sampleCard.getAddButton().addListener(this);
-    sampleCard.getPrevButton().addListener(this);
-    sampleCard.getNextButton().addListener(this);
-    
-    // Set initial sample name
-    sampleCard.setSampleName("No sample loaded");
-    
-    addAndMakeVisible(audioDeviceInfoLabel);
-    audioDeviceInfoLabel.setJustificationType(juce::Justification::left);
-    audioDeviceInfoLabel.setFont(juce::Font(12.0f));
-    audioDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-    
-    addAndMakeVisible(midiDeviceInfoLabel);
-    midiDeviceInfoLabel.setJustificationType(juce::Justification::left);
-    midiDeviceInfoLabel.setFont(juce::Font(12.0f));
-    midiDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-    
-    addAndMakeVisible(cpuUsageLabel);
-    cpuUsageLabel.setJustificationType(juce::Justification::right);
-    cpuUsageLabel.setFont(juce::Font(12.0f, juce::Font::bold));
-    cpuUsageLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+      testToneButton.setButtonText("Test tone");
+      testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+      testToneButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+      addAndMakeVisible(testToneButton);
+      testToneButton.addListener(this);
+
+      // Add MIDI activity light to the title area
+      addAndMakeVisible(midiActivityLight);
+
+      // Add the sample card
+      addAndMakeVisible(sampleCard);
+
+      // Add listeners for the card buttons
+      sampleCard.getAddButton().addListener(this);
+      sampleCard.getPrevButton().addListener(this);
+      sampleCard.getNextButton().addListener(this);
+
+      // Add listener for MIDI note changes
+      sampleCard.addListener(this);
+
+      // Set initial sample name
+      sampleCard.setSampleName("No sample loaded");
+
+      addAndMakeVisible(audioDeviceInfoLabel);
+      audioDeviceInfoLabel.setJustificationType(juce::Justification::left);
+      audioDeviceInfoLabel.setFont(juce::Font(12.0f));
+      audioDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+      addAndMakeVisible(midiDeviceInfoLabel);
+      midiDeviceInfoLabel.setJustificationType(juce::Justification::left);
+      midiDeviceInfoLabel.setFont(juce::Font(12.0f));
+      midiDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+
+      addAndMakeVisible(cpuUsageLabel);
+      cpuUsageLabel.setJustificationType(juce::Justification::right);
+      cpuUsageLabel.setFont(juce::Font(12.0f, juce::Font::bold));
+      cpuUsageLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
     
     // Configure sliders
     lowNoteSlider.setRange(0, 127, 1);
@@ -179,6 +276,9 @@ MainComponent::MainComponent()
     // Start CPU timer for updates every 500ms
     cpuTimer.startTimer(500);
     
+    // Load last session (sample, MIDI settings, directory)
+    loadLastSession();
+    
     printf("DEBUG: MainComponent constructor completed\n");
     fflush(stdout);
 }
@@ -187,6 +287,7 @@ MainComponent::~MainComponent()
 {
     cpuTimer.stopTimer();
     deviceManager.removeChangeListener(this);
+    
     shutdownAudio();
 }
 
@@ -262,11 +363,30 @@ void MainComponent::paint(juce::Graphics& g)
 
 void MainComponent::resized()
 {
+    // Add a flag to prevent recursive resizing
+    static bool isResizing = false;
+    if (isResizing) return;
+    isResizing = true;
+    
     auto area = getLocalBounds().reduced(20);
     
-    // Top bar: Menu button on left, Test tone button on right
+    // Top bar: Menu button on left, Test tone button on right, MIDI light in title
     auto topBar = area.removeFromTop(50);
+    
+    // Menu button on left
     menuButton.setBounds(topBar.removeFromLeft(120).reduced(2));
+    
+    // Title area with MIDI light
+    auto titleArea = topBar;
+    auto titleBounds = titleArea.withSizeKeepingCentre(300, 30);
+    
+    // Position MIDI light to the left of the title text - repositioned to be centered between menu button and test tone button
+    int titleCenterX = getWidth() / 2;
+    midiActivityLight.setBounds(titleCenterX - 120, 
+                                titleBounds.getCentreY() - 8, 
+                                16, 16);
+    
+    // Test tone button on right
     testToneButton.setBounds(topBar.removeFromRight(120).reduced(2));
     
     // Body area - this is where the card goes
@@ -278,11 +398,18 @@ void MainComponent::resized()
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
     
+    // Ensure card width is positive
+    if (cardWidth < 100) cardWidth = 100;
+    
     auto cardBounds = bodyArea.withWidth(cardWidth)
                               .withHeight(cardHeight)
                               .withCentre(bodyArea.getCentre());
     
-    sampleCard.setBounds(cardBounds);
+    // Ensure card bounds are valid before setting
+    if (cardBounds.getWidth() > 0 && cardBounds.getHeight() > 0)
+    {
+        sampleCard.setBounds(cardBounds);
+    }
     
     // Footer area at bottom
     auto footerArea = getLocalBounds().reduced(20).removeFromBottom(80);
@@ -300,6 +427,8 @@ void MainComponent::resized()
     // Right side: CPU usage
     cpuUsageLabel.setBounds(footerArea.removeFromRight(120).reduced(5));
     cpuUsageLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+    
+    isResizing = false;
 }
 
 //==============================================================================
@@ -317,9 +446,8 @@ void MainComponent::buttonClicked(juce::Button* button)
     {
         auto* previewComp = new ::AudioPreviewComponent(formatManager);
         
-        // Use current folder if it exists, otherwise use home directory
-        juce::File startingDirectory = currentFolder.exists() ? currentFolder : 
-                                      juce::File::getSpecialLocation(juce::File::userHomeDirectory);
+        // Use last saved directory or default
+        juce::File startingDirectory = configManager->getLastDirectory();
         
         fileChooser = std::make_unique<juce::FileChooser>(
             "Select sample",
@@ -335,10 +463,14 @@ void MainComponent::buttonClicked(juce::Button* button)
                 if (results.size() > 0)
                 {
                     auto file = results[0];
-                    loadSampleFile(file);
+                    
+                    // Save the directory for next time
+                    configManager->saveLastDirectory(file.getParentDirectory());
+                    
                     // Set current folder and scan for audio files
                     currentFolder = file.getParentDirectory();
                     scanCurrentFolderForAudioFiles();
+                    
                     // Find and set current file index
                     for (int i = 0; i < folderAudioFiles.size(); ++i)
                     {
@@ -348,6 +480,13 @@ void MainComponent::buttonClicked(juce::Button* button)
                             break;
                         }
                     }
+                    
+                    // Use the async loading method instead of synchronous loadSampleFile
+                    // This ensures proper UI updates and session saving
+                    loadSampleFileAsync(file, true); // true for auto-play
+                    
+                    // DON'T call saveCurrentSession() here - it will be called 
+                    // from within loadSampleFileAsync after the sample is fully loaded
                 }
             },
             previewComp
@@ -463,14 +602,12 @@ void MainComponent::updateDeviceInfo()
 //==============================================================================
 void MainComponent::loadSampleFile(const juce::File& file)
 {
-    // Check for duplicate
-    for (auto* existing : samples)
+    // For single-sample mode, clear existing samples before loading new one
+    // This ensures only one sample is active at a time (consistent with Prev/Next navigation)
     {
-        if (existing->file == file)
-        {
-            printf("Sample already loaded: %s\n", file.getFileName().toRawUTF8());
-            return;
-        }
+        juce::ScopedLock lock(sampleLock);
+        samples.clear();
+        selectedSampleIndex = 0;
     }
     
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -481,28 +618,12 @@ void MainComponent::loadSampleFile(const juce::File& file)
         sample->file = file;
         sample->name = file.getFileName();
         
-        // Auto-assign note ranges
-        if (samples.isEmpty())
-        {
-            sample->lowNote = 36;
-            sample->highNote = 48;
-            sample->rootNote = 42;
-        }
-        else
-        {
-            auto* lastSample = samples.getLast();
-            sample->lowNote = lastSample->highNote + 1;
-            
-            if (sample->lowNote > 127)
-            {
-                delete sample;
-                return;
-            }
-            
-            int potentialHigh = sample->lowNote + 11;
-            sample->highNote = (potentialHigh < 127) ? potentialHigh : 127;
-            sample->rootNote = sample->lowNote + (sample->highNote - sample->lowNote) / 2;
-        }
+        // IMPORTANT: Use the current MIDI note from the card as the root note
+        sample->rootNote = sampleCard.getMidiNote();  // Use card's current note
+        
+        // For single-note mode, all notes are the same
+        sample->lowNote = sample->rootNote;
+        sample->highNote = sample->rootNote;
         
         // Cache the audio data in memory
         sample->sampleRate = reader->sampleRate;
@@ -517,7 +638,11 @@ void MainComponent::loadSampleFile(const juce::File& file)
         reader->read(buffer.get(), 0, (int)reader->lengthInSamples, 0, true, true);
         sample->audioData = std::move(buffer);
         
-        samples.add(sample);
+        {
+            juce::ScopedLock lock(sampleLock);
+            samples.add(sample);
+        }
+        
         updateSamplerSounds();
         sampleCard.setSampleName(file.getFileName());
         sampleCard.setWaveform(file);  // Set the waveform
@@ -526,8 +651,11 @@ void MainComponent::loadSampleFile(const juce::File& file)
         double durationInSeconds = reader->lengthInSamples / reader->sampleRate;
         sampleCard.setDuration(durationInSeconds);
         
-        printf("Sample loaded and cached: %s (%lld samples, %.2f s)\n", 
-               file.getFileName().toRawUTF8(), reader->lengthInSamples, durationInSeconds);
+        printf("Sample loaded (single mode): %s -> note %d (%lld samples, %.2f s)\n", 
+               file.getFileName().toRawUTF8(), 
+               sample->rootNote,
+               reader->lengthInSamples, 
+               durationInSeconds);
     }
 }
 
@@ -559,7 +687,6 @@ void MainComponent::showMidiDeviceSettings()
 
     updateMidiDeviceList();
 
-    // Use the separated UI component
     auto* selector = new ::MidiSelectorComponent(*this, midiInputNames);
     selector->setSize(400, 200);
 
@@ -570,9 +697,15 @@ void MainComponent::showMidiDeviceSettings()
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = false;
-
+    
+    // IMPORTANT FIX: Don't try to capture the return value of launchAsync()
+    // Instead, let the dialog manage itself and just track it with a weak reference
     options.launchAsync();
-
+    
+    // We can't store the dialog pointer here because launchAsync returns immediately
+    // and the dialog is created asynchronously. Instead, we'll rely on the dialog
+    // to clean itself up.
+    
     printf("MIDI settings launched\n");
     fflush(stdout);
 }
@@ -580,39 +713,120 @@ void MainComponent::showMidiDeviceSettings()
 
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
-    // Only add to collector - it will be processed in getNextAudioBlock
-    midiCollector.addMessageToQueue(message);
-    
-    // Optional: Still print for debugging
+    // Update MIDI activity light based on message type
     if (message.isNoteOn())
     {
-        printf("MIDI Note On: %d, Velocity: %d, Channel: %d\n", 
-               message.getNoteNumber(), 
-               message.getVelocity(),
-               message.getChannel());
-        fflush(stdout);
+        midiActivityLight.noteOn();
     }
     else if (message.isNoteOff())
     {
-        printf("MIDI Note Off: %d, Channel: %d\n", 
+        midiActivityLight.noteOff();
+    }
+    else
+    {
+        // For other MIDI messages (controllers, etc.) trigger a brief flash
+        // by turning the light on - it will automatically turn off after 50ms via timer
+        midiActivityLight.noteOn();
+    }
+    
+    // ANTI-FLOOD PROTECTION: Ignore duplicate messages in quick succession
+    static juce::uint64 lastMessageTime = 0;
+    static int lastNoteNumber = -1;
+    static int lastNoteCount = 0;
+    static int totalIgnored = 0;
+    
+    juce::uint64 currentTime = juce::Time::getMillisecondCounter();
+    int timeSinceLast = (int)(currentTime - lastMessageTime);
+    
+    // If we're in learn mode and get a note on message, handle it specially
+    // In learn mode, we ignore channel filtering - learn from any channel
+    if (isLearningMode && message.isNoteOn())
+    {
+        int currentNote = message.getNoteNumber();
+        handleMidiLearn(currentNote);
+        // Still add to collector so user can hear the note
+        midiCollector.addMessageToQueue(message);
+        
+        printf("🎹 LEARN MODE: Captured note %d from channel %d\n", 
+               currentNote, message.getChannel());
+        return;
+    }
+    
+    // Get the currently selected MIDI channel from the sample card
+    int selectedChannel = sampleCard.getMidiChannel();
+    
+    // For normal operation, filter by selected channel if not "All Channels" (0)
+    // Let's assume channel 0 means "All Channels"
+    bool channelMatches = (selectedChannel == 0) || (message.getChannel() == selectedChannel);
+    
+    // If channel doesn't match and we're not in learn mode, ignore the message
+    if (!channelMatches && !isLearningMode)
+    {
+        // Still light up the MIDI activity even if channel doesn't match
+        // (light shows ANY MIDI activity, but audio is filtered)
+        return;
+    }
+    
+    // If we're getting the same note message repeatedly within 10ms, ignore it
+    if (message.isNoteOn() || message.isNoteOff())
+    {
+        int currentNote = message.getNoteNumber();
+        
+        if (currentNote == lastNoteNumber && timeSinceLast < 10)
+        {
+            lastNoteCount++;
+            totalIgnored++;
+            
+            // If we've seen this note more than 5 times in a row within 10ms, ignore it
+            if (lastNoteCount > 5)
+            {
+                // Only print occasionally to avoid console flood
+                if (lastNoteCount % 100 == 0)
+                {
+                    printf("⚠️ Flood protection: Ignored %d duplicate messages on note %d (last interval: %dms)\n", 
+                           totalIgnored, currentNote, timeSinceLast);
+                }
+                return;  // IGNORE THE MESSAGE
+            }
+        }
+        else
+        {
+            // New note or timing out - reset counter
+            if (lastNoteCount > 5)
+            {
+                printf("✅ Flood ended - normal playing resumed (ignored %d messages total)\n", totalIgnored);
+                totalIgnored = 0;
+            }
+            lastNoteNumber = currentNote;
+            lastNoteCount = 0;
+        }
+        
+        lastMessageTime = currentTime;
+    }
+    
+    // Only add to collector if we passed the flood filter
+    midiCollector.addMessageToQueue(message);
+    
+    // Print human-performed notes normally (no throttling for these)
+    if (message.isNoteOn() && lastNoteCount <= 5)
+    {
+        printf("🎹 Note On: %d, Vel: %d, Ch: %d (interval: %dms)\n", 
+               message.getNoteNumber(), 
+               message.getVelocity(),
+               message.getChannel(),
+               timeSinceLast);
+    }
+    else if (message.isNoteOff() && lastNoteCount <= 5)
+    {
+        printf("🎹 Note Off: %d, Ch: %d\n", 
                message.getNoteNumber(),
                message.getChannel());
-        fflush(stdout);
-    }
-    else if (message.isPitchWheel())
-    {
-        // Optional: handle pitch bend
-        int pitchValue = message.getPitchWheelValue();
-        float pitchBend = (pitchValue - 8192) / 8192.0f; // Range -1.0 to 1.0
-        // You could add pitch bend processing here
     }
     else if (message.isController())
     {
-        // Optional: handle MIDI controllers (mod wheel, etc.)
         int controller = message.getControllerNumber();
         int value = message.getControllerValue();
         printf("MIDI Controller: %d, Value: %d\n", controller, value);
-        fflush(stdout);
     }
 }
 
@@ -822,10 +1036,16 @@ void MainComponent::updateSamplerSounds()
             sample->numChannels
         );
         
+        // IMPORTANT FIX: Create a note range that ONLY includes the selected root note
+        // This ensures the sample plays at its original pitch on a single note
         juce::BigInteger noteRange;
-        noteRange.setRange(sample->lowNote, 
-                          (sample->highNote - sample->lowNote + 1), 
-                          true);
+        noteRange.setRange(0, 128, false);  // Clear all notes first
+        noteRange.setBit(sample->rootNote);  // Set ONLY the root note
+        
+        // Keep this commented for future note range support:
+        // noteRange.setRange(sample->lowNote, 
+        //                   (sample->highNote - sample->lowNote + 1), 
+        //                   true);
         
         // Create the sound - reader will be owned by SamplerSound
         auto* sound = new juce::SamplerSound(
@@ -840,13 +1060,13 @@ void MainComponent::updateSamplerSounds()
         
         sampler.addSound(sound);
         
-        printf("Added sound from cache: %s (notes %d-%d, root %d)\n", 
+        printf("Added sound from cache: %s -> triggers on note %d (%s) only\n", 
                sample->name.toRawUTF8(),
-               sample->lowNote, sample->highNote,
-               sample->rootNote);
+               sample->rootNote,
+               juce::MidiMessage::getMidiNoteName(sample->rootNote, true, true, true).toRawUTF8());
     }
     
-    printf("Sampler updated with %d sounds\n", samples.size());
+    printf("Sampler updated with %d sounds (each mapped to single note)\n", samples.size());
     fflush(stdout);
 }
 
@@ -925,14 +1145,22 @@ void MainComponent::navigateToFile(int index)
         currentFileIndex = index;
         auto file = folderAudioFiles[currentFileIndex];
         
+        // Stop all currently playing notes before loading new sample
+        sampler.allNotesOff(1, false);
+        
+        // Clear the sampler sounds immediately on the message thread
+        juce::MessageManager::callAsync([this]() {
+            sampler.clearSounds();
+        });
+        
         // Load sample on background thread
         backgroundThreads.addJob([this, file]() {
-            loadSampleFileAsync(file);
+            loadSampleFileAsync(file, true);
         });
     }
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
 {
     // Create reader on background thread
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -944,19 +1172,25 @@ void MainComponent::loadSampleFileAsync(const juce::File& file)
         return;
     }
     
-    printf("Loading sample: %s (%lld samples, %d ch, %.1f kHz)\n", 
+    printf("Loading sample: %s (%lld samples, %d ch, %.1f kHz) - Auto-play: %s\n", 
            file.getFileName().toRawUTF8(),
            reader->lengthInSamples,
            reader->numChannels,
-           reader->sampleRate / 1000.0);
+           reader->sampleRate / 1000.0,
+           autoPlay ? "YES" : "NO");
     
     // Create sample on background thread
     auto* sample = new MappedSample();
     sample->file = file;
     sample->name = file.getFileName();
-    sample->lowNote = 36;
-    sample->highNote = 48;
-    sample->rootNote = 42;
+    
+    // IMPORTANT: Get the current MIDI note from the card
+    // We need to capture the note value before going to background thread
+    int currentNote = sampleCard.getMidiNote();  // This is safe here
+    
+    sample->rootNote = currentNote;  // Use card's current note
+    sample->lowNote = currentNote;   // Same for low note
+    sample->highNote = currentNote;  // Same for high note
     sample->sampleRate = reader->sampleRate;
     sample->numChannels = reader->numChannels;
     sample->lengthInSamples = reader->lengthInSamples;
@@ -993,7 +1227,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file)
     sample->audioData = std::move(buffer);
     
     // Update UI on message thread
-    juce::MessageManager::callAsync([this, sample, file]() {
+    juce::MessageManager::callAsync([this, sample, file, autoPlay]() {
         // Stop any currently playing notes
         sampler.allNotesOff(1, false);
         
@@ -1001,32 +1235,41 @@ void MainComponent::loadSampleFileAsync(const juce::File& file)
         {
             juce::ScopedLock lock(sampleLock);
             samples.clear();
-            selectedSampleIndex = -1;
+            selectedSampleIndex = 0;
             samples.add(sample);
         }
         
+        // ALL UI UPDATES MUST BE ON MESSAGE THREAD
         sampleCard.setSampleName(file.getFileName());
-        sampleCard.setWaveform(file);  // Set the waveform
+        sampleCard.setWaveform(file);
         
-        // Calculate and set duration
         double durationInSeconds = sample->lengthInSamples / sample->sampleRate;
         sampleCard.setDuration(durationInSeconds);
         
-        // Update sampler on UI thread
+        sample->rootNote = sampleCard.getMidiNote();
+        sample->lowNote = sampleCard.getMidiNote();
+        sample->highNote = sampleCard.getMidiNote();
+        
         updateSamplerSounds();
+        sampleCard.setMidiNote(sample->rootNote);
         
-        // Short delay to ensure sampler is ready
-        juce::Timer::callAfterDelay(50, [this, sample]() {
-            // Play preview with proper velocity
-            sampler.noteOn(1, sample->rootNote, 0.8f);
-            
-            // Schedule note off
-            juce::Timer::callAfterDelay(800, [this, sample]() {
-                sampler.noteOff(1, sample->rootNote, 0.0f, true);
+        // Save the session now that the sample is fully loaded
+        saveCurrentSession();
+        
+        if (autoPlay)
+        {
+            // Use MessageManager for timer callbacks too
+            juce::MessageManager::callAsync([this, sample]() {
+                sampler.noteOn(1, sample->rootNote, 0.8f);
+                
+                juce::Timer::callAfterDelay(800, [this, sample]() {
+                    sampler.noteOff(1, sample->rootNote, 0.0f, true);
+                });
             });
-        });
+        }
         
-        printf("Async load complete: %s\n", file.getFileName().toRawUTF8());
+        printf("Async load complete: %s (selected index: %d) with root note %d\n", 
+               file.getFileName().toRawUTF8(), selectedSampleIndex, sample->rootNote);
         fflush(stdout);
     });
 }
@@ -1057,6 +1300,193 @@ void MainComponent::loadPrevSample()
     navigateToFile(currentFileIndex);
 }
 
+//==============================================================================
+// SampleCard::Listener implementation
+void MainComponent::midiNoteChanged(int newNote)
+{
+    // Always update the current sample if one is selected
+    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    {
+        auto* sample = samples[selectedSampleIndex];
+        sample->rootNote = newNote;
+        
+        // Also update low/high notes to match for single-note mode
+        sample->lowNote = newNote;
+        sample->highNote = newNote;
+        
+        printf("Sample root note updated: %s -> %d (%s) (applied immediately)\n", 
+               sample->name.toRawUTF8(),
+               newNote,
+               juce::MidiMessage::getMidiNoteName(newNote, true, true, true).toRawUTF8());
+        
+        // Update sampler with new mapping IMMEDIATELY
+        updateSamplerSounds();
+    }
+    else
+    {
+        printf("No sample selected to apply MIDI note change\n");
+    }
+}
+
+void MainComponent::midiChannelChanged(int newChannel)
+{
+    printf("MIDI channel filter set to: %s\n", 
+           newChannel == 0 ? "All Channels" : juce::String(newChannel).toRawUTF8());
+    
+    // The actual filtering happens in handleIncomingMidiMessage
+    // No need to update samples, but we might want to stop currently playing notes
+    // when changing channels to avoid stuck notes
+    if (newChannel != sampleCard.getMidiChannel())
+    {
+        // Stop all notes when changing channels to avoid confusion
+        sampler.allNotesOff(1, false);
+    }
+}
+
+void MainComponent::learningModeChanged(bool isLearning)
+{
+    isLearningMode = isLearning;
+    printf("MIDI Learn mode: %s\n", isLearning ? "ON" : "OFF");
+}
+
+void MainComponent::handleMidiLearn(int noteNumber)
+{
+    if (isLearningMode)
+    {
+        // Update the sample card with the learned note
+        sampleCard.setMidiNoteFromLearn(noteNumber);
+        
+        // If there's a selected sample, update its root note and sampler IMMEDIATELY
+        if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+        {
+            auto* sample = samples[selectedSampleIndex];
+            sample->rootNote = noteNumber;
+            
+            // Also update low/high notes to match for single-note mode
+            sample->lowNote = noteNumber;
+            sample->highNote = noteNumber;
+            
+            // Force immediate update of the sampler
+            updateSamplerSounds();
+            
+            printf("Sample %s root note updated to %d via MIDI Learn\n", 
+                   sample->name.toRawUTF8(), noteNumber);
+        }
+        else
+        {
+            printf("No sample selected, but card note updated to %d\n", noteNumber);
+        }
+    }
+}
+
+//==============================================================================
+// Session persistence methods
+void MainComponent::loadLastSession()
+{
+    // Load MIDI settings
+    int savedNote = configManager->getMidiNote();
+    int savedChannel = configManager->getMidiChannel();
+    juce::String savedDevice = configManager->getMidiDevice();
+    
+    // Debug output for saved settings
+    printf("Loading saved MIDI note: %d\n", savedNote);
+    printf("Loading saved MIDI channel: %d\n", savedChannel);
+    printf("Loading saved MIDI device: %s\n", savedDevice.toRawUTF8());
+    
+    // Apply MIDI settings to the card
+    sampleCard.setMidiNote(savedNote);
+    
+    // Handle channel with wrap-around logic
+    if (savedChannel >= 0 && savedChannel <= 16)
+    {
+        // Use the new public setMidiChannel method
+        sampleCard.setMidiChannel(savedChannel);
+    }
+    
+    // Try to restore MIDI device if it's still available
+    if (savedDevice.isNotEmpty() && isValidMidiDevice(savedDevice))
+    {
+        // This will be handled by the MIDI selector when it initializes
+        currentMidiDeviceName = savedDevice;
+        
+        // Start the MIDI input
+        auto devices = juce::MidiInput::getAvailableDevices();
+        for (auto& device : devices)
+        {
+            if (device.name == savedDevice)
+            {
+                midiInput = juce::MidiInput::openDevice(device.identifier, this);
+                if (midiInput != nullptr)
+                {
+                    midiInput->start();
+                    printf("Restored MIDI device: %s\n", savedDevice.toRawUTF8());
+                }
+                break;
+            }
+        }
+    }
+    
+    // Load last sample if it exists
+    juce::File lastSample = configManager->getLastSample();
+    if (lastSample.existsAsFile())
+    {
+        // Check if the file is in a valid audio format
+        if (formatManager.findFormatForFileExtension(lastSample.getFileExtension()) != nullptr)
+        {
+            printf("Loading last session sample: %s (NO AUTO-PLAY)\n", lastSample.getFileName().toRawUTF8());
+            
+            // Set current folder to the sample's directory
+            currentFolder = lastSample.getParentDirectory();
+            scanCurrentFolderForAudioFiles();
+            
+            // Find the index of this file in the folder
+            for (int i = 0; i < folderAudioFiles.size(); ++i)
+            {
+                if (folderAudioFiles[i] == lastSample)
+                {
+                    currentFileIndex = i;
+                    break;
+                }
+            }
+            
+            // Load the sample but DON'T auto-play it
+            loadSampleFileAsync(lastSample, false); // Add a parameter to control auto-play
+        }
+    }
+}
+
+void MainComponent::saveCurrentSession()
+{
+    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    {
+        auto* sample = samples[selectedSampleIndex];
+        configManager->saveLastSample(sample->file);
+    }
+    
+    configManager->saveMidiSettings(
+        sampleCard.getMidiNote(),
+        sampleCard.getMidiChannel(),
+        currentMidiDeviceName
+    );
+}
+
+bool MainComponent::isValidMidiDevice(const juce::String& deviceName)
+{
+    auto devices = juce::MidiInput::getAvailableDevices();
+    for (auto& device : devices)
+    {
+        if (device.name == deviceName)
+            return true;
+    }
+    return false;
+}
+
+void MainComponent::midiDeviceChanged(const juce::String& newDevice)
+{
+    currentMidiDeviceName = newDevice;
+    saveCurrentSession();
+}
+
 #pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -1069,6 +1499,8 @@ void MainComponent::loadPrevSample()
 
 #include "UIComponents.h"
 #include "SampleCard.h"
+#include "ConfigurationManager.h"
+#include "MidiActivityLight.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -1076,7 +1508,8 @@ class MainComponent : public juce::AudioAppComponent,
                       public juce::MidiInputCallback,
                       public juce::Slider::Listener,
                       public MidiSelectorComponent::OwnerInterface,
-                      public MappingComponent::OwnerInterface
+                      public MappingComponent::OwnerInterface,
+                      public SampleCard::Listener  // Add this
 {
 public:
     MainComponent();
@@ -1135,7 +1568,7 @@ private:
     //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
-    void loadSampleFileAsync(const juce::File& file);
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true);
     void updateSamplerSounds();
     
     // Audio device management
@@ -1163,6 +1596,16 @@ private:
     void navigateToFile(int index);
     void loadNextSample();
     void loadPrevSample();
+    
+    //==============================================================================
+    // SampleCard::Listener implementation
+    void midiNoteChanged(int newNote) override;
+    void midiChannelChanged(int newChannel) override;
+    void learningModeChanged(bool isLearning) override;
+
+    //==============================================================================
+    // MIDI Learn handling
+    void handleMidiLearn(int noteNumber);
 
     //==============================================================================
     // UI Components
@@ -1195,6 +1638,9 @@ private:
     juce::StringArray midiInputNames;
     juce::String currentMidiDeviceName;
     juce::CriticalSection midiLock;  // Thread safety for MIDI device management
+    
+    // MIDI Learn mode
+    bool isLearningMode = false;
     
     //==============================================================================
     // Sine wave generation
@@ -1277,15 +1723,28 @@ private:
     }
     void stopMidiInput() override 
     { 
+        juce::ScopedLock lock(midiLock);
+        
         if (midiInput != nullptr)
         {
+            // First stop the input
             midiInput->stop();
+            
+            // Then reset the unique_ptr to properly delete the object
             midiInput.reset();
         }
-        midiCollector.reset(sampler.getSampleRate());
+        
+        // Reset the collector with current sample rate (or default if not playing)
+        double sampleRate = sampler.getSampleRate();
+        if (sampleRate <= 0)
+            sampleRate = 44100.0; // Default if not set
+            
+        midiCollector.reset(sampleRate);
     }
     void startMidiInput(const juce::String& deviceName) override
     {
+        juce::ScopedLock lock(midiLock);
+        
         auto devices = juce::MidiInput::getAvailableDevices();
         for (auto& device : devices)
         {
@@ -1295,6 +1754,11 @@ private:
                 if (midiInput != nullptr)
                 {
                     midiInput->start();
+                    printf("MIDI input started: %s\n", deviceName.toRawUTF8());
+                }
+                else
+                {
+                    printf("ERROR: Failed to open MIDI device: %s\n", deviceName.toRawUTF8());
                 }
                 break;
             }
@@ -1315,52 +1779,172 @@ private:
     juce::Label& getRootNoteLabel() override { return rootNoteLabel; }
     juce::Label& getMappingInstructions() override { return mappingInstructions; }
 
+    //==============================================================================
+    // Session persistence
+    std::unique_ptr<ConfigurationManager> configManager;
+    MidiActivityLight midiActivityLight;
+    
+    //==============================================================================
+    // Session management methods
+    void loadLastSession();
+    void saveCurrentSession();
+    bool isValidMidiDevice(const juce::String& deviceName);
+    void midiDeviceChanged(const juce::String& newDevice);
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
 
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+
+class MidiActivityLight : public juce::Component,
+                          private juce::Timer
+{
+public:
+    MidiActivityLight()
+    {
+        setSize(16, 16);
+        startTimer(50); // Check every 50ms for activity timeout
+    }
+    
+    ~MidiActivityLight()
+    {
+        stopTimer();
+    }
+    
+    void paint(juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat().reduced(2);
+        
+        // Draw outer circle
+        g.setColour(juce::Colours::darkgrey);
+        g.fillEllipse(bounds);
+        
+        // Draw inner circle based on activity
+        if (isActive)
+        {
+            // Bright yellow for note activity
+            g.setColour(juce::Colours::yellow);
+            g.fillEllipse(bounds.reduced(2));
+        }
+        else
+        {
+            // Completely black/dark when off
+            g.setColour(juce::Colour(0xFF111111));
+            g.fillEllipse(bounds.reduced(2));
+        }
+    }
+    
+    void noteOn()
+    {
+        isActive = true;
+        lastActivityTime = juce::Time::getMillisecondCounter();
+        juce::MessageManager::callAsync([this] { repaint(); });
+    }
+    
+    void noteOff()
+    {
+        // Note: We don't turn off immediately on note off
+        // The timer will handle turning off after a short delay
+        lastActivityTime = juce::Time::getMillisecondCounter();
+    }
+    
+private:
+    void timerCallback() override
+    {
+        // Turn off after 50ms of no activity
+        if (isActive && (juce::Time::getMillisecondCounter() - lastActivityTime) > 50)
+        {
+            isActive = false;
+            juce::MessageManager::callAsync([this] { repaint(); });
+        }
+    }
+    
+    bool isActive = false;
+    juce::uint64 lastActivityTime = 0;
+};
+
+#pragma once
+
+#include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_audio_utils/juce_audio_utils.h>
 
 class SampleCard : public juce::Component,
                    private juce::ChangeListener
 {
 public:
     SampleCard(juce::AudioFormatManager& formatManager)
-        : thumbnailCache(5),  // Cache 5 thumbnails
+        : formatManager(formatManager),
+          thumbnailCache(5),  // Cache 5 thumbnails
           thumbnail(512, formatManager, thumbnailCache)
     {
-        // Configure + button
+        // Configure + button (top left)
         addButton.setButtonText("+");
         addButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         addButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
         addAndMakeVisible(addButton);
         
-        // Configure Prev button
+        // Configure Prev button (top right)
         prevButton.setButtonText("Prev");
         prevButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         prevButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
         addAndMakeVisible(prevButton);
         
-        // Configure Next button
+        // Configure Next button (top right)
         nextButton.setButtonText("Next");
         nextButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         nextButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
         addAndMakeVisible(nextButton);
         
-        // Configure waveform area (replaces sampleViewArea)
-        waveformArea.setOpaque(true);
-        waveformArea.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
-        addAndMakeVisible(waveformArea);
+        // Configure MIDI Learn button
+        learnButton.setButtonText("Learn");
+        learnButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        learnButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        learnButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::orange);
+        learnButton.onClick = [this] { toggleLearnMode(); };
+        addAndMakeVisible(learnButton);
         
-        // Configure sample name label
+        // Configure waveform area
+        waveformComponent = std::make_unique<WaveformComponent>(thumbnail);
+        addAndMakeVisible(waveformComponent.get());
+        
+    // Configure MIDI Note display (no +/- buttons, will add Learn button)
+    midiNoteLabel.setJustificationType(juce::Justification::centred);
+    midiNoteLabel.setFont(juce::Font(16.0f, juce::Font::bold));
+    midiNoteLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+    midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+    updateMidiNoteDisplay();
+    addAndMakeVisible(midiNoteLabel);
+        
+        // Configure MIDI Channel controls
+        channelMinusButton.setButtonText("-");
+        channelMinusButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        channelMinusButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        channelMinusButton.onClick = [this] { adjustMidiChannel(-1); };
+        addAndMakeVisible(channelMinusButton);
+        
+        midiChannelLabel.setJustificationType(juce::Justification::centred);
+        midiChannelLabel.setFont(juce::Font(16.0f, juce::Font::bold));
+        midiChannelLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+        midiChannelLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+        updateMidiChannelDisplay();
+        addAndMakeVisible(midiChannelLabel);
+        
+        channelPlusButton.setButtonText("+");
+        channelPlusButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        channelPlusButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        channelPlusButton.onClick = [this] { adjustMidiChannel(1); };
+        addAndMakeVisible(channelPlusButton);
+        
+        // Configure sample name label (bottom left)
         sampleNameLabel.setJustificationType(juce::Justification::centredLeft);
         sampleNameLabel.setFont(juce::Font(14.0f, juce::Font::bold));
         sampleNameLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
         addAndMakeVisible(sampleNameLabel);
         
-        // Configure duration label
+        // Configure duration label (bottom right)
         durationLabel.setJustificationType(juce::Justification::centredRight);
         durationLabel.setFont(juce::Font(12.0f));
         durationLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
@@ -1388,7 +1972,7 @@ public:
         // + button on left
         addButton.setBounds(topRow.removeFromLeft(40).reduced(2));
         
-        // Prev/Next buttons on right
+        // Prev/Next buttons on right (no Learn button here anymore)
         auto navArea = topRow.removeFromRight(140);
         prevButton.setBounds(navArea.removeFromLeft(60).reduced(2));
         nextButton.setBounds(navArea.removeFromLeft(60).reduced(2));
@@ -1402,9 +1986,45 @@ public:
         // Waveform area takes full width with margins
         auto waveformRect = area.removeFromTop(waveformHeight);
         waveformRect.reduce(10, 0);
-        waveformArea.setBounds(waveformRect);
         
-        // Add 5px margin between waveform and bottom row
+        if (waveformComponent != nullptr)
+            waveformComponent->setBounds(waveformRect);
+        
+        // Add 5px margin between waveform and MIDI controls
+        area.removeFromTop(5);
+        
+        // MIDI Controls row (Note and Channel side by side)
+        auto midiRow = area.removeFromTop(30);
+        
+        // Split the row into two equal halves
+        auto leftHalf = midiRow.removeFromLeft(midiRow.getWidth() / 2);
+        auto rightHalf = midiRow;
+        
+        // LEFT HALF: Learn button + MIDI Note display
+        const int leftControlWidth = 160;  // Enough for Learn button + note display
+        
+        auto learnNoteArea = leftHalf.withWidth(leftControlWidth).withCentre(leftHalf.getCentre());
+        
+        // Learn button on left (60px)
+        learnButton.setBounds(learnNoteArea.removeFromLeft(60).reduced(2));
+        
+        // Note display on right (100px)
+        midiNoteLabel.setBounds(learnNoteArea.removeFromLeft(100).reduced(2));
+        
+        // RIGHT HALF: MIDI Channel controls (-, display, +)
+        const int channelControlWidth = 120;
+        auto channelControlArea = rightHalf.withWidth(channelControlWidth).withCentre(rightHalf.getCentre());
+        
+        // - button on left (30px)
+        channelMinusButton.setBounds(channelControlArea.removeFromLeft(30).reduced(2));
+        
+        // Numeric display in middle (60px)
+        midiChannelLabel.setBounds(channelControlArea.removeFromLeft(60).reduced(2));
+        
+        // + button on right (30px)
+        channelPlusButton.setBounds(channelControlArea.removeFromLeft(30).reduced(2));
+        
+        // Add 5px margin between MIDI controls and bottom row
         area.removeFromTop(5);
         
         // Bottom row: sample name and duration
@@ -1426,32 +2046,46 @@ public:
         // Draw card border
         g.setColour(juce::Colour(0xFF4A4A4A));
         g.drawRoundedRectangle(getLocalBounds().toFloat(), 8.0f, 1.5f);
-        
-        // Draw waveform border
-        g.setColour(juce::Colours::lightgrey);
-        g.drawRect(waveformArea.getBounds(), 2);
-        
-        // Draw waveform if loaded
-        if (thumbnail.getTotalLength() > 0.0)
-        {
-            // Draw waveform inside the waveformArea
-            auto waveformBounds = waveformArea.getBounds();
-            thumbnail.drawChannel(g, waveformBounds.reduced(2), 0.0, thumbnail.getTotalLength(), 0, 1.0f);
-        }
-        else
-        {
-            // Draw "No waveform" placeholder
-            g.setColour(juce::Colours::darkgrey);
-            g.setFont(juce::Font(14.0f, juce::Font::italic));
-            g.drawText("No waveform", waveformArea.getBounds(), 
-                      juce::Justification::centred, true);
-        }
     }
     
     // Public methods
     juce::TextButton& getAddButton() { return addButton; }
     juce::TextButton& getPrevButton() { return prevButton; }
     juce::TextButton& getNextButton() { return nextButton; }
+    
+    int getMidiNote() const { return currentMidiNote; }
+    int getMidiChannel() const { return currentMidiChannel; }
+    
+    void setMidiNote(int note)
+    {
+        if (note >= 0 && note <= 127 && note != currentMidiNote)
+        {
+            currentMidiNote = note;
+            updateMidiNoteDisplay();
+            
+            // Notify listeners
+            listeners.call([this](Listener& l) { l.midiNoteChanged(currentMidiNote); });
+            
+            printf("MIDI note set to: %d (%s)\n", 
+                   currentMidiNote, 
+                   juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true).toRawUTF8());
+        }
+    }
+    
+    void setMidiChannel(int channel)
+    {
+        if (channel >= 0 && channel <= 16 && channel != currentMidiChannel)
+        {
+            currentMidiChannel = channel;
+            updateMidiChannelDisplay();
+            
+            // Notify listeners
+            listeners.call([this](Listener& l) { l.midiChannelChanged(currentMidiChannel); });
+            
+            printf("MIDI channel set to: %s\n", 
+                   currentMidiChannel == 0 ? "All Channels" : juce::String(currentMidiChannel).toRawUTF8());
+        }
+    }
     
     void setSampleName(const juce::String& name)
     {
@@ -1472,7 +2106,22 @@ public:
         // Create new thumbnail from file
         if (audioFile.existsAsFile())
         {
-            thumbnail.setSource(new juce::FileInputSource(audioFile));
+            // Create a reader for the file
+            std::unique_ptr<juce::AudioFormatReader> reader(
+                formatManager.createReaderFor(audioFile));
+            
+            if (reader != nullptr)
+            {
+                // Set the thumbnail source
+                thumbnail.setSource(new juce::FileInputSource(audioFile));
+                
+                // Force a repaint
+                repaint();
+                if (waveformComponent != nullptr)
+                    waveformComponent->repaint();
+                    
+                printf("Waveform set for: %s\n", audioFile.getFileName().toRawUTF8());
+            }
         }
     }
     
@@ -1480,18 +2129,220 @@ public:
     {
         thumbnail.clear();
         repaint();
+        if (waveformComponent != nullptr)
+            waveformComponent->repaint();
     }
     
-    juce::Rectangle<int> getWaveformArea() const { return waveformArea.getBounds(); }
+    juce::Rectangle<int> getWaveformArea() const 
+    { 
+        if (waveformComponent != nullptr)
+            return waveformComponent->getBounds();
+        return juce::Rectangle<int>();
+    }
+
+    // Add listener for MIDI note changes
+    class Listener
+    {
+    public:
+        virtual ~Listener() = default;
+        virtual void midiNoteChanged(int newNote) = 0;
+        virtual void midiChannelChanged(int newChannel) = 0;
+        virtual void learningModeChanged(bool isLearning) = 0;
+    };
+    
+    void addListener(Listener* listener)
+    {
+        listeners.add(listener);
+    }
+    
+    void removeListener(Listener* listener)
+    {
+        listeners.remove(listener);
+    }
+    
+    // MIDI Learn public methods
+    void setLearningMode(bool learning)
+    {
+        isLearning = learning;
+        learnButton.setToggleState(learning, juce::dontSendNotification);
+        if (isLearning)
+        {
+            learnButton.setButtonText("Learning...");
+            listeners.call([this](Listener& l) { l.learningModeChanged(true); });
+        }
+        else
+        {
+            learnButton.setButtonText("Learn");
+            listeners.call([this](Listener& l) { l.learningModeChanged(false); });
+        }
+    }
+    
+    bool isInLearningMode() const { return isLearning; }
+    
+    void setMidiNoteFromLearn(int note)
+    {
+        if (isLearning && note != currentMidiNote)
+        {
+            currentMidiNote = note;
+            updateMidiNoteDisplay();
+            
+            // Notify listeners of the new note
+            listeners.call([this](Listener& l) { l.midiNoteChanged(currentMidiNote); });
+            
+            // Automatically exit learn mode after setting the note
+            if (isLearning)
+            {
+                isLearning = false;
+                learnButton.setToggleState(false, juce::dontSendNotification);
+                learnButton.setButtonText("Learn");
+                listeners.call([this](Listener& l) { l.learningModeChanged(false); });
+            }
+            
+            printf("MIDI note learned: %d (%s)\n", 
+                   currentMidiNote, 
+                   juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true).toRawUTF8());
+        }
+    }
 
 private:
-    // AudioThumbnail requires a listener implementation
+    // Custom component to handle waveform drawing
+    class WaveformComponent : public juce::Component
+    {
+    public:
+        WaveformComponent(juce::AudioThumbnail& thumb) : thumbnail(thumb)
+        {
+            setOpaque(true);
+        }
+        
+        void paint(juce::Graphics& g) override
+        {
+            auto bounds = getLocalBounds();
+            
+            // Fill background
+            g.setColour(juce::Colour(0xFF3A3A3A));
+            g.fillRect(bounds);
+            
+            // Draw border
+            g.setColour(juce::Colours::lightgrey);
+            g.drawRect(bounds, 2);
+            
+            // Draw waveform if loaded
+            if (thumbnail.getTotalLength() > 0.0)
+            {
+                // Draw the waveform
+                g.setColour(juce::Colours::cyan);
+                thumbnail.drawChannels(g, bounds.reduced(2), 0.0, thumbnail.getTotalLength(), 1.0f);
+            }
+            else
+            {
+                // Draw placeholder
+                g.setColour(juce::Colours::darkgrey);
+                g.setFont(juce::Font(14.0f, juce::Font::italic));
+                g.drawText("No waveform", bounds, juce::Justification::centred, true);
+            }
+        }
+        
+    private:
+        juce::AudioThumbnail& thumbnail;
+    };
+    
+    // AudioThumbnail listener implementation
     void changeListenerCallback(juce::ChangeBroadcaster* source) override
     {
         if (source == &thumbnail)
         {
             // Thumbnail has been updated, repaint
             repaint();
+            if (waveformComponent != nullptr)
+                waveformComponent->repaint();
+        }
+    }
+    
+    void adjustMidiNote(int delta)
+    {
+        int newNote = currentMidiNote + delta;
+        
+        // Constrain to valid MIDI range (0-127)
+        if (newNote >= 0 && newNote <= 127)
+        {
+            currentMidiNote = newNote;
+            updateMidiNoteDisplay();
+            
+            // Notify listeners
+            listeners.call([this](Listener& l) { l.midiNoteChanged(currentMidiNote); });
+            
+            printf("MIDI note changed to: %d (%s)\n", 
+                   currentMidiNote, 
+                   juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true).toRawUTF8());
+        }
+    }
+    
+    void adjustMidiChannel(int delta)
+    {
+        int newChannel = currentMidiChannel + delta;
+        
+        // Allow channel 0 for "All Channels", then 1-16
+        if (delta > 0) // Incrementing
+        {
+            if (currentMidiChannel == 16)
+                newChannel = 0; // Wrap to All Channels
+            else if (currentMidiChannel == 0)
+                newChannel = 1; // From All to channel 1
+        }
+        else if (delta < 0) // Decrementing
+        {
+            if (currentMidiChannel == 1)
+                newChannel = 0; // Wrap to All Channels
+            else if (currentMidiChannel == 0)
+                newChannel = 16; // From All to channel 16
+        }
+        
+        // Ensure valid range
+        if (newChannel >= 0 && newChannel <= 16)
+        {
+            currentMidiChannel = newChannel;
+            updateMidiChannelDisplay();
+            
+            // Notify listeners
+            listeners.call([this](Listener& l) { l.midiChannelChanged(currentMidiChannel); });
+            
+            printf("MIDI channel changed to: %s\n", 
+                   currentMidiChannel == 0 ? "All Channels" : juce::String(currentMidiChannel).toRawUTF8());
+        }
+    }
+    
+    void updateMidiNoteDisplay()
+    {
+        juce::String noteName = juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true);
+        midiNoteLabel.setText(juce::String(currentMidiNote) + " (" + noteName + ")", 
+                              juce::dontSendNotification);
+    }
+    
+    void updateMidiChannelDisplay()
+    {
+        if (currentMidiChannel == 0)
+            midiChannelLabel.setText("Ch All", juce::dontSendNotification);
+        else
+            midiChannelLabel.setText("Ch " + juce::String(currentMidiChannel), 
+                                     juce::dontSendNotification);
+    }
+    
+    void toggleLearnMode()
+    {
+        isLearning = !isLearning;
+        learnButton.setToggleState(isLearning, juce::dontSendNotification);
+        
+        if (isLearning)
+        {
+            learnButton.setButtonText("Learning...");
+            // Notify listeners that we're entering learn mode
+            listeners.call([this](Listener& l) { l.learningModeChanged(true); });
+        }
+        else
+        {
+            learnButton.setButtonText("Learn");
+            // Notify listeners that we're exiting learn mode
+            listeners.call([this](Listener& l) { l.learningModeChanged(false); });
         }
     }
     
@@ -1499,15 +2350,35 @@ private:
     juce::TextButton addButton{"+"};
     juce::TextButton prevButton{"Prev"};
     juce::TextButton nextButton{"Next"};
-    juce::Label waveformArea;
+    juce::TextButton learnButton{"Learn"};  // MIDI Learn button
+    std::unique_ptr<WaveformComponent> waveformComponent;
+    
+    // MIDI Note controls
+    juce::Label midiNoteLabel;
+    int currentMidiNote = 60;  // Default to Middle C
+    
+    // MIDI Channel controls
+    juce::TextButton channelMinusButton{"-"};
+    juce::Label midiChannelLabel;
+    juce::TextButton channelPlusButton{"+"};
+    int currentMidiChannel = 1;  // Default to channel 1
+    
     juce::Label sampleNameLabel;
     juce::Label durationLabel;
+    
+    // MIDI Learn state
+    bool isLearning = false;
+    
+    // Audio components
+    juce::AudioFormatManager& formatManager;
     
     // Waveform components
     juce::AudioThumbnailCache thumbnailCache;
     juce::AudioThumbnail thumbnail;
+    
+    // Listener list
+    juce::ListenerList<Listener> listeners;
 };
-
 
 #include "UIComponents.h"
 #include "MainComponent.h"
@@ -1672,11 +2543,12 @@ void MidiSelectorComponent::comboBoxChanged(juce::ComboBox* combo)
     {
         // Disable MIDI input
         owner.setCurrentMidiDeviceName(juce::String());
-        
-        // Close any open MIDI input
         owner.stopMidiInput();
-        
         statusLabel.setText("MIDI Input: Disabled", juce::dontSendNotification);
+        
+        // Notify session manager
+        owner.midiDeviceChanged(juce::String());
+        owner.updateDeviceInfo();
     }
     else
     {
@@ -1685,16 +2557,18 @@ void MidiSelectorComponent::comboBoxChanged(juce::ComboBox* combo)
         {
             juce::String deviceName = deviceNames[index];
             owner.setCurrentMidiDeviceName(deviceName);
-            
-            // Update status text
             statusLabel.setText("MIDI Input: " + deviceName, juce::dontSendNotification);
             
-            // Open the new MIDI device
+            // Stop any existing input first
+            owner.stopMidiInput();
+            
+            // Open device synchronously (we're already on the message thread)
             owner.startMidiInput(deviceName);
+            owner.midiDeviceChanged(deviceName);
+            owner.updateDeviceInfo();
         }
     }
     updateStatusLabel();
-    owner.updateDeviceInfo(); // Update the main display
 }
 
 void MidiSelectorComponent::updateStatusLabel()
@@ -1895,6 +2769,7 @@ public:
         virtual void stopMidiInput() = 0;
         virtual void startMidiInput(const juce::String& deviceName) = 0;
         virtual void updateDeviceInfo() = 0;
+        virtual void midiDeviceChanged(const juce::String& newDevice) = 0;
     };
     
     MidiSelectorComponent(OwnerInterface& owner, const juce::StringArray& devices);

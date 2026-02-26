@@ -161,11 +161,12 @@ void MidiSelectorComponent::comboBoxChanged(juce::ComboBox* combo)
     {
         // Disable MIDI input
         owner.setCurrentMidiDeviceName(juce::String());
-        
-        // Close any open MIDI input
         owner.stopMidiInput();
-        
         statusLabel.setText("MIDI Input: Disabled", juce::dontSendNotification);
+        
+        // Notify session manager
+        owner.midiDeviceChanged(juce::String());
+        owner.updateDeviceInfo();
     }
     else
     {
@@ -174,16 +175,18 @@ void MidiSelectorComponent::comboBoxChanged(juce::ComboBox* combo)
         {
             juce::String deviceName = deviceNames[index];
             owner.setCurrentMidiDeviceName(deviceName);
-            
-            // Update status text
             statusLabel.setText("MIDI Input: " + deviceName, juce::dontSendNotification);
             
-            // Open the new MIDI device
+            // Stop any existing input first
+            owner.stopMidiInput();
+            
+            // Open device synchronously (we're already on the message thread)
             owner.startMidiInput(deviceName);
+            owner.midiDeviceChanged(deviceName);
+            owner.updateDeviceInfo();
         }
     }
     updateStatusLabel();
-    owner.updateDeviceInfo(); // Update the main display
 }
 
 void MidiSelectorComponent::updateStatusLabel()

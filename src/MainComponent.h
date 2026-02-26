@@ -10,6 +10,8 @@
 
 #include "UIComponents.h"
 #include "SampleCard.h"
+#include "ConfigurationManager.h"
+#include "MidiActivityLight.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -17,7 +19,8 @@ class MainComponent : public juce::AudioAppComponent,
                       public juce::MidiInputCallback,
                       public juce::Slider::Listener,
                       public MidiSelectorComponent::OwnerInterface,
-                      public MappingComponent::OwnerInterface
+                      public MappingComponent::OwnerInterface,
+                      public SampleCard::Listener  // Add this
 {
 public:
     MainComponent();
@@ -76,7 +79,7 @@ private:
     //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
-    void loadSampleFileAsync(const juce::File& file);
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true);
     void updateSamplerSounds();
     
     // Audio device management
@@ -104,6 +107,16 @@ private:
     void navigateToFile(int index);
     void loadNextSample();
     void loadPrevSample();
+    
+    //==============================================================================
+    // SampleCard::Listener implementation
+    void midiNoteChanged(int newNote) override;
+    void midiChannelChanged(int newChannel) override;
+    void learningModeChanged(bool isLearning) override;
+
+    //==============================================================================
+    // MIDI Learn handling
+    void handleMidiLearn(int noteNumber);
 
     //==============================================================================
     // UI Components
@@ -136,6 +149,9 @@ private:
     juce::StringArray midiInputNames;
     juce::String currentMidiDeviceName;
     juce::CriticalSection midiLock;  // Thread safety for MIDI device management
+    
+    // MIDI Learn mode
+    bool isLearningMode = false;
     
     //==============================================================================
     // Sine wave generation
@@ -218,15 +234,28 @@ private:
     }
     void stopMidiInput() override 
     { 
+        juce::ScopedLock lock(midiLock);
+        
         if (midiInput != nullptr)
         {
+            // First stop the input
             midiInput->stop();
+            
+            // Then reset the unique_ptr to properly delete the object
             midiInput.reset();
         }
-        midiCollector.reset(sampler.getSampleRate());
+        
+        // Reset the collector with current sample rate (or default if not playing)
+        double sampleRate = sampler.getSampleRate();
+        if (sampleRate <= 0)
+            sampleRate = 44100.0; // Default if not set
+            
+        midiCollector.reset(sampleRate);
     }
     void startMidiInput(const juce::String& deviceName) override
     {
+        juce::ScopedLock lock(midiLock);
+        
         auto devices = juce::MidiInput::getAvailableDevices();
         for (auto& device : devices)
         {
@@ -236,6 +265,11 @@ private:
                 if (midiInput != nullptr)
                 {
                     midiInput->start();
+                    printf("MIDI input started: %s\n", deviceName.toRawUTF8());
+                }
+                else
+                {
+                    printf("ERROR: Failed to open MIDI device: %s\n", deviceName.toRawUTF8());
                 }
                 break;
             }
@@ -255,6 +289,18 @@ private:
     juce::Label& getHighNoteLabel() override { return highNoteLabel; }
     juce::Label& getRootNoteLabel() override { return rootNoteLabel; }
     juce::Label& getMappingInstructions() override { return mappingInstructions; }
+
+    //==============================================================================
+    // Session persistence
+    std::unique_ptr<ConfigurationManager> configManager;
+    MidiActivityLight midiActivityLight;
+    
+    //==============================================================================
+    // Session management methods
+    void loadLastSession();
+    void saveCurrentSession();
+    bool isValidMidiDevice(const juce::String& deviceName);
+    void midiDeviceChanged(const juce::String& newDevice);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
