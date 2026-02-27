@@ -187,8 +187,8 @@ void MainComponent::paint(juce::Graphics& g)
     auto lineY = titleArea.getBottom() + 5;
     g.drawHorizontalLine(lineY, 20, getWidth() - 20);
     
-    // Line above footer
-    auto footerY = getHeight() - 100;
+    // Line above footer - adjusted for reduced footer height (50px + 20px padding)
+    auto footerY = getHeight() - 70;
     g.drawHorizontalLine(footerY, 20, getWidth() - 20);
 }
 
@@ -248,22 +248,36 @@ void MainComponent::resized()
         sampleCard.setBounds(cardBounds);
     }
     
-    // Footer area at bottom
-    auto footerArea = getLocalBounds().reduced(20).removeFromBottom(80);
+    // Footer area at bottom - reduced by 40% (from 80px to 48px, using 50px for clean math)
+    auto footerArea = getLocalBounds().reduced(20).removeFromBottom(50);
     
-    // Left side: Device info (two lines)
-    auto leftFooter = footerArea.removeFromLeft(footerArea.getWidth() * 0.6);
-    auto audioFooter = leftFooter.removeFromTop(30);
-    audioDeviceInfoLabel.setBounds(audioFooter.reduced(5, 0));
+    // Left side: Device info - two rows with vertical centering
+    // Use all available space before CPU indicator
+    auto leftFooter = footerArea.withTrimmedRight(130); // Reserve space for CPU label + padding
+    
+    // Calculate row height for two rows with vertical centering
+    const int rowHeight = 20; // Each row gets 20px
+    const int totalRowsHeight = rowHeight * 2;
+    const int verticalPadding = (footerArea.getHeight() - totalRowsHeight) / 2;
+    
+    // Audio info row (top)
+    auto audioRow = leftFooter.removeFromTop(rowHeight).translated(0, verticalPadding);
+    audioRow.removeFromLeft(5); // Left margin
+    audioDeviceInfoLabel.setBounds(audioRow);
     audioDeviceInfoLabel.setFont(juce::Font(10.0f));
+    audioDeviceInfoLabel.setJustificationType(juce::Justification::left);
     
-    auto midiFooter = leftFooter.removeFromTop(30);
-    midiDeviceInfoLabel.setBounds(midiFooter.reduced(5, 0));
+    // MIDI info row (bottom)
+    auto midiRow = leftFooter.removeFromTop(rowHeight).translated(0, verticalPadding);
+    midiRow.removeFromLeft(5); // Left margin
+    midiDeviceInfoLabel.setBounds(midiRow);
     midiDeviceInfoLabel.setFont(juce::Font(10.0f));
+    midiDeviceInfoLabel.setJustificationType(juce::Justification::left);
     
-    // Right side: CPU usage
+    // Right side: CPU usage - maintain current positioning
     cpuUsageLabel.setBounds(footerArea.removeFromRight(120).reduced(5));
     cpuUsageLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+    cpuUsageLabel.setJustificationType(juce::Justification::right);
     
     isResizing = false;
 }
