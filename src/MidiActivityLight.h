@@ -10,6 +10,8 @@ public:
     {
         setSize(16, 16);
         startTimer(50); // Check every 50ms for activity timeout
+        lastActivityTime = 0;
+        isActive = false;
     }
     
     ~MidiActivityLight()
@@ -21,47 +23,67 @@ public:
     {
         auto bounds = getLocalBounds().toFloat().reduced(2);
         
-        // Draw outer circle
+        // Draw outer circle (always visible)
         g.setColour(juce::Colours::darkgrey);
         g.fillEllipse(bounds);
         
         // Draw inner circle based on activity
         if (isActive)
         {
-            // Bright yellow for note activity
+            // Bright yellow for MIDI activity
             g.setColour(juce::Colours::yellow);
             g.fillEllipse(bounds.reduced(2));
         }
         else
         {
-            // Completely black/dark when off
-            g.setColour(juce::Colour(0xFF111111));
+            // Dark/black when off
+            g.setColour(juce::Colour(0xFF222222));
             g.fillEllipse(bounds.reduced(2));
+            
+            // Add a subtle outline to show the light is present but off
+            g.setColour(juce::Colours::darkgrey.brighter(0.3f));
+            g.drawEllipse(bounds.reduced(2), 0.5f);
         }
+    }
+    
+    void triggerActivity()
+    {
+        // Always turn on for note-on events
+        isActive = true;
+        lastActivityTime = juce::Time::getMillisecondCounter();
+        
+        // Always repaint on the message thread
+        juce::MessageManager::callAsync([this] { repaint(); });
     }
     
     void noteOn()
     {
-        isActive = true;
-        lastActivityTime = juce::Time::getMillisecondCounter();
-        juce::MessageManager::callAsync([this] { repaint(); });
+        // Always turn on for note-on events
+        triggerActivity();
     }
     
     void noteOff()
     {
-        // Note: We don't turn off immediately on note off
-        // The timer will handle turning off after a short delay
-        lastActivityTime = juce::Time::getMillisecondCounter();
+        // For note-off events, we still want visual feedback
+        // but it's often less intense - we'll trigger a brief flash
+        triggerActivity();
     }
     
 private:
     void timerCallback() override
     {
-        // Turn off after 50ms of no activity
-        if (isActive && (juce::Time::getMillisecondCounter() - lastActivityTime) > 50)
+        // Check if we've been inactive for more than 50ms
+        auto now = juce::Time::getMillisecondCounter();
+        auto timeSinceLastActivity = now - lastActivityTime;
+        
+        // Turn off if inactive and currently on
+        if (isActive && timeSinceLastActivity > 50)
         {
             isActive = false;
-            juce::MessageManager::callAsync([this] { repaint(); });
+            juce::MessageManager::callAsync([this] { 
+                repaint();
+                printf("MIDI Light turned off\n");
+            });
         }
     }
     

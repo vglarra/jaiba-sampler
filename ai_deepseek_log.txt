@@ -6,7 +6,7 @@
 ===============================================================================
 
 PROJECT_NAME: JUCE Sampler
-LAST_UPDATED: 2026-02-18
+LAST_UPDATED: 2026-02-27
 CURRENT_STATUS: CORE FUNCTIONALITY COMPLETE
 
 ===============================================================================
@@ -43,7 +43,11 @@ mysampler/
 ├── src/
 │   ├── Main.cpp
 │   ├── MainComponent.cpp
-│   └── MainComponent.h
+│   ├── MainComponent.h
+│   ├── SampleCard.h
+│   ├── MidiActivityLight.h
+│   ├── UIComponents.cpp
+│   └── UIComponents.h
 └── lib/
     └── JUCE/ (v8.0.12 @ 501c076)
 
@@ -136,6 +140,51 @@ CLEAN REBUILD:
 - [x] Centered button layout
 - [x] Section separators and labels
 
+[2026-02-19] AUDIO PREVIEW
+- [x] Instant audio preview in file chooser
+- [x] Auto-play on file selection with delay
+- [x] File info display (sample rate, channels, duration)
+- [x] Looping preview capability
+
+[2026-02-22] UI REDESIGN - CARD-BASED SAMPLE VIEW
+- [x] Created reusable SampleCard component
+- [x] 8cm x 4cm sample view area with proper scaling
+- [x] Integrated + button, Prev/Next navigation on card
+- [x] Sample name display (bottom left)
+- [x] Duration display (bottom right) with auto-calculation
+- [x] Responsive card layout with 10px margins
+- [x] Fixed footer positioning
+- [x] Visual card styling with rounded corners and borders
+- [x] Proper spacing between UI elements
+
+[2026-02-22] WAVEFORM VISUALIZATION
+- [x] Real-time waveform display using JUCE AudioThumbnail
+- [x] Dedicated WaveformComponent for clean rendering
+- [x] Cyan-colored waveform on dark background
+- [x] Async thumbnail generation (non-blocking)
+- [x] Automatic repaint on thumbnail updates
+- [x] 512px resolution with 5-entry cache for performance
+- [x] Debug output for thumbnail generation confirmation
+
+[2026-02-26] SESSION PERSISTENCE AND MIDI MANAGEMENT
+- [x] Full application state persists between sessions
+- [x] MIDI note/channel/device settings persistence
+- [x] ConfigurationManager for centralized settings storage
+- [x] Immediate session saving on MIDI changes
+- [x] MIDI Learn integration with automatic persistence
+- [x] UI stability fixes with recursive resizing prevention
+- [x] Enhanced async loading with proper thread safety
+
+[2026-02-27] MIDI ACTIVITY LIGHT FIX
+- [x] Fixed MIDI activity light to blink properly on all MIDI events
+- [x] Added MidiActivityLight component with timer-based timeout
+- [x] Light triggers for note-on, note-off, controllers, etc.
+- [x] Filters out background MIDI messages (clock, active sense)
+- [x] Light stays on for 50ms after each activity
+- [x] Shows activity from ALL MIDI channels (before channel filtering)
+- [x] Clean visual feedback with black-to-yellow blinking
+- [x] Properly positioned in title area with setAlwaysOnTop
+
 ===============================================================================
 ## SECTION 7: TESTED HARDWARE
 ===============================================================================
@@ -168,6 +217,14 @@ OPTIMAL_BUFFER_SIZE: 256-512 samples for Delta 1010LT on Windows 10
 4. Windows Audio Modes: Low Latency mode forces driver's preferred buffer size (441 samples)
 5. ListBox Initialization: Model must be fully constructed before ListBox uses it
 6. Member Initialization Order: Members initialized in declaration order, not initializer list order
+7. Card-Based UI Design: Encapsulating related UI elements in dedicated components improves maintainability
+8. Responsive Layout: Using relative sizing and centering creates adaptable UIs
+9. Duration Calculation: Simple division of samples by sample rate provides accurate audio length
+10. Component Communication: Using getters/setters maintains clean component boundaries
+11. AudioThumbnail Best Practices: 512px resolution provides good balance between performance and visual quality
+12. Async UI Updates: ChangeListener pattern enables non-blocking thumbnail generation
+13. Separate Rendering Components: Dedicated WaveformComponent isolates drawing logic for cleaner code
+14. MIDI Activity Light: Timer-based visual feedback with background message filtering prevents continuous flashing
 
 ===============================================================================
 ## SECTION 10: FIXED COMPILATION ISSUES
@@ -194,9 +251,10 @@ AUDIO:
 MIDI:
 - Device enumeration and selection
 - Note On/Off with velocity sensitivity
-- Real-time message handling
+- Real-time message handling with activity light
 - Channel preservation
 - Controller message monitoring
+- MIDI Learn mode with session persistence
 
 SAMPLING:
 - Multi-sample loading
@@ -205,16 +263,18 @@ SAMPLING:
 - Automatic note range assignment
 - Sample list display
 - Real-time sampler updates
+- Session persistence for MIDI settings
 
 UI:
-- Clean dark theme
-- Centered button layout
-- System status footer
-- Current sample display
-- Audio device info
-- MIDI device info
+- Clean dark theme with card-based interface
+- Centered button layout with Menu and Test tone buttons
+- System status footer with device info
+- Current sample display with waveform visualization
+- Audio device info display
+- MIDI device info display
 - CPU usage display
-- Mapping interface with sliders
+- MIDI activity light in title area
+- Sample navigation (Prev/Next) within folder
 
 ===============================================================================
 ## SECTION 12: SAMPLE CONSOLE OUTPUT
@@ -243,15 +303,16 @@ Sample added to map: BassDrum.wav
 ===============================================================================
 
 PRIORITY 1 (IMMEDIATE):
-- [ ] Waveform display for loaded samples
 - [ ] ADSR envelope controls (Attack, Decay, Sustain, Release)
 - [ ] Preset saving/loading for sample mappings
+- [ ] Zoomable waveform with playhead position
 
 PRIORITY 2 (SHORT-TERM):
 - [ ] Velocity curves for dynamic response
 - [ ] Pitch bend support
 - [ ] Modulation wheel support
 - [ ] Visual keyboard feedback
+- [ ] Multiple sample cards for layer support
 
 PRIORITY 3 (LONG-TERM):
 - [ ] Multi-output routing
@@ -266,35 +327,70 @@ PRIORITY 3 (LONG-TERM):
 ===============================================================================
 
 - Single audio output only (no multi-output routing)
-- No waveform visualization
+- Waveform visualization is static (no zoom/scroll yet)
 - No envelope shaping
 - No preset system
 - No effects processing
 - Maximum 128 MIDI notes (hardware limit)
 - Maximum 16 sampler voices
+- Single sample card only (no multi-layer support yet)
 
 ===============================================================================
 ## SECTION 15: GIT COMMIT HISTORY SUMMARY
 ===============================================================================
 
 COMMIT: ce3fc38
-DATE: Initial
+DATE: 2026-02-15
 MESSAGE: "Initial commit: JUCE sampler project"
 
-COMMIT: [Pending]
+COMMIT: a7b3e92
 DATE: 2026-02-18
-MESSAGE: "Core sampler functionality complete
-
-- Multi-sample mapping working with note range editing
-- MIDI input fully functional with velocity sensitivity
-- Audio output working with Delta 1010LT
-- Clean UI with system status footer
-- Fixed JUCE 8.0.12 string handling issues
-- Resolved ListBox/model initialization crash
-- Added sample list with note range display
-- Implemented mapping interface with sliders"
+MESSAGE: "Core sampler functionality complete"
 
 TAG: v1.0-core-sampler
+
+COMMIT: 8d4f1a7
+DATE: 2026-02-19
+MESSAGE: "Add instant audio preview to file chooser"
+
+COMMIT: 9b2e5c3
+DATE: 2026-02-22
+MESSAGE: "UI redesign: Implement card-based sample view with responsive layout"
+
+TAG: v1.1-ui-redesign
+
+COMMIT: f7d3e8b
+DATE: 2026-02-22
+MESSAGE: "Add waveform visualization to SampleCard"
+
+TAG: v1.2-waveform
+
+COMMIT: c26a601
+DATE: 2026-02-26
+MESSAGE: "feat: Complete session persistence and MIDI management overhaul"
+
+COMMIT: [To be committed]
+DATE: 2026-02-27
+MESSAGE: "fix: MIDI activity light visual feedback
+
+• Fixed MIDI activity light to blink properly on all MIDI events
+• Added MidiActivityLight component with 50ms timer-based timeout
+• Light now triggers for note-on, note-off, controllers, and other meaningful MIDI messages
+• Filters out background MIDI messages (MIDI Clock, Active Sense) to prevent continuous flashing
+• Shows activity from ALL MIDI channels (triggers before channel filtering)
+• Clean visual feedback with black-to-yellow blinking effect
+• Properly positioned in title area with setAlwaysOnTop for visibility
+• Light stays on for 50ms after each activity then automatically turns off
+• Test tone button also triggers the light for manual testing
+
+Technical improvements:
+- Created MidiActivityLight.h component with timer-based visual feedback
+- Updated MainComponent.cpp to filter background MIDI messages
+- All visual updates happen on the message thread via MessageManager::callAsync()
+- Added noteOn() and noteOff() methods for consistent visual feedback
+- Fixed compilation issues with proper function signatures"
+
+TAG: v1.3-midi-feedback
 
 ===============================================================================
 ## SECTION 16: LESSONS LEARNED FOR FUTURE DEVELOPMENT
@@ -308,6 +404,8 @@ TAG: v1.0-core-sampler
 6. Use NOMINMAX on Windows to prevent macro conflicts with std::min/std::max
 7. ListBox models should be created after the main component is constructed
 8. Always add debug output during development for troubleshooting
+9. MIDI activity lights need timer-based timeouts and background message filtering
+10. Visual feedback should happen on the message thread to avoid UI threading issues
 
 ===============================================================================
 ## SECTION 17: PROJECT COMPLETION STATUS
@@ -320,9 +418,10 @@ CORE FUNCTIONALITY: COMPLETE
 - Multi-sample mapping: WORKING
 - Device configuration: WORKING
 - UI layout: WORKING
+- Session persistence: WORKING
+- MIDI activity feedback: WORKING
 
 EXTENDED FEATURES: NOT STARTED
-- Waveform display: PENDING
 - ADSR envelopes: PENDING
 - Preset system: PENDING
 - Effects: PENDING
@@ -353,383 +452,110 @@ EXTENDED FEATURES: NOT STARTED
 - src/MainComponent.cpp (added AudioPreviewComponent)
 - src/MainComponent.h (added fileChooser member)
 
-
-Project: Jaiva Sampler V001 - UI Redesign
-
-I need you to modify my JUCE sampler application to match this UI layout:
-
-## Window Title
-- Set window title to "Jaiva Sampler V001"
-
-## Top Bar
-- Single button on the left side labeled "Menu"
-- When clicked, it opens a dropdown/popup menu with two options:
-  * "Audio Settings" - opens audio device configuration dialog
-  * "MIDI Settings" - opens MIDI input selection dialog
-- On the right side of top bar, add a button labeled "Test tone"
-
-## Main Body (Center Area)
-- Large central area showing "Sample view" (placeholder for waveform)
-- At the TOP LEFT of the sample view area: a "+" button
-  * Clicking this opens file chooser to load a sample
-  * When a sample is selected, it becomes the CURRENT SAMPLE
-  * The directory containing this sample becomes the "current folder"
-
-- At the TOP RIGHT of the sample view area: two buttons side by side
-  * "Prev" button (left arrow or text)
-  * "Next" button (right arrow or text)
-  * These buttons navigate through audio files in the CURRENT FOLDER
-  * After loading a sample via "+", the folder is scanned for audio files
-  * Prev/Next load the previous/next audio files in that same folder
-  * This allows browsing through all samples in a folder without opening file chooser again
-  * Should wrap around at folder boundaries
-
-## Footer (Bottom Bar)
-- Left side: Two lines of information
-  * Top line: Sound card info (audio device name, sample rate, buffer size)
-  * Bottom line: MIDI info (connected device name)
-- Right side: CPU usage percentage (format: "CPU X.XX%")
-  * Update in real-time (every 500ms)
-  * Match the style shown: "CPU 0.23"
-
-## Visual Style
-- Dark theme (current dark grey background works)
-- Buttons should have subtle styling
-- Sample view area can initially be empty or show a placeholder
-- Footer text should be smaller font (10-11pt) in light grey
-
-## Expected Behavior
-1. Click Menu → Audio Settings: opens JUCE audio device selector
-2. Click Menu → MIDI Settings: opens MIDI device selector
-3. Click Test tone: toggles sine wave test tone (already implemented)
-4. Click + in sample view: opens file chooser to select a sample
-5. After loading a sample, the folder is scanned for other audio files
-6. Prev/Next buttons navigate through files in that folder
-7. Footer updates show current device info
-8. CPU usage updates in real-time
-
-## Important Clarification
-- There is NO playlist system - the Prev/Next simply browse the file system
-- When you click + and select a file, that file's directory becomes the navigation context
-- Prev/Next then move to previous/next audio files in that same directory
-- This allows quick browsing through a folder of samples without repeatedly opening file chooser
-
+===============================================================================
+## SECTION 19: FEATURE ADDED - CARD-BASED SAMPLE VIEW UI (2026-02-22)
 ===============================================================================
 
-SECTION 15: GIT COMMIT HISTORY SUMMARY
-===============================================================================
+### New Feature:
+- Complete UI redesign with card-based sample view
+- Created dedicated SampleCard component encapsulating all sample-related controls
+- Responsive 8cm x 4cm sample view area that scales with window size
 
-COMMIT: ce3fc38
-DATE: 2026-02-15
-MESSAGE: "Initial commit: JUCE sampler project"
+### Technical Implementation:
+- New SampleCard class inheriting from juce::Component
+- Smart layout with proper spacing between elements
+- Duration calculation from AudioFormatReader
+- Thread-safe UI updates via MessageManager
 
-COMMIT: a7b3e92
-DATE: 2026-02-18
-MESSAGE: "Core sampler functionality complete
+### User Experience:
+- Professional card-based interface
+- Clear visual hierarchy
+- Intuitive control placement
+- Real-time duration feedback
 
-Multi-sample mapping working with note range editing
-
-MIDI input fully functional with velocity sensitivity
-
-Audio output working with Delta 1010LT
-
-Clean UI with system status footer
-
-Fixed JUCE 8.0.12 string handling issues
-
-Resolved ListBox/model initialization crash
-
-Added sample list with note range display
-
-Implemented mapping interface with sliders"
-
-TAG: v1.0-core-sampler
-
-COMMIT: 8d4f1a7
-DATE: 2026-02-19
-MESSAGE: "Add instant audio preview to file chooser
-
-Created AudioPreviewComponent for file browser
-
-Files auto-play when selected with 300ms delay
-
-Display file info (sample rate, channels, duration)
-
-Looping preview for continuous auditioning
-
-Seamless preview switching while scrolling"
-
-COMMIT: 9b2e5c3
-DATE: 2026-02-22
-MESSAGE: "UI redesign: Implement card-based sample view with responsive layout
-
-Created SampleCard component encapsulating sample view controls
-
-Added 8cm x 4cm sample view area with proper scaling
-
-Implemented + button (left) and Prev/Next navigation (right) on card top
-
-Added sample name display (bottom left) and duration display (bottom right)
-
-Fixed footer positioning to stay at bottom of window
-
-Added proper margin handling (10px) around card content
-
-Made sample view area width responsive to card size
-
-Added visual card styling with rounded corners and borders
-
-Integrated duration calculation and display from loaded samples
-
-Optimized layout with proper spacing between UI elements
-
-Technical improvements:
-
-Separated sample card logic into dedicated component
-
-Responsive design that adapts to window resizing
-
-Clean separation of concerns between MainComponent and SampleCard
-
-Proper thread-safe sample duration display"
-
-TAG: v1.1-ui-redesign
+### Files Modified:
+- src/SampleCard.h (new component)
+- src/MainComponent.h (integrated SampleCard)
+- src/MainComponent.cpp (updated layout and sample loading)
 
 ===============================================================================
-
-SECTION 6: COMPLETED FEATURES (CHRONOLOGICAL)
+## SECTION 20: FEATURE ADDED - WAVEFORM VISUALIZATION (2026-02-22)
 ===============================================================================
 
-[2026-02-15] INITIAL SETUP
+### New Feature:
+- Professional waveform visualization in the SampleCard
+- Real-time rendering as thumbnails are generated
+- Cyan waveform on dark background for excellent visibility
 
-CMake configuration succeeds
+### Technical Implementation:
+- JUCE AudioThumbnail with 512px resolution
+- 5-entry thumbnail cache for performance
+- Dedicated WaveformComponent inner class
+- ChangeListener for async update notifications
 
-Project builds without errors
+### User Experience:
+- Instant visual feedback when loading samples
+- Professional DAW-like waveform display
+- Smooth, non-blocking UI during thumbnail generation
 
-Window launches with UI
-
-Git repository initialized and committed
-
-JUCE submodule properly tracked
-
-[2026-02-15] FILE LOADING
-
-Windows native file dialog opens and selects files
-
-WAV/AIFF/MP3 files load successfully
-
-Console debug output shows file loading progress
-
-"Audio Settings" button added to UI
-
-JUCE version identified as 8.0.12
-
-[2026-02-15] AUDIO OUTPUT
-
-Audio device selector with 9-argument constructor
-
-Audio settings dialog with proper close behavior
-
-Test note playback through speakers
-
-Delta 1010LT sound card support
-
-Sound output verified working
-
-[2026-02-16] STEREO CONFIGURATION
-
-Fixed JUCE 8.0.12 string operator bool compilation errors
-
-Solved stereo channel glitch by phase-aligning generated audio
-
-Delta 1010LT works cleanly with both channels enabled
-
-Test sine wave implemented for audio verification
-
-[2026-02-16] MIDI IMPLEMENTATION
-
-MIDI device enumeration and selection
-
-Note On/Off with velocity sensitivity
-
-Multiple device support
-
-Real-time performance
-
-MIDI controller monitoring
-
-Channel preservation
-
-[2026-02-17] BUG FIXES
-
-Fixed sample looping issue
-
-Removed automatic test note generator from audio callback
-
-Proper note off handling implemented
-
-[2026-02-18] MULTI-SAMPLE MAPPING
-
-Multi-sample mapping with up to 128 notes
-
-Note range editing interface with sliders
-
-Sample list showing all loaded samples
-
-Automatic note range assignment
-
-Add/remove samples from mapping
-
-Clear all samples function
-
-Update sampler with new mappings in real-time
-
-[2026-02-18] UI ENHANCEMENTS
-
-Clean UI with system status footer
-
-Audio device info display
-
-MIDI device info display
-
-CPU usage monitor
-
-Centered button layout
-
-Section separators and labels
-
-[2026-02-19] AUDIO PREVIEW
-
-Instant audio preview in file chooser
-
-Auto-play on file selection with delay
-
-File info display (sample rate, channels, duration)
-
-Looping preview capability
-
-[2026-02-22] UI REDESIGN - CARD-BASED SAMPLE VIEW
-
-Created reusable SampleCard component
-
-8cm x 4cm sample view area with proper scaling
-
-Integrated + button, Prev/Next navigation on card
-
-Sample name display (bottom left)
-
-Duration display (bottom right) with auto-calculation
-
-Responsive card layout with 10px margins
-
-Fixed footer positioning
-
-Visual card styling with rounded corners and borders
-
-Proper spacing between UI elements
+### Files Modified:
+- src/SampleCard.h (added waveform components)
+- src/MainComponent.h (updated constructor)
+- src/MainComponent.cpp (integrated waveform calls)
 
 ===============================================================================
-
-SECTION 18: FEATURE ADDED - INSTANT AUDIO PREVIEW (2026-02-19)
+## SECTION 21: FEATURE ADDED - SESSION PERSISTENCE (2026-02-26)
 ===============================================================================
 
-New Feature:
-Added AudioPreviewComponent to file chooser
+### New Feature:
+- Full application state persists between sessions
+- MIDI note/channel/device settings persistence
+- ConfigurationManager for centralized settings storage
 
-Files play instantly when clicked/hovered
+### Technical Implementation:
+- Created ConfigurationManager class
+- Added loadLastSession() and saveCurrentSession() methods
+- MIDI Learn integration with automatic persistence
+- Thread-safe async loading with proper session saving
 
-300ms delay prevents accidental playback while scrolling
+### User Experience:
+- Application remembers all settings between restarts
+- MIDI Learn mode saves learned notes immediately
+- Seamless continuity across application sessions
 
-Looping preview for continuous auditioning
-
-File info display (sample rate, channels, length, size)
-
-Technical Implementation:
-Custom class inheriting from juce::FilePreviewComponent
-
-Uses JUCE's AudioTransportSource for playback
-
-Timer-based delay for smooth scrubbing
-
-Clean, minimalist UI without extra controls
-
-User Experience:
-Click any file -> hear it immediately
-
-Move cursor through list -> seamless preview switching
-
-No buttons needed - intuitive professional workflow
-
-Files Modified:
-src/UIComponents.h/cpp (added AudioPreviewComponent)
-
-src/MainComponent.cpp (integrated preview in file chooser)
+### Files Created/Modified:
+- src/ConfigurationManager.h (new class)
+- src/MainComponent.cpp (session management)
+- src/MainComponent.h (configuration manager integration)
 
 ===============================================================================
-
-SECTION 19: FEATURE ADDED - CARD-BASED SAMPLE VIEW UI (2026-02-22)
+## SECTION 22: FEATURE ADDED - MIDI ACTIVITY LIGHT FIX (2026-02-27)
 ===============================================================================
 
-New Feature:
-Complete UI redesign with card-based sample view
+### New Feature:
+- Fixed MIDI activity light to blink properly on all MIDI events
+- Timer-based visual feedback with 50ms timeout
+- Filters background MIDI messages to prevent continuous flashing
 
-Created dedicated SampleCard component encapsulating all sample-related controls
+### Technical Implementation:
+- Created MidiActivityLight.h component
+- Timer-based timeout with MessageManager::callAsync() for UI updates
+- Background MIDI message filtering (Clock, Active Sense)
+- Proper positioning in title area with setAlwaysOnTop()
 
-Responsive 8cm x 4cm sample view area that scales with window size
+### User Experience:
+- Clear visual feedback for all meaningful MIDI activity
+- Light blinks black-to-yellow on note on/off, controllers, etc.
+- Shows activity from all MIDI channels (before filtering)
+- Test tone button also triggers light for manual testing
 
-Integrated controls directly on card:
-
-"+" button top-left for loading samples
-
-"Prev"/"Next" buttons top-right for folder navigation
-
-Sample name display bottom-left
-
-Duration display bottom-right (auto-calculated from audio file)
-
-Proper 10px margins around all card content
-
-Visual enhancements with rounded corners and borders
-
-Technical Implementation:
-New SampleCard class inheriting from juce::Component
-
-Smart layout with proper spacing between elements
-
-Duration calculation from AudioFormatReader
-
-Thread-safe UI updates via MessageManager
-
-Responsive design adapting to window resizing
-
-Clean separation of concerns from MainComponent
-
-User Experience:
-Professional card-based interface
-
-Clear visual hierarchy
-
-Intuitive control placement
-
-Real-time duration feedback
-
-Consistent spacing and margins
-
-Files Modified:
-src/SampleCard.h (new component)
-
-src/MainComponent.h (integrated SampleCard)
-
-src/MainComponent.cpp (updated layout and sample loading)
-
-src/MainComponent.cpp (added duration display functionality)
-
-Files Created:
-src/SampleCard.h - New component for card-based UI
+### Files Created/Modified:
+- src/MidiActivityLight.h (new component)
+- src/MainComponent.cpp (MIDI message filtering and light triggering)
+- src/MainComponent.h (MidiActivityLight integration)
 
 ===============================================================================
-
-SECTION 20: PROJECT STRUCTURE (UPDATED)
+## SECTION 23: PROJECT STRUCTURE (UPDATED)
 ===============================================================================
 
 mysampler/
@@ -739,396 +565,75 @@ mysampler/
 ├── CMakePresets.json
 ├── ai_deepseek_log.txt
 ├── src/
-│ ├── Main.cpp
-│ ├── MainComponent.cpp
-│ ├── MainComponent.h
-│ ├── SampleCard.h # New card component
-│ ├── UIComponents.cpp
-│ └── UIComponents.h
+│   ├── Main.cpp
+│   ├── MainComponent.cpp
+│   ├── MainComponent.h
+│   ├── SampleCard.h
+│   ├── MidiActivityLight.h
+│   ├── ConfigurationManager.h
+│   ├── UIComponents.cpp
+│   └── UIComponents.h
 └── lib/
-└── JUCE/ (v8.0.12 @ 501c076)
+    └── JUCE/ (v8.0.12 @ 501c076)
 
 ===============================================================================
-
-SECTION 21: NEXT FEATURES TO IMPLEMENT (UPDATED)
+## SECTION 24: TECHNICAL INSIGHTS GAINED (UPDATED)
 ===============================================================================
 
-PRIORITY 1 (IMMEDIATE):
+### JUCE 8.0.12 Specific:
+- String operator bool is private - must use isEmpty()/isNotEmpty() explicitly
+- AudioDeviceSelectorComponent takes 7 parameters (not 8)
 
-Waveform display for loaded samples (to be integrated into SampleCard)
+### Audio Hardware:
+- Delta 1010LT requires phase-aligned stereo signals to avoid glitching
+- Optimal buffer size: 256-512 samples for Windows 10
+- Low Latency mode forces driver's preferred buffer size (441 samples)
 
-ADSR envelope controls (Attack, Decay, Sustain, Release)
+### UI Development:
+- Card-based components improve maintainability and code organization
+- MessageManager::callAsync() ensures thread-safe UI updates
+- Responsive layouts using relative sizing create adaptable interfaces
 
-Preset saving/loading for sample mappings
+### MIDI Implementation:
+- Timer-based activity lights need background message filtering
+- Visual feedback should trigger before channel filtering to show all activity
+- Async UI updates prevent blocking during intensive MIDI processing
 
-PRIORITY 2 (SHORT-TERM):
+### Session Management:
+- ConfigurationManager pattern centralizes settings storage
+- Immediate saving on state changes ensures data integrity
+- Async loading with proper locking prevents race conditions
 
-Velocity curves for dynamic response
-
-Pitch bend support
-
-Modulation wheel support
-
-Visual keyboard feedback
-
-Multiple sample cards for layer support
-
-PRIORITY 3 (LONG-TERM):
-
-Multi-output routing
-
-Built-in effects (reverb, delay)
-
-Sample editing (trim, normalize)
-
-MIDI program change support
-
-Aftertouch support
-
-Channel filtering
+### Performance:
+- 512px thumbnail resolution balances visual quality and performance
+- 5-entry cache improves thumbnail generation speed
+- Thread-safe operations prevent UI glitching during intensive tasks
 
 ===============================================================================
-
-SECTION 22: TECHNICAL INSIGHTS GAINED (UPDATED)
+## SECTION 25: LATEST COMMIT MESSAGE
 ===============================================================================
 
-JUCE 8.0.12 String Handling: operator bool is private - must use isEmpty()/isNotEmpty() explicitly
+For the latest changes (2026-02-27):
 
-Delta 1010LT Stereo Requirements: Both channels must receive phase-aligned audio to avoid glitching
+"fix: MIDI activity light visual feedback
 
-Buffer Size Impact: 256-512 samples optimal for Delta 1010LT on Windows 10
+• Fixed MIDI activity light to blink properly on all MIDI events
+• Added MidiActivityLight component with 50ms timer-based timeout
+• Light now triggers for note-on, note-off, controllers, and other meaningful MIDI messages
+• Filters out background MIDI messages (MIDI Clock, Active Sense) to prevent continuous flashing
+• Shows activity from ALL MIDI channels (triggers before channel filtering)
+• Clean visual feedback with black-to-yellow blinking effect
+• Properly positioned in title area with setAlwaysOnTop for visibility
+• Light stays on for 50ms after each activity then automatically turns off
+• Test tone button also triggers the light for manual testing
 
-Windows Audio Modes: Low Latency mode forces driver's preferred buffer size (441 samples)
-
-ListBox Initialization: Model must be fully constructed before ListBox uses it
-
-Member Initialization Order: Members initialized in declaration order, not initializer list order
-
-Card-Based UI Design: Encapsulating related UI elements in dedicated components improves maintainability
-
-Responsive Layout: Using relative sizing and centering creates adaptable UIs
-
-Duration Calculation: Simple division of samples by sample rate provides accurate audio length
-
-Component Communication: Using getters/setters maintains clean component boundaries
-
-===============================================================================
-
-SECTION 23: KNOWN LIMITATIONS (UPDATED)
-===============================================================================
-
-Single audio output only (no multi-output routing)
-
-No waveform visualization (placeholder only)
-
-No envelope shaping
-
-No preset system
-
-No effects processing
-
-Maximum 128 MIDI notes (hardware limit)
-
-Maximum 16 sampler voices
-
-Single sample card only (no multi-layer support yet)
-
+Technical improvements:
+- Created MidiActivityLight.h component with timer-based visual feedback
+- Updated MainComponent.cpp to filter background MIDI messages
+- All visual updates happen on the message thread via MessageManager::callAsync()
+- Added noteOn() and noteOff() methods for consistent visual feedback
+- Fixed compilation issues with proper function signatures"
 
 ===============================================================================
-
-SECTION 15: GIT COMMIT HISTORY SUMMARY - UPDATED
+END OF LOG - LAST UPDATED: 2026-02-27
 ===============================================================================
-
-COMMIT: ce3fc38
-DATE: 2026-02-15
-MESSAGE: "Initial commit: JUCE sampler project"
-
-COMMIT: a7b3e92
-DATE: 2026-02-18
-MESSAGE: "Core sampler functionality complete"
-
-TAG: v1.0-core-sampler
-
-COMMIT: 8d4f1a7
-DATE: 2026-02-19
-MESSAGE: "Add instant audio preview to file chooser"
-
-COMMIT: 9b2e5c3
-DATE: 2026-02-22
-MESSAGE: "UI redesign: Implement card-based sample view with responsive layout"
-
-TAG: v1.1-ui-redesign
-
-COMMIT: f7d3e8b
-DATE: 2026-02-22
-MESSAGE: "Add waveform visualization to SampleCard
-
-Implemented AudioThumbnail for real-time waveform display
-
-Created dedicated WaveformComponent inner class for clean rendering
-
-Added cyan-colored waveform with dark background for visibility
-
-Integrated thumbnail change listener for async loading updates
-
-Added debug output to confirm thumbnail generation
-
-Maintained 8cm x 4cm waveform area with proper margins
-
-Preserved all existing card functionality (+ button, Prev/Next, duration display)
-
-Technical details:
-
-Uses JUCE's AudioThumbnail with 512px resolution
-
-5-entry thumbnail cache for performance
-
-Async thumbnail generation doesn't block UI
-
-Separate component isolates waveform drawing logic
-
-Automatic repaint on thumbnail updates"
-
-TAG: v1.2-waveform
-
-===============================================================================
-
-SECTION 6: COMPLETED FEATURES (CHRONOLOGICAL) - LATEST ADDITIONS
-===============================================================================
-
-[2026-02-22] UI REDESIGN - CARD-BASED SAMPLE VIEW
-
-Created reusable SampleCard component
-
-8cm x 4cm sample view area with proper scaling
-
-Integrated + button, Prev/Next navigation on card
-
-Sample name display (bottom left)
-
-Duration display (bottom right) with auto-calculation
-
-Responsive card layout with 10px margins
-
-Fixed footer positioning
-
-Visual card styling with rounded corners and borders
-
-Proper spacing between UI elements
-
-[2026-02-22] WAVEFORM VISUALIZATION
-
-Real-time waveform display using JUCE AudioThumbnail
-
-Dedicated WaveformComponent for clean rendering
-
-Cyan-colored waveform on dark background
-
-Async thumbnail generation (non-blocking)
-
-Automatic repaint on thumbnail updates
-
-512px resolution with 5-entry cache for performance
-
-Debug output for thumbnail generation confirmation
-
-===============================================================================
-
-SECTION 19: FEATURE ADDED - WAVEFORM VISUALIZATION (2026-02-22)
-===============================================================================
-
-New Feature:
-Professional waveform visualization in the SampleCard
-
-Real-time rendering as thumbnails are generated
-
-Cyan waveform on dark background for excellent visibility
-
-Non-blocking async thumbnail generation
-
-Technical Implementation:
-JUCE AudioThumbnail with 512px resolution
-
-5-entry thumbnail cache for performance
-
-Dedicated WaveformComponent inner class
-
-ChangeListener for async update notifications
-
-Automatic repaint on thumbnail completion
-
-User Experience:
-Instant visual feedback when loading samples
-
-Professional DAW-like waveform display
-
-Smooth, non-blocking UI during thumbnail generation
-
-Clear visual representation of audio content
-
-Files Modified:
-src/SampleCard.h (added waveform components)
-
-src/MainComponent.h (updated constructor)
-
-src/MainComponent.cpp (integrated waveform calls)
-
-===============================================================================
-
-SECTION 21: NEXT FEATURES TO IMPLEMENT (UPDATED)
-===============================================================================
-
-PRIORITY 1 (IMMEDIATE):
-
-ADSR envelope controls (Attack, Decay, Sustain, Release)
-
-Preset saving/loading for sample mappings
-
-Zoomable waveform with playhead position
-
-PRIORITY 2 (SHORT-TERM):
-
-Velocity curves for dynamic response
-
-Pitch bend support
-
-Modulation wheel support
-
-Visual keyboard feedback
-
-Multiple sample cards for layer support
-
-PRIORITY 3 (LONG-TERM):
-
-Multi-output routing
-
-Built-in effects (reverb, delay)
-
-Sample editing (trim, normalize)
-
-MIDI program change support
-
-Aftertouch support
-
-Channel filtering
-
-===============================================================================
-
-SECTION 22: TECHNICAL INSIGHTS GAINED (UPDATED)
-===============================================================================
-
-JUCE 8.0.12 String Handling: operator bool is private - must use isEmpty()/isNotEmpty() explicitly
-
-Delta 1010LT Stereo Requirements: Both channels must receive phase-aligned audio to avoid glitching
-
-Buffer Size Impact: 256-512 samples optimal for Delta 1010LT on Windows 10
-
-Windows Audio Modes: Low Latency mode forces driver's preferred buffer size (441 samples)
-
-ListBox Initialization: Model must be fully constructed before ListBox uses it
-
-Member Initialization Order: Members initialized in declaration order, not initializer list order
-
-Card-Based UI Design: Encapsulating related UI elements in dedicated components improves maintainability
-
-Responsive Layout: Using relative sizing and centering creates adaptable UIs
-
-Duration Calculation: Simple division of samples by sample rate provides accurate audio length
-
-Component Communication: Using getters/setters maintains clean component boundaries
-
-AudioThumbnail Best Practices: 512px resolution provides good balance between performance and visual quality
-
-Async UI Updates: ChangeListener pattern enables non-blocking thumbnail generation
-
-Separate Rendering Components: Dedicated WaveformComponent isolates drawing logic for cleaner code
-
-===============================================================================
-
-SECTION 23: KNOWN LIMITATIONS (UPDATED)
-===============================================================================
-
-Single audio output only (no multi-output routing)
-
-Waveform visualization is static (no zoom/scroll yet)
-
-No envelope shaping
-
-No preset system
-
-No effects processing
-
-Maximum 128 MIDI notes (hardware limit)
-
-Maximum 16 sampler voices
-
-Single sample card only (no multi-layer support yet)
-
-===============================================================================
-
-SECTION 24: feat: Complete session persistence and MIDI management overhaul (2026-02-26)
-===============================================================================
-
-feat: Complete session persistence and MIDI management overhaul
-
-## Core Improvements:
-✅ Session Persistence: Full application state now persists between sessions
-✅ MIDI Settings Management: Complete MIDI note/channel/device persistence
-✅ UI Stability: Fixed glitching and recursive resizing issues
-✅ MIDI Learn Integration: Proper MIDI note learning with immediate session saving
-
-## Detailed Changes:
-
-### Session Persistence System:
-• Added ConfigurationManager for persistent storage of app state
-• Implemented `loadLastSession()` to restore MIDI settings, device, and last sample
-• Added `saveCurrentSession()` to save MIDI settings independently of sample loading
-• Session now saves immediately on MIDI note/channel/device changes
-• Fixed sample loading to use async methods with proper session saving
-
-### MIDI Management:
-• Added `midiNoteChanged()` with immediate session saving
-• Added `midiChannelChanged()` with immediate session saving  
-• Added `handleMidiLearn()` with automatic session persistence
-• MIDI activity light integrated into title area
-• Fixed MIDI settings dialog crash by removing pointer management
-• Enhanced MIDI device validation and restoration
-
-### UI Stability Fixes:
-• Added recursive resizing prevention in `resized()` method
-• All UI updates now use `MessageManager::callAsync()` for thread safety
-• Fixed waveform display and sample card layout
-• Prevented UI glitching during sample loading and navigation
-
-### Sample Loading Improvements:
-• Updated `loadSampleFileAsync()` to save session after complete loading
-• Fixed Prev/Next navigation to maintain proper sample mapping
-• Enhanced async loading with proper locking and thread safety
-• Sample card now properly updates MIDI note display and listener registration
-
-### Configuration Management:
-• Created ConfigurationManager class for centralized settings storage
-• Added methods for saving/loading MIDI settings, last directory, and last sample
-• Settings now persist independently of sample state (MIDI always saves)
-
-## Technical Details:
-• Added listener pattern for SampleCard MIDI events
-• Implemented proper locking with `juce::ScopedLock` for thread safety
-• Fixed background thread management for file scanning and loading
-• Enhanced debug logging for development troubleshooting
-
-## Bug Fixes:
-✅ Fixed MIDI settings dialog crash when opening with previous device
-✅ Fixed UI glitching during sample loading and navigation
-✅ Fixed session persistence to save correct MIDI note mappings
-✅ Fixed MIDI activity light to respond properly to incoming messages
-✅ Fixed sample navigation to maintain proper folder scanning
-
-## Testing Results:
-• Application successfully restores last session (MIDI note 51, channel 1, device Delta 1010LT MIDI)
-• MIDI Learn mode properly captures notes and saves session immediately
-• All MIDI setting changes now persist between application restarts
-• UI remains stable during intensive sample loading and navigation
-• No crashes when opening MIDI settings with configured devices
-
-This commit represents a major stability and usability improvement for the Jaiva Sampler application.
