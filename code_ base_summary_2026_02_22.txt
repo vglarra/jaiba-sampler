@@ -226,6 +226,7 @@ MainComponent::MainComponent()
 
       // Add MIDI activity light to the title area
       addAndMakeVisible(midiActivityLight);
+      midiActivityLight.setAlwaysOnTop(true); // Ensure it's visible
 
       // Add the sample card
       addAndMakeVisible(sampleCard);
@@ -517,6 +518,9 @@ void MainComponent::toggleSineWave()
         testToneButton.setButtonText("Test tone");
         testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
     }
+    
+    // TEMPORARY TEST: Trigger the light manually
+    midiActivityLight.triggerActivity();
 }
 
 void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
@@ -713,20 +717,90 @@ void MainComponent::showMidiDeviceSettings()
 
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
-    // Update MIDI activity light based on message type
+    // Filter out background MIDI messages that shouldn't trigger the light
+    // Ignore MIDI clock and active sense messages as they're sent continuously
+    if (message.isMidiClock() || message.isActiveSense())
+    {
+        // Still print for debugging but don't trigger the light
+        if (message.isMidiClock())
+        {
+            printf("RAW MIDI Clock (ignored for light)\n");
+        }
+        else if (message.isActiveSense())
+        {
+            printf("RAW MIDI Active Sense (ignored for light)\n");
+        }
+        return;  // Don't trigger light or process these messages
+    }
+    
+    // ALWAYS trigger the MIDI activity light for ANY MIDI message
+    // This happens before any filtering so it shows activity from all channels
+    midiActivityLight.triggerActivity();
+    
+    // Print ALL incoming MIDI messages for debugging (temporarily)
     if (message.isNoteOn())
     {
-        midiActivityLight.noteOn();
+        printf("RAW MIDI Note On: %d, Vel: %d, Ch: %d\n", 
+               message.getNoteNumber(), 
+               message.getVelocity(),
+               message.getChannel());
     }
     else if (message.isNoteOff())
     {
-        midiActivityLight.noteOff();
+        printf("RAW MIDI Note Off: %d, Ch: %d\n", 
+               message.getNoteNumber(),
+               message.getChannel());
     }
-    else
+    else if (message.isController())
     {
-        // For other MIDI messages (controllers, etc.) trigger a brief flash
-        // by turning the light on - it will automatically turn off after 50ms via timer
-        midiActivityLight.noteOn();
+        printf("RAW MIDI Controller: %d, Val: %d, Ch: %d\n",
+               message.getControllerNumber(),
+               message.getControllerValue(),
+               message.getChannel());
+    }
+    else if (message.isPitchWheel())
+    {
+        printf("RAW MIDI Pitch Wheel: %d, Ch: %d\n",
+               message.getPitchWheelValue(),
+               message.getChannel());
+    }
+    else if (message.isAftertouch())
+    {
+        printf("RAW MIDI Aftertouch: %d, Ch: %d\n",
+               message.getAfterTouchValue(),
+               message.getChannel());
+    }
+    else if (message.isChannelPressure())
+    {
+        printf("RAW MIDI Channel Pressure: %d, Ch: %d\n",
+               message.getChannelPressureValue(),
+               message.getChannel());
+    }
+    else if (message.isSysEx())
+    {
+        printf("RAW MIDI SysEx: %d bytes\n", message.getRawDataSize());
+    }
+    else if (message.isMidiStart())
+    {
+        printf("RAW MIDI Start\n");
+    }
+    else if (message.isMidiStop())
+    {
+        printf("RAW MIDI Stop\n");
+    }
+    else if (message.isMidiContinue())
+    {
+        printf("RAW MIDI Continue\n");
+    }
+    else if (message.getRawDataSize() > 0)
+    {
+        printf("RAW MIDI Unknown: ");
+        const uint8_t* data = message.getRawData();
+        for (int i = 0; i < message.getRawDataSize(); i++)
+        {
+            printf("%02X ", data[i]);
+        }
+        printf("\n");
     }
     
     // ANTI-FLOOD PROTECTION: Ignore duplicate messages in quick succession
@@ -762,8 +836,7 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
     // If channel doesn't match and we're not in learn mode, ignore the message
     if (!channelMatches && !isLearningMode)
     {
-        // Still light up the MIDI activity even if channel doesn't match
-        // (light shows ANY MIDI activity, but audio is filtered)
+        // The light still shows activity (we triggered it above), but audio is filtered
         return;
     }
     
@@ -1321,10 +1394,16 @@ void MainComponent::midiNoteChanged(int newNote)
         
         // Update sampler with new mapping IMMEDIATELY
         updateSamplerSounds();
+        
+        // SAVE THE SESSION whenever MIDI note changes
+        saveCurrentSession();
     }
     else
     {
         printf("No sample selected to apply MIDI note change\n");
+        
+        // Even if no sample is selected, save the MIDI note for future samples
+        saveCurrentSession();
     }
 }
 
@@ -1341,6 +1420,9 @@ void MainComponent::midiChannelChanged(int newChannel)
         // Stop all notes when changing channels to avoid confusion
         sampler.allNotesOff(1, false);
     }
+    
+    // SAVE THE SESSION when MIDI channel changes
+    saveCurrentSession();
 }
 
 void MainComponent::learningModeChanged(bool isLearning)
@@ -1376,6 +1458,9 @@ void MainComponent::handleMidiLearn(int noteNumber)
         {
             printf("No sample selected, but card note updated to %d\n", noteNumber);
         }
+        
+        // SAVE THE SESSION after MIDI learn
+        saveCurrentSession();
     }
 }
 
@@ -1457,17 +1542,19 @@ void MainComponent::loadLastSession()
 
 void MainComponent::saveCurrentSession()
 {
-    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
-    {
-        auto* sample = samples[selectedSampleIndex];
-        configManager->saveLastSample(sample->file);
-    }
-    
+    // Always save the current MIDI settings, regardless of whether a sample is loaded
     configManager->saveMidiSettings(
         sampleCard.getMidiNote(),
         sampleCard.getMidiChannel(),
         currentMidiDeviceName
     );
+    
+    // Only save the sample path if a sample is actually loaded
+    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    {
+        auto* sample = samples[selectedSampleIndex];
+        configManager->saveLastSample(sample->file);
+    }
 }
 
 bool MainComponent::isValidMidiDevice(const juce::String& deviceName)
@@ -1806,6 +1893,8 @@ public:
     {
         setSize(16, 16);
         startTimer(50); // Check every 50ms for activity timeout
+        lastActivityTime = 0;
+        isActive = false;
     }
     
     ~MidiActivityLight()
@@ -1817,47 +1906,67 @@ public:
     {
         auto bounds = getLocalBounds().toFloat().reduced(2);
         
-        // Draw outer circle
+        // Draw outer circle (always visible)
         g.setColour(juce::Colours::darkgrey);
         g.fillEllipse(bounds);
         
         // Draw inner circle based on activity
         if (isActive)
         {
-            // Bright yellow for note activity
+            // Bright yellow for MIDI activity
             g.setColour(juce::Colours::yellow);
             g.fillEllipse(bounds.reduced(2));
         }
         else
         {
-            // Completely black/dark when off
-            g.setColour(juce::Colour(0xFF111111));
+            // Dark/black when off
+            g.setColour(juce::Colour(0xFF222222));
             g.fillEllipse(bounds.reduced(2));
+            
+            // Add a subtle outline to show the light is present but off
+            g.setColour(juce::Colours::darkgrey.brighter(0.3f));
+            g.drawEllipse(bounds.reduced(2), 0.5f);
         }
+    }
+    
+    void triggerActivity()
+    {
+        // Always turn on for note-on events
+        isActive = true;
+        lastActivityTime = juce::Time::getMillisecondCounter();
+        
+        // Always repaint on the message thread
+        juce::MessageManager::callAsync([this] { repaint(); });
     }
     
     void noteOn()
     {
-        isActive = true;
-        lastActivityTime = juce::Time::getMillisecondCounter();
-        juce::MessageManager::callAsync([this] { repaint(); });
+        // Always turn on for note-on events
+        triggerActivity();
     }
     
     void noteOff()
     {
-        // Note: We don't turn off immediately on note off
-        // The timer will handle turning off after a short delay
-        lastActivityTime = juce::Time::getMillisecondCounter();
+        // For note-off events, we still want visual feedback
+        // but it's often less intense - we'll trigger a brief flash
+        triggerActivity();
     }
     
 private:
     void timerCallback() override
     {
-        // Turn off after 50ms of no activity
-        if (isActive && (juce::Time::getMillisecondCounter() - lastActivityTime) > 50)
+        // Check if we've been inactive for more than 50ms
+        auto now = juce::Time::getMillisecondCounter();
+        auto timeSinceLastActivity = now - lastActivityTime;
+        
+        // Turn off if inactive and currently on
+        if (isActive && timeSinceLastActivity > 50)
         {
             isActive = false;
-            juce::MessageManager::callAsync([this] { repaint(); });
+            juce::MessageManager::callAsync([this] { 
+                repaint();
+                printf("MIDI Light turned off\n");
+            });
         }
     }
     
