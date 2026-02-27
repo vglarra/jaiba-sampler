@@ -71,6 +71,26 @@ public:
         channelPlusButton.onClick = [this] { adjustMidiChannel(1); };
         addAndMakeVisible(channelPlusButton);
         
+        // Configure Pitch adjustment controls (similar to channel controls)
+        pitchMinusButton.setButtonText("-");
+        pitchMinusButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        pitchMinusButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        pitchMinusButton.onClick = [this] { adjustPitch(-1); };
+        addAndMakeVisible(pitchMinusButton);
+        
+        pitchLabel.setJustificationType(juce::Justification::centred);
+        pitchLabel.setFont(juce::Font(16.0f, juce::Font::bold));
+        pitchLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+        pitchLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+        updatePitchDisplay();
+        addAndMakeVisible(pitchLabel);
+        
+        pitchPlusButton.setButtonText("+");
+        pitchPlusButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        pitchPlusButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        pitchPlusButton.onClick = [this] { adjustPitch(1); };
+        addAndMakeVisible(pitchPlusButton);
+        
         // Configure sample name label (bottom left)
         sampleNameLabel.setJustificationType(juce::Justification::centredLeft);
         sampleNameLabel.setFont(juce::Font(14.0f, juce::Font::bold));
@@ -99,18 +119,37 @@ public:
         // Add margin around the entire card content (10px on each side)
         area.reduce(10, 10);
         
-        // Top row: + button and Prev/Next buttons
-        auto topRow = area.removeFromTop(30);
+        // Top row: All controls (height 40px to fit all buttons)
+        auto topRow = area.removeFromTop(40);
         
-        // + button on left
+        // + button on left (40px)
         addButton.setBounds(topRow.removeFromLeft(40).reduced(2));
         
-        // Prev/Next buttons on right (no Learn button here anymore)
-        auto navArea = topRow.removeFromRight(140);
-        prevButton.setBounds(navArea.removeFromLeft(60).reduced(2));
-        nextButton.setBounds(navArea.removeFromLeft(60).reduced(2));
+        // Leave some space between + button and MIDI controls
+        topRow.removeFromLeft(10);
         
-        // Add 5px margin between buttons and waveform
+        // Learn button (60px)
+        learnButton.setBounds(topRow.removeFromLeft(60).reduced(2));
+        
+        // MIDI Note display (100px)
+        midiNoteLabel.setBounds(topRow.removeFromLeft(100).reduced(2));
+        
+        // Space between note and channel controls
+        topRow.removeFromLeft(10);
+        
+        // MIDI Channel controls (total 120px: 30 + 60 + 30)
+        channelMinusButton.setBounds(topRow.removeFromLeft(30).reduced(2));
+        midiChannelLabel.setBounds(topRow.removeFromLeft(60).reduced(2));
+        channelPlusButton.setBounds(topRow.removeFromLeft(30).reduced(2));
+        
+        // Space before Prev/Next buttons
+        topRow.removeFromLeft(10);
+        
+        // Prev/Next buttons on right (total 120px: 60 + 60)
+        prevButton.setBounds(topRow.removeFromRight(60).reduced(2));
+        nextButton.setBounds(topRow.removeFromRight(60).reduced(2));
+        
+        // Add 5px margin between top row and waveform
         area.removeFromTop(5);
         
         // Calculate waveform height based on 4cm at 96 DPI (fixed height)
@@ -123,42 +162,22 @@ public:
         if (waveformComponent != nullptr)
             waveformComponent->setBounds(waveformRect);
         
-        // Add 5px margin between waveform and MIDI controls
+        // Add 5px margin between waveform and pitch controls
         area.removeFromTop(5);
         
-        // MIDI Controls row (Note and Channel side by side)
-        auto midiRow = area.removeFromTop(30);
+        // Pitch adjustment controls row (below waveform, left corner)
+        auto pitchRow = area.removeFromTop(30);
         
-        // Split the row into two equal halves
-        auto leftHalf = midiRow.removeFromLeft(midiRow.getWidth() / 2);
-        auto rightHalf = midiRow;
+        // Position pitch controls at left corner (similar to channel controls layout)
+        const int pitchControlWidth = 120;  // 30 + 60 + 30
+        auto pitchControlArea = pitchRow.withWidth(pitchControlWidth);
         
-        // LEFT HALF: Learn button + MIDI Note display
-        const int leftControlWidth = 160;  // Enough for Learn button + note display
+        pitchMinusButton.setBounds(pitchControlArea.removeFromLeft(30).reduced(2));
+        pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
+        pitchPlusButton.setBounds(pitchControlArea.removeFromLeft(30).reduced(2));
         
-        auto learnNoteArea = leftHalf.withWidth(leftControlWidth).withCentre(leftHalf.getCentre());
-        
-        // Learn button on left (60px)
-        learnButton.setBounds(learnNoteArea.removeFromLeft(60).reduced(2));
-        
-        // Note display on right (100px)
-        midiNoteLabel.setBounds(learnNoteArea.removeFromLeft(100).reduced(2));
-        
-        // RIGHT HALF: MIDI Channel controls (-, display, +)
-        const int channelControlWidth = 120;
-        auto channelControlArea = rightHalf.withWidth(channelControlWidth).withCentre(rightHalf.getCentre());
-        
-        // - button on left (30px)
-        channelMinusButton.setBounds(channelControlArea.removeFromLeft(30).reduced(2));
-        
-        // Numeric display in middle (60px)
-        midiChannelLabel.setBounds(channelControlArea.removeFromLeft(60).reduced(2));
-        
-        // + button on right (30px)
-        channelPlusButton.setBounds(channelControlArea.removeFromLeft(30).reduced(2));
-        
-        // Add 5px margin between MIDI controls and bottom row
-        area.removeFromTop(5);
+        // Add margin before bottom row
+        area.removeFromTop(10);
         
         // Bottom row: sample name and duration
         auto bottomRow = area.removeFromBottom(25);
@@ -479,6 +498,30 @@ private:
         }
     }
     
+    void adjustPitch(int delta)
+    {
+        int newPitch = currentPitch + delta;
+        
+        // Constrain to valid MIDI range (0-127)
+        if (newPitch >= 0 && newPitch <= 127)
+        {
+            currentPitch = newPitch;
+            updatePitchDisplay();
+            
+            // TODO: Add listener callback for pitch changes if needed
+            printf("Pitch changed to: %d (%s)\n", 
+                   currentPitch, 
+                   juce::MidiMessage::getMidiNoteName(currentPitch, true, true, true).toRawUTF8());
+        }
+    }
+    
+    void updatePitchDisplay()
+    {
+        juce::String noteName = juce::MidiMessage::getMidiNoteName(currentPitch, true, true, true);
+        pitchLabel.setText(juce::String(currentPitch) + " (" + noteName + ")", 
+                           juce::dontSendNotification);
+    }
+    
     // UI Components
     juce::TextButton addButton{"+"};
     juce::TextButton prevButton{"Prev"};
@@ -499,6 +542,12 @@ private:
     juce::Label sampleNameLabel;
     juce::Label durationLabel;
     
+    // Pitch adjustment controls
+    juce::TextButton pitchMinusButton{"-"};
+    juce::Label pitchLabel;
+    juce::TextButton pitchPlusButton{"+"};
+    int currentPitch = 60;  // Default to Middle C (MIDI note 60)
+    
     // MIDI Learn state
     bool isLearning = false;
     
@@ -512,3 +561,4 @@ private:
     // Listener list
     juce::ListenerList<Listener> listeners;
 };
+
