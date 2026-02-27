@@ -550,16 +550,9 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
     // Ignore MIDI clock and active sense messages as they're sent continuously
     if (message.isMidiClock() || message.isActiveSense())
     {
-        // Still print for debugging but don't trigger the light
-        if (message.isMidiClock())
-        {
-            printf("RAW MIDI Clock (ignored for light)\n");
-        }
-        else if (message.isActiveSense())
-        {
-            printf("RAW MIDI Active Sense (ignored for light)\n");
-        }
-        return;  // Don't trigger light or process these messages
+        // Don't print anything - just return immediately
+        // These messages are ignored completely to avoid performance issues
+        return;
     }
     
     // ALWAYS trigger the MIDI activity light for ANY MIDI message
@@ -567,6 +560,7 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
     midiActivityLight.triggerActivity();
     
     // Print ALL incoming MIDI messages for debugging (temporarily)
+    // You can comment these out once everything is working
     if (message.isNoteOn())
     {
         printf("RAW MIDI Note On: %d, Vel: %d, Ch: %d\n", 
@@ -609,27 +603,12 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
     {
         printf("RAW MIDI SysEx: %d bytes\n", message.getRawDataSize());
     }
-    else if (message.isMidiStart())
+    else if (message.isMidiStart() || message.isMidiStop() || message.isMidiContinue())
     {
-        printf("RAW MIDI Start\n");
-    }
-    else if (message.isMidiStop())
-    {
-        printf("RAW MIDI Stop\n");
-    }
-    else if (message.isMidiContinue())
-    {
-        printf("RAW MIDI Continue\n");
-    }
-    else if (message.getRawDataSize() > 0)
-    {
-        printf("RAW MIDI Unknown: ");
-        const uint8_t* data = message.getRawData();
-        for (int i = 0; i < message.getRawDataSize(); i++)
-        {
-            printf("%02X ", data[i]);
-        }
-        printf("\n");
+        // These are transport messages - print them but they're less frequent
+        if (message.isMidiStart()) printf("RAW MIDI Start\n");
+        else if (message.isMidiStop()) printf("RAW MIDI Stop\n");
+        else if (message.isMidiContinue()) printf("RAW MIDI Continue\n");
     }
     
     // ANTI-FLOOD PROTECTION: Ignore duplicate messages in quick succession
