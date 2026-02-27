@@ -21,28 +21,32 @@ public:
     
     void paint(juce::Graphics& g) override
     {
-        auto bounds = getLocalBounds().toFloat().reduced(2);
+        // Draw button-like background (same as Test tone button)
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour(juce::Colour(0xFF4A4A4A));
+        g.fillRoundedRectangle(bounds, 4.0f);
         
-        // Draw outer circle (always visible)
+        // Draw outer circle (always visible) - centered in the button
+        auto circleBounds = bounds.reduced(bounds.getWidth() / 2 - 8, bounds.getHeight() / 2 - 8).withSize(16.0f, 16.0f);
         g.setColour(juce::Colours::darkgrey);
-        g.fillEllipse(bounds);
+        g.fillEllipse(circleBounds);
         
         // Draw inner circle based on activity
         if (isActive)
         {
             // Bright yellow for MIDI activity
             g.setColour(juce::Colours::yellow);
-            g.fillEllipse(bounds.reduced(2));
+            g.fillEllipse(circleBounds.reduced(2));
         }
         else
         {
             // Dark/black when off
             g.setColour(juce::Colour(0xFF222222));
-            g.fillEllipse(bounds.reduced(2));
+            g.fillEllipse(circleBounds.reduced(2));
             
             // Add a subtle outline to show the light is present but off
             g.setColour(juce::Colours::darkgrey.brighter(0.3f));
-            g.drawEllipse(bounds.reduced(2), 0.5f);
+            g.drawEllipse(circleBounds.reduced(2), 0.5f);
         }
     }
     

@@ -200,24 +200,29 @@ void MainComponent::resized()
     
     auto area = getLocalBounds().reduced(20);
     
-    // Top bar: Menu button on left, Test tone button on right, MIDI light in title
+    // Top bar: Menu button on left, Title in center, MIDI light button and Test tone button on right
     auto topBar = area.removeFromTop(50);
     
     // Menu button on left
     menuButton.setBounds(topBar.removeFromLeft(120).reduced(2));
     
-    // Title area with MIDI light
+    // Title area (centered in remaining space)
     auto titleArea = topBar;
     auto titleBounds = titleArea.withSizeKeepingCentre(300, 30);
     
-    // Position MIDI light to the left of the title text - repositioned to be centered between menu button and test tone button
-    int titleCenterX = getWidth() / 2;
-    midiActivityLight.setBounds(titleCenterX - 120, 
-                                titleBounds.getCentreY() - 8, 
-                                16, 16);
+    // Right side: MIDI light button and Test tone button
+    auto rightSide = topBar.removeFromRight(120 * 2 + 5 + 40); // Two buttons + margin + midi light button width
+    
+    // MIDI light button (40px wide, same height as test tone button)
+    auto midiLightButtonArea = rightSide.removeFromLeft(40).reduced(2);
+    // Set the MIDI activity light to fill the entire button area
+    midiActivityLight.setBounds(midiLightButtonArea);
+    
+    // 5px margin between buttons
+    rightSide.removeFromLeft(5);
     
     // Test tone button on right
-    testToneButton.setBounds(topBar.removeFromRight(120).reduced(2));
+    testToneButton.setBounds(rightSide.removeFromLeft(120).reduced(2));
     
     // Body area - this is where the card goes
     auto bodyArea = area.reduced(10, 5);
