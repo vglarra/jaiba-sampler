@@ -176,13 +176,14 @@ void MainComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white);
     g.setFont(juce::Font(24.0f, juce::Font::bold));
     
-    auto titleArea = getLocalBounds().reduced(20).removeFromTop(50);
+    // Title area matches reduced top bar height (30px)
+    auto titleArea = getLocalBounds().reduced(20).removeFromTop(30);
     g.drawText("Jaiva Sampler V001", titleArea, juce::Justification::centred, true);
     
     // Draw separator lines
     g.setColour(juce::Colours::darkgrey);
     
-    // Line below title
+    // Line below title (adjusted for reduced top bar)
     auto lineY = titleArea.getBottom() + 5;
     g.drawHorizontalLine(lineY, 20, getWidth() - 20);
     
@@ -201,28 +202,29 @@ void MainComponent::resized()
     auto area = getLocalBounds().reduced(20);
     
     // Top bar: Menu button on left, Title in center, MIDI light button and Test tone button on right
-    auto topBar = area.removeFromTop(50);
+    // Reduced top bar height by 40% (from 50px to 30px)
+    auto topBar = area.removeFromTop(30);
     
-    // Menu button on left
-    menuButton.setBounds(topBar.removeFromLeft(120).reduced(2));
+    // Menu button on left (60px wide like Prev/Next buttons in SampleCard)
+    menuButton.setBounds(topBar.removeFromLeft(60).reduced(2));
     
     // Title area (centered in remaining space)
     auto titleArea = topBar;
     auto titleBounds = titleArea.withSizeKeepingCentre(300, 30);
     
     // Right side: MIDI light button and Test tone button
-    auto rightSide = topBar.removeFromRight(120 * 2 + 5 + 40); // Two buttons + margin + midi light button width
+    auto rightSide = topBar.removeFromRight(60 + 5 + 30); // Test tone (60px) + margin (5px) + MIDI light (30px)
     
-    // MIDI light button (40px wide, same height as test tone button)
-    auto midiLightButtonArea = rightSide.removeFromLeft(40).reduced(2);
+    // MIDI light button (30px wide, same height as other buttons)
+    auto midiLightButtonArea = rightSide.removeFromLeft(30).reduced(2);
     // Set the MIDI activity light to fill the entire button area
     midiActivityLight.setBounds(midiLightButtonArea);
     
     // 5px margin between buttons
     rightSide.removeFromLeft(5);
     
-    // Test tone button on right
-    testToneButton.setBounds(rightSide.removeFromLeft(120).reduced(2));
+    // Test tone button on right (60px wide like Prev/Next buttons)
+    testToneButton.setBounds(rightSide.removeFromLeft(60).reduced(2));
     
     // Body area - this is where the card goes
     auto bodyArea = area.reduced(10, 5);

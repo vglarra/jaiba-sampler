@@ -8,7 +8,7 @@ class MidiActivityLight : public juce::Component,
 public:
     MidiActivityLight()
     {
-        setSize(16, 16);
+        // Set initial size, but will be resized by parent component
         startTimer(50); // Check every 50ms for activity timeout
         lastActivityTime = 0;
         isActive = false;
