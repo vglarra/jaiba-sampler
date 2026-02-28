@@ -207,7 +207,20 @@ public:
     
     int getMidiNote() const { return currentMidiNote; }
     int getMidiChannel() const { return currentMidiChannel; }
-    
+    int getPitchOffset() const { return pitchOffset; }
+
+    void setPitchOffset(int offset)
+    {
+        // Constrain to reasonable range: ±48 semitones (4 octaves)
+        if (offset >= -48 && offset <= 48 && offset != pitchOffset)
+        {
+            pitchOffset = offset;
+            updatePitchDisplay();
+            
+            printf("Pitch offset set to: %+d semitones\n", pitchOffset);
+        }
+    }
+
     void setMidiNote(int note)
     {
         if (note >= 0 && note <= 127 && note != currentMidiNote)
@@ -300,6 +313,7 @@ public:
         virtual void midiNoteChanged(int newNote) = 0;
         virtual void midiChannelChanged(int newChannel) = 0;
         virtual void learningModeChanged(bool isLearning) = 0;
+        virtual void pitchOffsetChanged(int pitchOffset) = 0;
     };
     
     void addListener(Listener* listener)
@@ -500,26 +514,32 @@ private:
     
     void adjustPitch(int delta)
     {
-        int newPitch = currentPitch + delta;
+        int newOffset = pitchOffset + delta;
         
-        // Constrain to valid MIDI range (0-127)
-        if (newPitch >= 0 && newPitch <= 127)
+        // Constrain to reasonable range: ±48 semitones (4 octaves)
+        if (newOffset >= -48 && newOffset <= 48)
         {
-            currentPitch = newPitch;
+            pitchOffset = newOffset;
             updatePitchDisplay();
             
-            // TODO: Add listener callback for pitch changes if needed
-            printf("Pitch changed to: %d (%s)\n", 
-                   currentPitch, 
-                   juce::MidiMessage::getMidiNoteName(currentPitch, true, true, true).toRawUTF8());
+            // Notify listeners of pitch offset change
+            listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
+            
+            printf("Pitch offset changed to: %+d semitones\n", pitchOffset);
         }
     }
     
     void updatePitchDisplay()
     {
-        juce::String noteName = juce::MidiMessage::getMidiNoteName(currentPitch, true, true, true);
-        pitchLabel.setText(juce::String(currentPitch) + " (" + noteName + ")", 
-                           juce::dontSendNotification);
+        juce::String displayText;
+        if (pitchOffset == 0)
+            displayText = "0";
+        else if (pitchOffset > 0)
+            displayText = "+" + juce::String(pitchOffset);
+        else
+            displayText = juce::String(pitchOffset);
+        
+        pitchLabel.setText(displayText + " st", juce::dontSendNotification);
     }
     
     // UI Components
@@ -546,7 +566,7 @@ private:
     juce::TextButton pitchMinusButton{"-"};
     juce::Label pitchLabel;
     juce::TextButton pitchPlusButton{"+"};
-    int currentPitch = 60;  // Default to Middle C (MIDI note 60)
+    int pitchOffset = 0;  // Pitch offset in semitones
     
     // MIDI Learn state
     bool isLearning = false;

@@ -79,7 +79,7 @@ private:
     //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
-    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true);
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, int pitchOffsetToUse = 0);
     void updateSamplerSounds();
     
     // Audio device management
@@ -113,6 +113,7 @@ private:
     void midiNoteChanged(int newNote) override;
     void midiChannelChanged(int newChannel) override;
     void learningModeChanged(bool isLearning) override;
+    void pitchOffsetChanged(int pitchOffset) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -172,6 +173,7 @@ private:
         double attack = 0.1;
         double release = 0.1;
         bool isSelected = false;
+        int pitchOffset = 0;  // Add pitch offset per sample
         
         // Cached audio data
         std::unique_ptr<juce::AudioBuffer<float>> audioData;

@@ -67,6 +67,12 @@ public:
         propertiesFile->saveIfNeeded();
     }
     
+    void savePitchOffset(int pitchOffset)
+    {
+        propertiesFile->setValue("pitchOffset", pitchOffset);
+        propertiesFile->saveIfNeeded();
+    }
+    
     int getMidiNote()
     {
         return propertiesFile->getIntValue("midiNote", 60); // Default to middle C
@@ -80,6 +86,11 @@ public:
     juce::String getMidiDevice()
     {
         return propertiesFile->getValue("midiDevice");
+    }
+    
+    int getPitchOffset()
+    {
+        return propertiesFile->getIntValue("pitchOffset", 0); // Default to 0 (no transposition)
     }
     
 private:

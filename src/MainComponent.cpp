@@ -334,7 +334,8 @@ void MainComponent::buttonClicked(juce::Button* button)
                     
                     // Use the async loading method instead of synchronous loadSampleFile
                     // This ensures proper UI updates and session saving
-                    loadSampleFileAsync(file, true); // true for auto-play
+                    // New sample from Add button - reset pitch to 0
+                    loadSampleFileAsync(file, true, 0); // true for auto-play, 0 for pitch offset
                     
                     // DON'T call saveCurrentSession() here - it will be called 
                     // from within loadSampleFileAsync after the sample is fully loaded
@@ -576,61 +577,76 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
         return;
     }
     
-    // ALWAYS trigger the MIDI activity light for ANY MIDI message
-    // This happens before any filtering so it shows activity from all channels
-    midiActivityLight.triggerActivity();
-    
-    // Print ALL incoming MIDI messages for debugging (temporarily)
-    // You can comment these out once everything is working
-    if (message.isNoteOn())
-    {
-        printf("RAW MIDI Note On: %d, Vel: %d, Ch: %d\n", 
-               message.getNoteNumber(), 
-               message.getVelocity(),
-               message.getChannel());
-    }
-    else if (message.isNoteOff())
-    {
-        printf("RAW MIDI Note Off: %d, Ch: %d\n", 
-               message.getNoteNumber(),
-               message.getChannel());
-    }
-    else if (message.isController())
-    {
-        printf("RAW MIDI Controller: %d, Val: %d, Ch: %d\n",
-               message.getControllerNumber(),
-               message.getControllerValue(),
-               message.getChannel());
-    }
-    else if (message.isPitchWheel())
-    {
-        printf("RAW MIDI Pitch Wheel: %d, Ch: %d\n",
-               message.getPitchWheelValue(),
-               message.getChannel());
-    }
-    else if (message.isAftertouch())
-    {
-        printf("RAW MIDI Aftertouch: %d, Ch: %d\n",
-               message.getAfterTouchValue(),
-               message.getChannel());
-    }
-    else if (message.isChannelPressure())
-    {
-        printf("RAW MIDI Channel Pressure: %d, Ch: %d\n",
-               message.getChannelPressureValue(),
-               message.getChannel());
-    }
-    else if (message.isSysEx())
-    {
-        printf("RAW MIDI SysEx: %d bytes\n", message.getRawDataSize());
-    }
-    else if (message.isMidiStart() || message.isMidiStop() || message.isMidiContinue())
-    {
-        // These are transport messages - print them but they're less frequent
-        if (message.isMidiStart()) printf("RAW MIDI Start\n");
-        else if (message.isMidiStop()) printf("RAW MIDI Stop\n");
-        else if (message.isMidiContinue()) printf("RAW MIDI Continue\n");
-    }
+      // ALWAYS trigger the MIDI activity light for ANY MIDI message
+      // This happens before any filtering so it shows activity from all channels
+      midiActivityLight.triggerActivity();
+      
+      // Update MIDI activity light based on message type for more nuanced feedback
+      if (message.isNoteOn())
+      {
+          midiActivityLight.noteOn();
+      }
+      else if (message.isNoteOff())
+      {
+          midiActivityLight.noteOff();
+      }
+      else
+      {
+          // For other MIDI messages (controllers, etc.) trigger a brief flash
+          midiActivityLight.triggerActivity();
+      }
+      
+      // Print ALL incoming MIDI messages for debugging (temporarily)
+      // You can comment these out once everything is working
+      if (message.isNoteOn())
+      {
+          printf("RAW MIDI Note On: %d, Vel: %d, Ch: %d\n", 
+                 message.getNoteNumber(), 
+                 message.getVelocity(),
+                 message.getChannel());
+      }
+      else if (message.isNoteOff())
+      {
+          printf("RAW MIDI Note Off: %d, Ch: %d\n", 
+                 message.getNoteNumber(),
+                 message.getChannel());
+      }
+      else if (message.isController())
+      {
+          printf("RAW MIDI Controller: %d, Val: %d, Ch: %d\n",
+                 message.getControllerNumber(),
+                 message.getControllerValue(),
+                 message.getChannel());
+      }
+      else if (message.isPitchWheel())
+      {
+          printf("RAW MIDI Pitch Wheel: %d, Ch: %d\n",
+                 message.getPitchWheelValue(),
+                 message.getChannel());
+      }
+      else if (message.isAftertouch())
+      {
+          printf("RAW MIDI Aftertouch: %d, Ch: %d\n",
+                 message.getAfterTouchValue(),
+                 message.getChannel());
+      }
+      else if (message.isChannelPressure())
+      {
+          printf("RAW MIDI Channel Pressure: %d, Ch: %d\n",
+                 message.getChannelPressureValue(),
+                 message.getChannel());
+      }
+      else if (message.isSysEx())
+      {
+          printf("RAW MIDI SysEx: %d bytes\n", message.getRawDataSize());
+      }
+      else if (message.isMidiStart() || message.isMidiStop() || message.isMidiContinue())
+      {
+          // These are transport messages - print them but they're less frequent
+          if (message.isMidiStart()) printf("RAW MIDI Start\n");
+          else if (message.isMidiStop()) printf("RAW MIDI Stop\n");
+          else if (message.isMidiContinue()) printf("RAW MIDI Continue\n");
+      }
     
     // ANTI-FLOOD PROTECTION: Ignore duplicate messages in quick succession
     static juce::uint64 lastMessageTime = 0;
@@ -938,23 +954,30 @@ void MainComponent::updateSamplerSounds()
             sample->numChannels
         );
         
-        // IMPORTANT FIX: Create a note range that ONLY includes the selected root note
-        // This ensures the sample plays at its original pitch on a single note
+        // IMPORTANT FIX: Create note range that includes ALL notes that should trigger this sample
+        // For single-note mode with pitch offset, we want the sample to trigger on the ORIGINAL root note
+        // The pitch offset will be applied by the sampler automatically based on the difference
+        // between the played note and the root note
         juce::BigInteger noteRange;
         noteRange.setRange(0, 128, false);  // Clear all notes first
-        noteRange.setBit(sample->rootNote);  // Set ONLY the root note
         
-        // Keep this commented for future note range support:
-        // noteRange.setRange(sample->lowNote, 
-        //                   (sample->highNote - sample->lowNote + 1), 
-        //                   true);
+        // Set ONLY the original root note as the trigger note
+        // This means the sample will ONLY play when we hit the original root note
+        // The pitch offset will be applied automatically by the sampler
+        noteRange.setBit(sample->rootNote);
         
-        // Create the sound - reader will be owned by SamplerSound
+        printf("Creating sound: %s -> triggers on note %d (root: %d) with pitch offset %+d\n", 
+               sample->name.toRawUTF8(), sample->rootNote, sample->rootNote, sample->pitchOffset);
+        
+        // Create the sound with adjusted root note
+        // The sampler will calculate: played note - root note = pitch offset
+        // So if we play the root note, pitch offset is 0
+        // To achieve our desired pitch offset, we need to adjust the ROOT NOTE in the sampler
         auto* sound = new juce::SamplerSound(
             sample->name,
             *reader,
             noteRange,
-            sample->rootNote,
+            sample->rootNote + sample->pitchOffset,  // Adjust the root note by pitch offset
             sample->attack,
             sample->release,
             10.0
@@ -962,10 +985,11 @@ void MainComponent::updateSamplerSounds()
         
         sampler.addSound(sound);
         
-        printf("Added sound from cache: %s -> triggers on note %d (%s) only\n", 
+        printf("Added sound from cache: %s -> triggers on note %d (adjusted root: %d) with pitch offset %+d\n", 
                sample->name.toRawUTF8(),
                sample->rootNote,
-               juce::MidiMessage::getMidiNoteName(sample->rootNote, true, true, true).toRawUTF8());
+               sample->rootNote + sample->pitchOffset,
+               sample->pitchOffset);
     }
     
     printf("Sampler updated with %d sounds (each mapped to single note)\n", samples.size());
@@ -1057,12 +1081,12 @@ void MainComponent::navigateToFile(int index)
         
         // Load sample on background thread
         backgroundThreads.addJob([this, file]() {
-            loadSampleFileAsync(file, true);
+            loadSampleFileAsync(file, true, sampleCard.getPitchOffset());
         });
     }
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, int pitchOffsetToUse)
 {
     // Create reader on background thread
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -1074,12 +1098,13 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
         return;
     }
     
-    printf("Loading sample: %s (%lld samples, %d ch, %.1f kHz) - Auto-play: %s\n", 
+    printf("Loading sample: %s (%lld samples, %d ch, %.1f kHz) - Auto-play: %s - Pitch offset: %+d\n", 
            file.getFileName().toRawUTF8(),
            reader->lengthInSamples,
            reader->numChannels,
            reader->sampleRate / 1000.0,
-           autoPlay ? "YES" : "NO");
+           autoPlay ? "YES" : "NO",
+           pitchOffsetToUse);
     
     // Create sample on background thread
     auto* sample = new MappedSample();
@@ -1098,6 +1123,10 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
     sample->lengthInSamples = reader->lengthInSamples;
     sample->attack = 0.01;  // Fast attack for preview
     sample->release = 0.1;   // Short release
+    
+    // Use the provided pitch offset instead of determining from autoPlay
+    sample->pitchOffset = pitchOffsetToUse;
+    printf("Setting pitch offset to: %+d\n", sample->pitchOffset);
     
     // Load audio data on background thread
     auto buffer = std::make_unique<juce::AudioBuffer<float>>(
@@ -1154,6 +1183,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
         
         updateSamplerSounds();
         sampleCard.setMidiNote(sample->rootNote);
+        sampleCard.setPitchOffset(sample->pitchOffset);
         
         // Save the session now that the sample is fully loaded
         saveCurrentSession();
@@ -1260,6 +1290,37 @@ void MainComponent::learningModeChanged(bool isLearning)
     printf("MIDI Learn mode: %s\n", isLearning ? "ON" : "OFF");
 }
 
+void MainComponent::pitchOffsetChanged(int pitchOffset)
+{
+    printf("Pitch offset changed to: %+d semitones\n", pitchOffset);
+    
+    // Apply pitch offset to currently loaded sample
+    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    {
+        auto* sample = samples[selectedSampleIndex];
+        sample->pitchOffset = pitchOffset;
+        
+        printf("Before update - Sample root: %d, pitch offset: %d, adjusted root: %d\n", 
+               sample->rootNote, sample->pitchOffset, sample->rootNote + sample->pitchOffset);
+        
+        // Update sampler with new pitch offset
+        updateSamplerSounds();
+        
+        printf("After update - Sample should now play at adjusted root: %d\n", 
+               sample->rootNote + sample->pitchOffset);
+        printf("Applied pitch offset %+d to sample: %s\n", pitchOffset, sample->name.toRawUTF8());
+    }
+    
+    // Save pitch offset to configuration
+    if (configManager != nullptr)
+    {
+        configManager->savePitchOffset(pitchOffset);
+    }
+    
+    // Save session to persist the change
+    saveCurrentSession();
+}
+
 void MainComponent::handleMidiLearn(int noteNumber)
 {
     if (isLearningMode)
@@ -1301,14 +1362,17 @@ void MainComponent::loadLastSession()
     int savedNote = configManager->getMidiNote();
     int savedChannel = configManager->getMidiChannel();
     juce::String savedDevice = configManager->getMidiDevice();
+    int savedPitchOffset = configManager->getPitchOffset();
     
     // Debug output for saved settings
     printf("Loading saved MIDI note: %d\n", savedNote);
     printf("Loading saved MIDI channel: %d\n", savedChannel);
     printf("Loading saved MIDI device: %s\n", savedDevice.toRawUTF8());
+    printf("Loading saved pitch offset: %+d\n", savedPitchOffset);
     
     // Apply MIDI settings to the card
     sampleCard.setMidiNote(savedNote);
+    sampleCard.setPitchOffset(savedPitchOffset);
     
     // Handle channel with wrap-around logic
     if (savedChannel >= 0 && savedChannel <= 16)
@@ -1363,8 +1427,8 @@ void MainComponent::loadLastSession()
                 }
             }
             
-            // Load the sample but DON'T auto-play it
-            loadSampleFileAsync(lastSample, false); // Add a parameter to control auto-play
+            // Load the sample but DON'T auto-play it, but DO use the saved pitch offset
+            loadSampleFileAsync(lastSample, false, savedPitchOffset);
         }
     }
 }
@@ -1377,6 +1441,9 @@ void MainComponent::saveCurrentSession()
         sampleCard.getMidiChannel(),
         currentMidiDeviceName
     );
+    
+    // Save pitch offset
+    configManager->savePitchOffset(sampleCard.getPitchOffset());
     
     // Only save the sample path if a sample is actually loaded
     if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
