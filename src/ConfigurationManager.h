@@ -73,6 +73,16 @@ public:
         propertiesFile->saveIfNeeded();
     }
     
+    // NEW: Save audio device settings
+    void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
+    {
+        propertiesFile->setValue("audioBufferSize", bufferSize);
+        propertiesFile->setValue("audioSampleRate", sampleRate);
+        propertiesFile->setValue("audioDeviceType", deviceType);
+        propertiesFile->setValue("audioOutputDevice", outputDeviceName);
+        propertiesFile->saveIfNeeded();
+    }
+    
     int getMidiNote()
     {
         return propertiesFile->getIntValue("midiNote", 60); // Default to middle C
@@ -91,6 +101,27 @@ public:
     int getPitchOffset()
     {
         return propertiesFile->getIntValue("pitchOffset", 0); // Default to 0 (no transposition)
+    }
+    
+    // NEW: Get audio settings
+    int getAudioBufferSize()
+    {
+        return propertiesFile->getIntValue("audioBufferSize", 512); // Default to 512
+    }
+    
+    double getAudioSampleRate()
+    {
+        return propertiesFile->getDoubleValue("audioSampleRate", 44100.0); // Default to 44.1kHz
+    }
+    
+    juce::String getAudioDeviceType()
+    {
+        return propertiesFile->getValue("audioDeviceType");
+    }
+    
+    juce::String getAudioOutputDevice()
+    {
+        return propertiesFile->getValue("audioOutputDevice");
     }
     
 private:

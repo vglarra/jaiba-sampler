@@ -98,13 +98,18 @@ MainComponent::MainComponent()
     // Set up audio
     setAudioChannels(0, 2);
     
-    juce::AudioDeviceManager::AudioDeviceSetup setup;
-    deviceManager.getAudioDeviceSetup(setup);
-    setup.bufferSize = 512;
-    deviceManager.setAudioDeviceSetup(setup, true);
+    // IMPORTANT: Load audio settings BEFORE applying the default buffer size
+    // This ensures saved settings override the default
+    loadAudioSettings();
+    
+    // Note: Don't set a default buffer size here - it will override saved settings
+    // The loadAudioSettings() method above will handle restoring the saved buffer
     
     // Start CPU timer for updates every 500ms
     cpuTimer.startTimer(500);
+    
+    // Add change listener for audio device changes
+    deviceManager.addChangeListener(this);
     
     // Load last session (sample, MIDI settings, directory)
     loadLastSession();
@@ -379,6 +384,11 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
     if (source == &deviceManager)
     {
         updateDeviceInfo();
+        
+        // Save audio settings whenever they change
+        saveAudioSettings();
+        
+        printf("Audio device configuration changed - settings saved\n");
     }
 }
 
@@ -451,6 +461,82 @@ void MainComponent::updateDeviceInfo()
         
         // Reset counter to avoid overflow
         if (cpuUpdateCounter >= 1000) cpuUpdateCounter = 0;
+    }
+}
+
+//==============================================================================
+void MainComponent::saveAudioSettings()
+{
+    if (configManager == nullptr)
+        return;
+    
+    auto* currentDevice = deviceManager.getCurrentAudioDevice();
+    if (currentDevice != nullptr)
+    {
+        juce::AudioDeviceManager::AudioDeviceSetup setup;
+        deviceManager.getAudioDeviceSetup(setup);
+        
+        // Save audio settings: buffer size, sample rate, and device name
+        // Device type is not needed as we can restore by device name
+        configManager->saveAudioSettings(
+            setup.bufferSize,
+            setup.sampleRate,
+            juce::String(), // Empty device type - not needed
+            currentDevice->getName()
+        );
+        
+        printf("Saved audio settings: buffer=%d, rate=%.1f, device=%s\n", 
+               setup.bufferSize, setup.sampleRate, currentDevice->getName().toRawUTF8());
+    }
+}
+
+void MainComponent::loadAudioSettings()
+{
+    if (configManager == nullptr)
+        return;
+    
+    int savedBufferSize = configManager->getAudioBufferSize();
+    double savedSampleRate = configManager->getAudioSampleRate();
+    juce::String savedDeviceType = configManager->getAudioDeviceType();
+    juce::String savedOutputDevice = configManager->getAudioOutputDevice();
+    
+    printf("Loading audio settings: buffer=%d, rate=%.1f, deviceType=%s, device=%s\n", 
+           savedBufferSize, savedSampleRate, 
+           savedDeviceType.toRawUTF8(), savedOutputDevice.toRawUTF8());
+    
+    // Note: We don't try to restore device type as there's no direct API for it
+    // The audio device will be whatever the system default or user selects
+    
+    // Get current setup and modify it
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager.getAudioDeviceSetup(setup);
+    
+    bool setupChanged = false;
+    
+    // Apply saved buffer size if different
+    if (savedBufferSize > 0 && setup.bufferSize != savedBufferSize)
+    {
+        setup.bufferSize = savedBufferSize;
+        setupChanged = true;
+        printf("Restoring buffer size to: %d\n", savedBufferSize);
+    }
+    
+    // Apply saved sample rate if different
+    if (savedSampleRate > 0 && setup.sampleRate != savedSampleRate)
+    {
+        setup.sampleRate = savedSampleRate;
+        setupChanged = true;
+        printf("Restoring sample rate to: %.1f\n", savedSampleRate);
+    }
+    
+    // Apply the setup if changed
+    if (setupChanged)
+    {
+        juce::String error = deviceManager.setAudioDeviceSetup(setup, true);
+        if (error.isNotEmpty())
+        {
+            printf("Error restoring audio setup: %s\n", error.toRawUTF8());
+        }
     }
 }
 
@@ -1444,6 +1530,9 @@ void MainComponent::saveCurrentSession()
     
     // Save pitch offset
     configManager->savePitchOffset(sampleCard.getPitchOffset());
+    
+    // Save audio settings
+    saveAudioSettings();
     
     // Only save the sample path if a sample is actually loaded
     if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())

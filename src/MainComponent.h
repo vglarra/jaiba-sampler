@@ -85,6 +85,8 @@ private:
     // Audio device management
     void showAudioDeviceSettings();
     void updateDeviceInfo();
+    void saveAudioSettings();
+    void loadAudioSettings();
     
     // MIDI device management
     void showMidiDeviceSettings();
