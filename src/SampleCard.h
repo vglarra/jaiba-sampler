@@ -53,6 +53,19 @@ public:
         waveformViewport.setScrollOnDragEnabled(true);
         addAndMakeVisible(waveformViewport);
         
+        // Set up fixed info labels
+        topInfoLabel.setJustificationType(juce::Justification::centred);
+        topInfoLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+        topInfoLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+        topInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        addAndMakeVisible(topInfoLabel);
+        
+        bottomInfoLabel.setJustificationType(juce::Justification::centred);
+        bottomInfoLabel.setFont(juce::Font(12.0f, juce::Font::bold));
+        bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colours::yellow);
+        bottomInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        addAndMakeVisible(bottomInfoLabel);
+        
     // Configure MIDI Note display (no +/- buttons, will add Learn button)
     midiNoteLabel.setJustificationType(juce::Justification::centred);
     midiNoteLabel.setFont(juce::Font(16.0f, juce::Font::bold));
@@ -177,6 +190,11 @@ public:
         // Waveform area with viewport
         auto waveformRect = area.removeFromTop(waveformHeight);
         waveformViewport.setBounds(waveformRect);
+        
+        // Position fixed info labels within the viewport area
+        auto labelArea = waveformRect;
+        topInfoLabel.setBounds(labelArea.removeFromTop(20).reduced(2));
+        bottomInfoLabel.setBounds(labelArea.removeFromBottom(25).reduced(2));
         
         // Update the waveform container and component size
         updateWaveformSize();
@@ -342,6 +360,29 @@ public:
                    semitones, pitchFactor, originalDuration, adjustedDuration);
         }
         
+        // Update the fixed info labels
+        if (semitones > 0)
+        {
+            double compressionFactor = 1.0 / pitchFactor;
+            topInfoLabel.setText(juce::String("Compressed: ") + juce::String(compressionFactor * 100, 1) + "%", 
+                                juce::dontSendNotification);
+            bottomInfoLabel.setText("PITCH: +" + juce::String(semitones) + " (↑ " + 
+                                   juce::String(pitchFactor, 2) + "x)", juce::dontSendNotification);
+        }
+        else if (semitones < 0)
+        {
+            double stretchFactor = 1.0 / pitchFactor;
+            topInfoLabel.setText(juce::String("Stretched: ") + juce::String(stretchFactor * 100, 1) + "%", 
+                                juce::dontSendNotification);
+            bottomInfoLabel.setText("PITCH: " + juce::String(semitones) + " (↓ " + 
+                                   juce::String(1.0/pitchFactor, 2) + "x)", juce::dontSendNotification);
+        }
+        else
+        {
+            topInfoLabel.setText("", juce::dontSendNotification);
+            bottomInfoLabel.setText("", juce::dontSendNotification);
+        }
+        
         // Update waveform container size after pitch change
         updateWaveformSize();
     }
@@ -493,79 +534,49 @@ private:
         // Draw waveform if loaded
         if (thumbnail.getTotalLength() > 0.0)
         {
-            // Create a separate copy for the waveform drawing
             auto waveformBounds = bounds.reduced(2);
-            
-            // Reserve space for text labels at the top and bottom (outside waveform area)
-            auto topTextArea = bounds.removeFromTop(20).reduced(2);
-            auto bottomTextArea = bounds.removeFromBottom(25).reduced(2);
-            
-            // Update waveformBounds to exclude text areas
-            waveformBounds = bounds.reduced(2);
             
             if (pitchOffset == 0)
             {
                 // No pitch change - draw normal waveform
                 g.setColour(juce::Colours::cyan);
                 thumbnail.drawChannels(g, waveformBounds, 0.0, thumbnail.getTotalLength(), 1.0f);
-                
-                // Draw a SINGLE subtle center line as reference (optional - remove if you want completely clean)
-                // g.setColour(juce::Colours::white.withAlpha(0.2f));
-                // float centerX = waveformBounds.getCentreX();
-                // g.drawVerticalLine((int)centerX, (float)waveformBounds.getY(), (float)waveformBounds.getBottom());
             }
             else
             {
                 // Calculate the ACTUAL pitch factor for accurate visual scaling
                 double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
                 
-                printf("Waveform painting: pitchOffset=%d, actualFactor=%.3f\n", 
-                       pitchOffset, pitchFactor);
-                
                 // First, draw the ORIGINAL waveform in the background (light color)
-                // This gives a reference to compare against
                 g.setColour(juce::Colours::grey.withAlpha(0.3f));
                 thumbnail.drawChannels(g, waveformBounds, 0.0, thumbnail.getTotalLength(), 1.0f);
                 
                 if (pitchOffset > 0)
                 {
                     // HIGHER PITCH (Up button) - waveform should appear COMPRESSED
-                    // Compression factor = 1 / pitchFactor (since pitchFactor > 1)
                     double compressionFactor = 1.0 / pitchFactor;
-                    
-                    printf("  COMPRESSION: factor=%.3f (waveform width reduced to %.1f%%)\n", 
-                           compressionFactor, compressionFactor * 100.0);
                     
                     // Save graphics state before transform
                     juce::Graphics::ScopedSaveState saveState(g);
                     
                     // Apply horizontal compression from the LEFT edge
-                    // This keeps the waveform anchored at the left side
                     g.addTransform(juce::AffineTransform::scale((float)compressionFactor, 1.0f, 
                                                                (float)waveformBounds.getX(), (float)waveformBounds.getY()));
                     
-                    // Draw COMPRESSED waveform on top (bright color)
+                    // Draw COMPRESSED waveform on top
                     g.setColour(juce::Colours::orange);
                     thumbnail.drawChannels(g, waveformBounds, 0.0, thumbnail.getTotalLength(), 1.0f);
-                    
-                // NO GRID LINES - removed for cleaner look
                 }
                 else // pitchOffset < 0
                 {
                     // LOWER PITCH (Down button) - waveform should appear STRETCHED
-                    // Stretch factor = 1 / pitchFactor (since pitchFactor < 1)
                     double stretchFactor = 1.0 / pitchFactor;  // This will be > 1
-                    // We need to draw only part of the waveform since we're stretching
                     double visiblePortion = 1.0 / stretchFactor;
-                    
-                    printf("  STRETCHING: factor=%.3f, visiblePortion=%.3f (waveform width increased to %.1f%%)\n", 
-                           stretchFactor, visiblePortion, stretchFactor * 100.0);
                     
                     // Save graphics state before transform
                     juce::Graphics::ScopedSaveState saveState(g);
                     
                     // Apply horizontal stretching from the LEFT edge
-                    // This keeps the waveform anchored at the left side
                     g.addTransform(juce::AffineTransform::scale((float)stretchFactor, 1.0f,
                                                                (float)waveformBounds.getX(), (float)waveformBounds.getY()));
                     
@@ -573,43 +584,7 @@ private:
                     g.setColour(juce::Colours::orange);
                     thumbnail.drawChannels(g, waveformBounds, 0.0, 
                                           thumbnail.getTotalLength() * visiblePortion, 1.0f);
-                    
-                    // NO GRID LINES - removed for cleaner look
                 }
-                
-                // Draw text labels OUTSIDE the transform (in normal coordinate space)
-                // This ensures text doesn't get distorted and doesn't affect waveform alignment
-                
-                // Draw compression/stretching percentage (in the top text area)
-                g.setColour(juce::Colours::white);
-                g.setFont(juce::Font(10.0f, juce::Font::bold)); // Reduced font size
-                
-                if (pitchOffset > 0)
-                {
-                    double compressionFactor = 1.0 / std::pow(2.0, pitchOffset / 12.0);
-                    g.drawText(juce::String("Compressed: ") + juce::String(compressionFactor * 100, 1) + "%", 
-                              topTextArea, juce::Justification::centred, true);
-                }
-                else
-                {
-                    double stretchFactor = 1.0 / std::pow(2.0, pitchOffset / 12.0);
-                    g.drawText(juce::String("Stretched: ") + juce::String(stretchFactor * 100, 1) + "%", 
-                              topTextArea, juce::Justification::centred, true);
-                }
-                
-                // Draw pitch indicator overlay at the bottom (reduced font size)
-                g.setColour(juce::Colours::yellow);
-                g.setFont(juce::Font(12.0f, juce::Font::bold)); // Reduced from 14px to 12px
-                
-                juce::String pitchText;
-                if (pitchOffset > 0)
-                    pitchText = "PITCH: +" + juce::String(pitchOffset) + " (↑ " + 
-                               juce::String(pitchFactor, 2) + "x)"; // Removed "speed" to save space
-                else
-                    pitchText = "PITCH: " + juce::String(pitchOffset) + " (↓ " + 
-                               juce::String(1.0/pitchFactor, 2) + "x)"; // Removed "speed" to save space
-                
-                g.drawText(pitchText, bottomTextArea, juce::Justification::centred, true);
             }
         }
         else
@@ -882,6 +857,10 @@ private:
     juce::Viewport waveformViewport;
     std::unique_ptr<juce::Component> waveformContainer;
     std::unique_ptr<WaveformComponent> waveformComponent;
+    
+    // Fixed info labels for waveform display (don't scroll with viewport)
+    juce::Label topInfoLabel;      // For compression/stretching percentage
+    juce::Label bottomInfoLabel;   // For pitch information
     
     // MIDI Note controls
     juce::Label midiNoteLabel;
