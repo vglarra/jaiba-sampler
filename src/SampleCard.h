@@ -40,9 +40,18 @@ public:
         learnButton.onClick = [this] { toggleLearnMode(); };
         addAndMakeVisible(learnButton);
         
-        // Configure waveform area
+        // Configure waveform area with viewport
         waveformComponent = std::make_unique<WaveformComponent>(thumbnail, resampledThumbnail, pitchOffset);
-        addAndMakeVisible(waveformComponent.get());
+        
+        // Create a container for the waveform that can be larger than the viewport
+        waveformContainer = std::make_unique<juce::Component>();
+        waveformContainer->addAndMakeVisible(waveformComponent.get());
+        
+        // Set up the viewport
+        waveformViewport.setViewedComponent(waveformContainer.get(), false);
+        waveformViewport.setScrollBarsShown(true, false); // Show vertical scroll bar? false, show horizontal? true
+        waveformViewport.setScrollOnDragEnabled(true);
+        addAndMakeVisible(waveformViewport);
         
     // Configure MIDI Note display (no +/- buttons, will add Learn button)
     midiNoteLabel.setJustificationType(juce::Justification::centred);
@@ -165,12 +174,12 @@ public:
         // Calculate waveform height based on 4cm at 96 DPI (fixed height)
         const int waveformHeight = static_cast<int>(4 * 37.8); // ~151px
         
-        // Waveform area takes full width with margins
+        // Waveform area with viewport
         auto waveformRect = area.removeFromTop(waveformHeight);
-        waveformRect.reduce(10, 0);
+        waveformViewport.setBounds(waveformRect);
         
-        if (waveformComponent != nullptr)
-            waveformComponent->setBounds(waveformRect);
+        // Update the waveform container and component size
+        updateWaveformSize();
         
         // Add 5px margin between waveform and pitch controls
         area.removeFromTop(5);
@@ -332,6 +341,9 @@ public:
             printf("Pitch: %+d, Factor: %.3f, Original: %.2f, Adjusted: %.2f\n", 
                    semitones, pitchFactor, originalDuration, adjustedDuration);
         }
+        
+        // Update waveform container size after pitch change
+        updateWaveformSize();
     }
     
     void setWaveform(const juce::File& audioFile)
@@ -361,6 +373,9 @@ public:
                 
                 // Update resampled waveform based on current pitch
                 updateResampledWaveform();
+                
+                // Update waveform container size
+                updateWaveformSize();
                 
                 // Force a repaint
                 repaint();
@@ -817,11 +832,55 @@ private:
             waveformComponent->repaint();
     }
     
+    void updateWaveformSize()
+    {
+        if (waveformComponent == nullptr || waveformContainer == nullptr)
+            return;
+        
+        auto viewportBounds = waveformViewport.getLocalBounds();
+        int containerWidth = viewportBounds.getWidth();
+        
+        // If pitch is applied, make the container wider to show the stretched/compressed waveform
+        if (pitchOffset != 0)
+        {
+            double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
+            
+            if (pitchOffset > 0)
+            {
+                // For compressed waveform (higher pitch), we can keep original width
+                // or make it slightly smaller - here we keep original
+                containerWidth = viewportBounds.getWidth();
+            }
+            else
+            {
+                // For stretched waveform (lower pitch), we need more width
+                // Stretch factor = 1 / pitchFactor (since pitchFactor < 1)
+                double stretchFactor = 1.0 / pitchFactor;
+                containerWidth = (int)(viewportBounds.getWidth() * stretchFactor);
+            }
+        }
+        
+        // Ensure minimum width
+        containerWidth = juce::jmax(containerWidth, viewportBounds.getWidth());
+        
+        // Set container size
+        waveformContainer->setBounds(0, 0, containerWidth, viewportBounds.getHeight());
+        
+        // Set waveform component to fill the container
+        waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
+        
+        // Reset scroll position to start when waveform changes significantly
+        // Comment this out if you want to maintain scroll position
+        waveformViewport.setViewPosition(0, 0);
+    }
+    
     // UI Components
     juce::TextButton addButton{"+"};
     juce::TextButton prevButton{"Prev"};
     juce::TextButton nextButton{"Next"};
     juce::TextButton learnButton{"Learn"};  // MIDI Learn button
+    juce::Viewport waveformViewport;
+    std::unique_ptr<juce::Component> waveformContainer;
     std::unique_ptr<WaveformComponent> waveformComponent;
     
     // MIDI Note controls
