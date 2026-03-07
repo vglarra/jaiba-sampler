@@ -67,6 +67,22 @@ public:
         propertiesFile->saveIfNeeded();
     }
     
+    void savePitchOffset(int pitchOffset)
+    {
+        propertiesFile->setValue("pitchOffset", pitchOffset);
+        propertiesFile->saveIfNeeded();
+    }
+    
+    // NEW: Save audio device settings
+    void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
+    {
+        propertiesFile->setValue("audioBufferSize", bufferSize);
+        propertiesFile->setValue("audioSampleRate", sampleRate);
+        propertiesFile->setValue("audioDeviceType", deviceType);
+        propertiesFile->setValue("audioOutputDevice", outputDeviceName);
+        propertiesFile->saveIfNeeded();
+    }
+    
     int getMidiNote()
     {
         return propertiesFile->getIntValue("midiNote", 60); // Default to middle C
@@ -80,6 +96,32 @@ public:
     juce::String getMidiDevice()
     {
         return propertiesFile->getValue("midiDevice");
+    }
+    
+    int getPitchOffset()
+    {
+        return propertiesFile->getIntValue("pitchOffset", 0); // Default to 0 (no transposition)
+    }
+    
+    // NEW: Get audio settings
+    int getAudioBufferSize()
+    {
+        return propertiesFile->getIntValue("audioBufferSize", 512); // Default to 512
+    }
+    
+    double getAudioSampleRate()
+    {
+        return propertiesFile->getDoubleValue("audioSampleRate", 44100.0); // Default to 44.1kHz
+    }
+    
+    juce::String getAudioDeviceType()
+    {
+        return propertiesFile->getValue("audioDeviceType");
+    }
+    
+    juce::String getAudioOutputDevice()
+    {
+        return propertiesFile->getValue("audioOutputDevice");
     }
     
 private:
@@ -168,6 +210,7 @@ private:
 };
 
 START_JUCE_APPLICATION(SamplerApplication)
+
 
 #include "MainComponent.h"
 #include "UIComponents.h"
@@ -269,13 +312,18 @@ MainComponent::MainComponent()
     // Set up audio
     setAudioChannels(0, 2);
     
-    juce::AudioDeviceManager::AudioDeviceSetup setup;
-    deviceManager.getAudioDeviceSetup(setup);
-    setup.bufferSize = 512;
-    deviceManager.setAudioDeviceSetup(setup, true);
+    // IMPORTANT: Load audio settings BEFORE applying the default buffer size
+    // This ensures saved settings override the default
+    loadAudioSettings();
+    
+    // Note: Don't set a default buffer size here - it will override saved settings
+    // The loadAudioSettings() method above will handle restoring the saved buffer
     
     // Start CPU timer for updates every 500ms
     cpuTimer.startTimer(500);
+    
+    // Add change listener for audio device changes
+    deviceManager.addChangeListener(this);
     
     // Load last session (sample, MIDI settings, directory)
     loadLastSession();
@@ -347,18 +395,19 @@ void MainComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colours::white);
     g.setFont(juce::Font(24.0f, juce::Font::bold));
     
-    auto titleArea = getLocalBounds().reduced(20).removeFromTop(50);
+    // Title area matches reduced top bar height (30px)
+    auto titleArea = getLocalBounds().reduced(20).removeFromTop(30);
     g.drawText("Jaiva Sampler V001", titleArea, juce::Justification::centred, true);
     
     // Draw separator lines
     g.setColour(juce::Colours::darkgrey);
     
-    // Line below title
+    // Line below title (adjusted for reduced top bar)
     auto lineY = titleArea.getBottom() + 5;
     g.drawHorizontalLine(lineY, 20, getWidth() - 20);
     
-    // Line above footer
-    auto footerY = getHeight() - 100;
+    // Line above footer - adjusted for reduced footer height (50px + 20px padding)
+    auto footerY = getHeight() - 70;
     g.drawHorizontalLine(footerY, 20, getWidth() - 20);
 }
 
@@ -371,30 +420,36 @@ void MainComponent::resized()
     
     auto area = getLocalBounds().reduced(20);
     
-    // Top bar: Menu button on left, Test tone button on right, MIDI light in title
-    auto topBar = area.removeFromTop(50);
+    // Top bar: Menu button on left, Title in center, MIDI light button and Test tone button on right
+    // Reduced top bar height by 40% (from 50px to 30px)
+    auto topBar = area.removeFromTop(30);
     
-    // Menu button on left
-    menuButton.setBounds(topBar.removeFromLeft(120).reduced(2));
+    // Menu button on left (60px wide like Prev/Next buttons in SampleCard)
+    menuButton.setBounds(topBar.removeFromLeft(60).reduced(2));
     
-    // Title area with MIDI light
+    // Title area (centered in remaining space)
     auto titleArea = topBar;
     auto titleBounds = titleArea.withSizeKeepingCentre(300, 30);
     
-    // Position MIDI light to the left of the title text - repositioned to be centered between menu button and test tone button
-    int titleCenterX = getWidth() / 2;
-    midiActivityLight.setBounds(titleCenterX - 120, 
-                                titleBounds.getCentreY() - 8, 
-                                16, 16);
+    // Right side: MIDI light button and Test tone button
+    auto rightSide = topBar.removeFromRight(60 + 5 + 30); // Test tone (60px) + margin (5px) + MIDI light (30px)
     
-    // Test tone button on right
-    testToneButton.setBounds(topBar.removeFromRight(120).reduced(2));
+    // MIDI light button (30px wide, same height as other buttons)
+    auto midiLightButtonArea = rightSide.removeFromLeft(30).reduced(2);
+    // Set the MIDI activity light to fill the entire button area
+    midiActivityLight.setBounds(midiLightButtonArea);
+    
+    // 5px margin between buttons
+    rightSide.removeFromLeft(5);
+    
+    // Test tone button on right (60px wide like Prev/Next buttons)
+    testToneButton.setBounds(rightSide.removeFromLeft(60).reduced(2));
     
     // Body area - this is where the card goes
     auto bodyArea = area.reduced(10, 5);
     
     // Make the card take most of the body width, but with max width to maintain proportions
-    const int cardMaxWidth = 600;  // Maximum width to keep card from getting too wide
+    const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
     const int cardHeight = 280;     // Fixed height
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
@@ -412,22 +467,36 @@ void MainComponent::resized()
         sampleCard.setBounds(cardBounds);
     }
     
-    // Footer area at bottom
-    auto footerArea = getLocalBounds().reduced(20).removeFromBottom(80);
+    // Footer area at bottom - reduced by 40% (from 80px to 48px, using 50px for clean math)
+    auto footerArea = getLocalBounds().reduced(20).removeFromBottom(50);
     
-    // Left side: Device info (two lines)
-    auto leftFooter = footerArea.removeFromLeft(footerArea.getWidth() * 0.6);
-    auto audioFooter = leftFooter.removeFromTop(30);
-    audioDeviceInfoLabel.setBounds(audioFooter.reduced(5, 0));
+    // Left side: Device info - two rows with vertical centering
+    // Use all available space before CPU indicator
+    auto leftFooter = footerArea.withTrimmedRight(130); // Reserve space for CPU label + padding
+    
+    // Calculate row height for two rows with vertical centering
+    const int rowHeight = 20; // Each row gets 20px
+    const int totalRowsHeight = rowHeight * 2;
+    const int verticalPadding = (footerArea.getHeight() - totalRowsHeight) / 2;
+    
+    // Audio info row (top)
+    auto audioRow = leftFooter.removeFromTop(rowHeight).translated(0, verticalPadding);
+    audioRow.removeFromLeft(5); // Left margin
+    audioDeviceInfoLabel.setBounds(audioRow);
     audioDeviceInfoLabel.setFont(juce::Font(10.0f));
+    audioDeviceInfoLabel.setJustificationType(juce::Justification::left);
     
-    auto midiFooter = leftFooter.removeFromTop(30);
-    midiDeviceInfoLabel.setBounds(midiFooter.reduced(5, 0));
+    // MIDI info row (bottom)
+    auto midiRow = leftFooter.removeFromTop(rowHeight).translated(0, verticalPadding);
+    midiRow.removeFromLeft(5); // Left margin
+    midiDeviceInfoLabel.setBounds(midiRow);
     midiDeviceInfoLabel.setFont(juce::Font(10.0f));
+    midiDeviceInfoLabel.setJustificationType(juce::Justification::left);
     
-    // Right side: CPU usage
+    // Right side: CPU usage - maintain current positioning
     cpuUsageLabel.setBounds(footerArea.removeFromRight(120).reduced(5));
     cpuUsageLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+    cpuUsageLabel.setJustificationType(juce::Justification::right);
     
     isResizing = false;
 }
@@ -484,7 +553,8 @@ void MainComponent::buttonClicked(juce::Button* button)
                     
                     // Use the async loading method instead of synchronous loadSampleFile
                     // This ensures proper UI updates and session saving
-                    loadSampleFileAsync(file, true); // true for auto-play
+                    // New sample from Add button - reset pitch to 0
+                    loadSampleFileAsync(file, true, 0); // true for auto-play, 0 for pitch offset
                     
                     // DON'T call saveCurrentSession() here - it will be called 
                     // from within loadSampleFileAsync after the sample is fully loaded
@@ -528,6 +598,11 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
     if (source == &deviceManager)
     {
         updateDeviceInfo();
+        
+        // Save audio settings whenever they change
+        saveAudioSettings();
+        
+        printf("Audio device configuration changed - settings saved\n");
     }
 }
 
@@ -600,6 +675,82 @@ void MainComponent::updateDeviceInfo()
         
         // Reset counter to avoid overflow
         if (cpuUpdateCounter >= 1000) cpuUpdateCounter = 0;
+    }
+}
+
+//==============================================================================
+void MainComponent::saveAudioSettings()
+{
+    if (configManager == nullptr)
+        return;
+    
+    auto* currentDevice = deviceManager.getCurrentAudioDevice();
+    if (currentDevice != nullptr)
+    {
+        juce::AudioDeviceManager::AudioDeviceSetup setup;
+        deviceManager.getAudioDeviceSetup(setup);
+        
+        // Save audio settings: buffer size, sample rate, and device name
+        // Device type is not needed as we can restore by device name
+        configManager->saveAudioSettings(
+            setup.bufferSize,
+            setup.sampleRate,
+            juce::String(), // Empty device type - not needed
+            currentDevice->getName()
+        );
+        
+        printf("Saved audio settings: buffer=%d, rate=%.1f, device=%s\n", 
+               setup.bufferSize, setup.sampleRate, currentDevice->getName().toRawUTF8());
+    }
+}
+
+void MainComponent::loadAudioSettings()
+{
+    if (configManager == nullptr)
+        return;
+    
+    int savedBufferSize = configManager->getAudioBufferSize();
+    double savedSampleRate = configManager->getAudioSampleRate();
+    juce::String savedDeviceType = configManager->getAudioDeviceType();
+    juce::String savedOutputDevice = configManager->getAudioOutputDevice();
+    
+    printf("Loading audio settings: buffer=%d, rate=%.1f, deviceType=%s, device=%s\n", 
+           savedBufferSize, savedSampleRate, 
+           savedDeviceType.toRawUTF8(), savedOutputDevice.toRawUTF8());
+    
+    // Note: We don't try to restore device type as there's no direct API for it
+    // The audio device will be whatever the system default or user selects
+    
+    // Get current setup and modify it
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager.getAudioDeviceSetup(setup);
+    
+    bool setupChanged = false;
+    
+    // Apply saved buffer size if different
+    if (savedBufferSize > 0 && setup.bufferSize != savedBufferSize)
+    {
+        setup.bufferSize = savedBufferSize;
+        setupChanged = true;
+        printf("Restoring buffer size to: %d\n", savedBufferSize);
+    }
+    
+    // Apply saved sample rate if different
+    if (savedSampleRate > 0 && setup.sampleRate != savedSampleRate)
+    {
+        setup.sampleRate = savedSampleRate;
+        setupChanged = true;
+        printf("Restoring sample rate to: %.1f\n", savedSampleRate);
+    }
+    
+    // Apply the setup if changed
+    if (setupChanged)
+    {
+        juce::String error = deviceManager.setAudioDeviceSetup(setup, true);
+        if (error.isNotEmpty())
+        {
+            printf("Error restoring audio setup: %s\n", error.toRawUTF8());
+        }
     }
 }
 
@@ -721,87 +872,81 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
     // Ignore MIDI clock and active sense messages as they're sent continuously
     if (message.isMidiClock() || message.isActiveSense())
     {
-        // Still print for debugging but don't trigger the light
-        if (message.isMidiClock())
-        {
-            printf("RAW MIDI Clock (ignored for light)\n");
-        }
-        else if (message.isActiveSense())
-        {
-            printf("RAW MIDI Active Sense (ignored for light)\n");
-        }
-        return;  // Don't trigger light or process these messages
+        // Don't print anything - just return immediately
+        // These messages are ignored completely to avoid performance issues
+        return;
     }
     
-    // ALWAYS trigger the MIDI activity light for ANY MIDI message
-    // This happens before any filtering so it shows activity from all channels
-    midiActivityLight.triggerActivity();
-    
-    // Print ALL incoming MIDI messages for debugging (temporarily)
-    if (message.isNoteOn())
-    {
-        printf("RAW MIDI Note On: %d, Vel: %d, Ch: %d\n", 
-               message.getNoteNumber(), 
-               message.getVelocity(),
-               message.getChannel());
-    }
-    else if (message.isNoteOff())
-    {
-        printf("RAW MIDI Note Off: %d, Ch: %d\n", 
-               message.getNoteNumber(),
-               message.getChannel());
-    }
-    else if (message.isController())
-    {
-        printf("RAW MIDI Controller: %d, Val: %d, Ch: %d\n",
-               message.getControllerNumber(),
-               message.getControllerValue(),
-               message.getChannel());
-    }
-    else if (message.isPitchWheel())
-    {
-        printf("RAW MIDI Pitch Wheel: %d, Ch: %d\n",
-               message.getPitchWheelValue(),
-               message.getChannel());
-    }
-    else if (message.isAftertouch())
-    {
-        printf("RAW MIDI Aftertouch: %d, Ch: %d\n",
-               message.getAfterTouchValue(),
-               message.getChannel());
-    }
-    else if (message.isChannelPressure())
-    {
-        printf("RAW MIDI Channel Pressure: %d, Ch: %d\n",
-               message.getChannelPressureValue(),
-               message.getChannel());
-    }
-    else if (message.isSysEx())
-    {
-        printf("RAW MIDI SysEx: %d bytes\n", message.getRawDataSize());
-    }
-    else if (message.isMidiStart())
-    {
-        printf("RAW MIDI Start\n");
-    }
-    else if (message.isMidiStop())
-    {
-        printf("RAW MIDI Stop\n");
-    }
-    else if (message.isMidiContinue())
-    {
-        printf("RAW MIDI Continue\n");
-    }
-    else if (message.getRawDataSize() > 0)
-    {
-        printf("RAW MIDI Unknown: ");
-        const uint8_t* data = message.getRawData();
-        for (int i = 0; i < message.getRawDataSize(); i++)
-        {
-            printf("%02X ", data[i]);
-        }
-        printf("\n");
-    }
+      // ALWAYS trigger the MIDI activity light for ANY MIDI message
+      // This happens before any filtering so it shows activity from all channels
+      midiActivityLight.triggerActivity();
+      
+      // Update MIDI activity light based on message type for more nuanced feedback
+      if (message.isNoteOn())
+      {
+          midiActivityLight.noteOn();
+      }
+      else if (message.isNoteOff())
+      {
+          midiActivityLight.noteOff();
+      }
+      else
+      {
+          // For other MIDI messages (controllers, etc.) trigger a brief flash
+          midiActivityLight.triggerActivity();
+      }
+      
+      // Print ALL incoming MIDI messages for debugging (temporarily)
+      // You can comment these out once everything is working
+      if (message.isNoteOn())
+      {
+          printf("RAW MIDI Note On: %d, Vel: %d, Ch: %d\n", 
+                 message.getNoteNumber(), 
+                 message.getVelocity(),
+                 message.getChannel());
+      }
+      else if (message.isNoteOff())
+      {
+          printf("RAW MIDI Note Off: %d, Ch: %d\n", 
+                 message.getNoteNumber(),
+                 message.getChannel());
+      }
+      else if (message.isController())
+      {
+          printf("RAW MIDI Controller: %d, Val: %d, Ch: %d\n",
+                 message.getControllerNumber(),
+                 message.getControllerValue(),
+                 message.getChannel());
+      }
+      else if (message.isPitchWheel())
+      {
+          printf("RAW MIDI Pitch Wheel: %d, Ch: %d\n",
+                 message.getPitchWheelValue(),
+                 message.getChannel());
+      }
+      else if (message.isAftertouch())
+      {
+          printf("RAW MIDI Aftertouch: %d, Ch: %d\n",
+                 message.getAfterTouchValue(),
+                 message.getChannel());
+      }
+      else if (message.isChannelPressure())
+      {
+          printf("RAW MIDI Channel Pressure: %d, Ch: %d\n",
+                 message.getChannelPressureValue(),
+                 message.getChannel());
+      }
+      else if (message.isSysEx())
+      {
+          printf("RAW MIDI SysEx: %d bytes\n", message.getRawDataSize());
+      }
+      else if (message.isMidiStart() || message.isMidiStop() || message.isMidiContinue())
+      {
+          // These are transport messages - print them but they're less frequent
+          if (message.isMidiStart()) printf("RAW MIDI Start\n");
+          else if (message.isMidiStop()) printf("RAW MIDI Stop\n");
+          else if (message.isMidiContinue()) printf("RAW MIDI Continue\n");
+      }
     
     // ANTI-FLOOD PROTECTION: Ignore duplicate messages in quick succession
     static juce::uint64 lastMessageTime = 0;
@@ -1109,23 +1254,32 @@ void MainComponent::updateSamplerSounds()
             sample->numChannels
         );
         
-        // IMPORTANT FIX: Create a note range that ONLY includes the selected root note
-        // This ensures the sample plays at its original pitch on a single note
+        // IMPORTANT FIX: Create note range that includes ALL notes that should trigger this sample
+        // For single-note mode with pitch offset, we want the sample to trigger on the ORIGINAL root note
+        // The pitch offset will be applied by the sampler automatically based on the difference
+        // between the played note and the root note
         juce::BigInteger noteRange;
         noteRange.setRange(0, 128, false);  // Clear all notes first
-        noteRange.setBit(sample->rootNote);  // Set ONLY the root note
         
-        // Keep this commented for future note range support:
-        // noteRange.setRange(sample->lowNote, 
-        //                   (sample->highNote - sample->lowNote + 1), 
-        //                   true);
+        // Set ONLY the original root note as the trigger note
+        // This means the sample will ONLY play when we hit the original root note
+        // The pitch offset will be applied automatically by the sampler
+        noteRange.setBit(sample->rootNote);
         
-        // Create the sound - reader will be owned by SamplerSound
+        printf("Creating sound: %s -> triggers on note %d (root: %d) with pitch offset %+d\n", 
+               sample->name.toRawUTF8(), sample->rootNote, sample->rootNote, sample->pitchOffset);
+        
+        // Create the sound with adjusted root note
+        // Based on testing, the correct formula appears to be subtraction.
+        // JUCE calculates: pitch shift = playedNote - midiNoteForNormalPitch
+        // We want: pitch shift = pitchOffset (positive for pitch UP)
+        // So: sample->rootNote - midiNoteForNormalPitch = pitchOffset
+        // Therefore: midiNoteForNormalPitch = sample->rootNote - pitchOffset
         auto* sound = new juce::SamplerSound(
             sample->name,
             *reader,
             noteRange,
-            sample->rootNote,
+            sample->rootNote - sample->pitchOffset,  // Subtraction is correct
             sample->attack,
             sample->release,
             10.0
@@ -1133,10 +1287,11 @@ void MainComponent::updateSamplerSounds()
         
         sampler.addSound(sound);
         
-        printf("Added sound from cache: %s -> triggers on note %d (%s) only\n", 
+        printf("Added sound from cache: %s -> triggers on note %d (adjusted root: %d) with pitch offset %+d\n",
                sample->name.toRawUTF8(),
                sample->rootNote,
-               juce::MidiMessage::getMidiNoteName(sample->rootNote, true, true, true).toRawUTF8());
+               sample->rootNote - sample->pitchOffset,  // Correct: subtraction matches actual calculation
+               sample->pitchOffset);
     }
     
     printf("Sampler updated with %d sounds (each mapped to single note)\n", samples.size());
@@ -1228,12 +1383,12 @@ void MainComponent::navigateToFile(int index)
         
         // Load sample on background thread
         backgroundThreads.addJob([this, file]() {
-            loadSampleFileAsync(file, true);
+            loadSampleFileAsync(file, true, sampleCard.getPitchOffset());
         });
     }
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, int pitchOffsetToUse)
 {
     // Create reader on background thread
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -1245,12 +1400,13 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
         return;
     }
     
-    printf("Loading sample: %s (%lld samples, %d ch, %.1f kHz) - Auto-play: %s\n", 
+    printf("Loading sample: %s (%lld samples, %d ch, %.1f kHz) - Auto-play: %s - Pitch offset: %+d\n", 
            file.getFileName().toRawUTF8(),
            reader->lengthInSamples,
            reader->numChannels,
            reader->sampleRate / 1000.0,
-           autoPlay ? "YES" : "NO");
+           autoPlay ? "YES" : "NO",
+           pitchOffsetToUse);
     
     // Create sample on background thread
     auto* sample = new MappedSample();
@@ -1269,6 +1425,10 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
     sample->lengthInSamples = reader->lengthInSamples;
     sample->attack = 0.01;  // Fast attack for preview
     sample->release = 0.1;   // Short release
+    
+    // Use the provided pitch offset instead of determining from autoPlay
+    sample->pitchOffset = pitchOffsetToUse;
+    printf("Setting pitch offset to: %+d\n", sample->pitchOffset);
     
     // Load audio data on background thread
     auto buffer = std::make_unique<juce::AudioBuffer<float>>(
@@ -1325,6 +1485,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
         
         updateSamplerSounds();
         sampleCard.setMidiNote(sample->rootNote);
+        sampleCard.setPitchOffset(sample->pitchOffset);
         
         // Save the session now that the sample is fully loaded
         saveCurrentSession();
@@ -1431,6 +1592,37 @@ void MainComponent::learningModeChanged(bool isLearning)
     printf("MIDI Learn mode: %s\n", isLearning ? "ON" : "OFF");
 }
 
+void MainComponent::pitchOffsetChanged(int pitchOffset)
+{
+    printf("Pitch offset changed to: %+d semitones\n", pitchOffset);
+    
+    // Apply pitch offset to currently loaded sample
+    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    {
+        auto* sample = samples[selectedSampleIndex];
+        sample->pitchOffset = pitchOffset;
+        
+        printf("Before update - Sample root: %d, pitch offset: %d, adjusted root: %d\n", 
+               sample->rootNote, sample->pitchOffset, sample->rootNote - sample->pitchOffset);
+        
+        // Update sampler with new pitch offset
+        updateSamplerSounds();
+        
+        printf("After update - Sample should now play at adjusted root: %d\n", 
+               sample->rootNote - sample->pitchOffset);
+        printf("Applied pitch offset %+d to sample: %s\n", pitchOffset, sample->name.toRawUTF8());
+    }
+    
+    // Save pitch offset to configuration
+    if (configManager != nullptr)
+    {
+        configManager->savePitchOffset(pitchOffset);
+    }
+    
+    // Save session to persist the change
+    saveCurrentSession();
+}
+
 void MainComponent::handleMidiLearn(int noteNumber)
 {
     if (isLearningMode)
@@ -1472,14 +1664,17 @@ void MainComponent::loadLastSession()
     int savedNote = configManager->getMidiNote();
     int savedChannel = configManager->getMidiChannel();
     juce::String savedDevice = configManager->getMidiDevice();
+    int savedPitchOffset = configManager->getPitchOffset();
     
     // Debug output for saved settings
     printf("Loading saved MIDI note: %d\n", savedNote);
     printf("Loading saved MIDI channel: %d\n", savedChannel);
     printf("Loading saved MIDI device: %s\n", savedDevice.toRawUTF8());
+    printf("Loading saved pitch offset: %+d\n", savedPitchOffset);
     
     // Apply MIDI settings to the card
     sampleCard.setMidiNote(savedNote);
+    sampleCard.setPitchOffset(savedPitchOffset);
     
     // Handle channel with wrap-around logic
     if (savedChannel >= 0 && savedChannel <= 16)
@@ -1534,8 +1729,8 @@ void MainComponent::loadLastSession()
                 }
             }
             
-            // Load the sample but DON'T auto-play it
-            loadSampleFileAsync(lastSample, false); // Add a parameter to control auto-play
+            // Load the sample but DON'T auto-play it, using the saved pitch offset
+            loadSampleFileAsync(lastSample, false, savedPitchOffset);
         }
     }
 }
@@ -1548,6 +1743,12 @@ void MainComponent::saveCurrentSession()
         sampleCard.getMidiChannel(),
         currentMidiDeviceName
     );
+    
+    // Save pitch offset
+    configManager->savePitchOffset(sampleCard.getPitchOffset());
+    
+    // Save audio settings
+    saveAudioSettings();
     
     // Only save the sample path if a sample is actually loaded
     if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
@@ -1655,12 +1856,14 @@ private:
     //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
-    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true);
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, int pitchOffsetToUse = 0);
     void updateSamplerSounds();
     
     // Audio device management
     void showAudioDeviceSettings();
     void updateDeviceInfo();
+    void saveAudioSettings();
+    void loadAudioSettings();
     
     // MIDI device management
     void showMidiDeviceSettings();
@@ -1689,6 +1892,7 @@ private:
     void midiNoteChanged(int newNote) override;
     void midiChannelChanged(int newChannel) override;
     void learningModeChanged(bool isLearning) override;
+    void pitchOffsetChanged(int pitchOffset) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -1748,6 +1952,7 @@ private:
         double attack = 0.1;
         double release = 0.1;
         bool isSelected = false;
+        int pitchOffset = 0;  // Add pitch offset per sample
         
         // Cached audio data
         std::unique_ptr<juce::AudioBuffer<float>> audioData;
@@ -1894,7 +2099,6 @@ public:
         setSize(16, 16);
         startTimer(50); // Check every 50ms for activity timeout
         lastActivityTime = 0;
-        isActive = false;
     }
     
     ~MidiActivityLight()
@@ -1913,7 +2117,7 @@ public:
         // Draw inner circle based on activity
         if (isActive)
         {
-            // Bright yellow for MIDI activity
+            // Bright yellow for note activity
             g.setColour(juce::Colours::yellow);
             g.fillEllipse(bounds.reduced(2));
         }
@@ -1929,16 +2133,6 @@ public:
         }
     }
     
-    void triggerActivity()
-    {
-        // Always turn on for note-on events
-        isActive = true;
-        lastActivityTime = juce::Time::getMillisecondCounter();
-        
-        // Always repaint on the message thread
-        juce::MessageManager::callAsync([this] { repaint(); });
-    }
-    
     void noteOn()
     {
         // Always turn on for note-on events
@@ -1952,6 +2146,15 @@ public:
         triggerActivity();
     }
     
+    void triggerActivity()
+    {
+        isActive = true;
+        lastActivityTime = juce::Time::getMillisecondCounter();
+        
+        // Always repaint on the message thread
+        juce::MessageManager::callAsync([this] { repaint(); });
+    }
+    
 private:
     void timerCallback() override
     {
@@ -1959,14 +2162,11 @@ private:
         auto now = juce::Time::getMillisecondCounter();
         auto timeSinceLastActivity = now - lastActivityTime;
         
-        // Turn off if inactive and currently on
+        // Only turn off if we've been inactive and we're currently on
         if (isActive && timeSinceLastActivity > 50)
         {
             isActive = false;
-            juce::MessageManager::callAsync([this] { 
-                repaint();
-                printf("MIDI Light turned off\n");
-            });
+            juce::MessageManager::callAsync([this] { repaint(); });
         }
     }
     
@@ -1979,15 +2179,13 @@ private:
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_audio_basics/juce_audio_basics.h>
 
-class SampleCard : public juce::Component,
-                   private juce::ChangeListener
+class SampleCard : public juce::Component
 {
 public:
     SampleCard(juce::AudioFormatManager& formatManager)
-        : formatManager(formatManager),
-          thumbnailCache(5),  // Cache 5 thumbnails
-          thumbnail(512, formatManager, thumbnailCache)
+        : formatManager(formatManager)
     {
         // Configure + button (top left)
         addButton.setButtonText("+");
@@ -2015,9 +2213,32 @@ public:
         learnButton.onClick = [this] { toggleLearnMode(); };
         addAndMakeVisible(learnButton);
         
-        // Configure waveform area
-        waveformComponent = std::make_unique<WaveformComponent>(thumbnail);
-        addAndMakeVisible(waveformComponent.get());
+        // Configure waveform area with viewport
+        waveformComponent = std::make_unique<WaveformComponent>(
+            formatManager, currentAudioFile, pitchOffset);
+        
+        // Create a container for the waveform that can be larger than the viewport
+        waveformContainer = std::make_unique<juce::Component>();
+        waveformContainer->addAndMakeVisible(waveformComponent.get());
+        
+        // Set up the viewport
+        waveformViewport.setViewedComponent(waveformContainer.get(), false);
+        waveformViewport.setScrollBarsShown(true, false); // Show vertical scroll bar? false, show horizontal? true
+        waveformViewport.setScrollOnDragEnabled(true);
+        addAndMakeVisible(waveformViewport);
+        
+        // Set up fixed info labels
+        topInfoLabel.setJustificationType(juce::Justification::centred);
+        topInfoLabel.setFont(juce::Font(10.0f, juce::Font::bold));
+        topInfoLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+        topInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        addAndMakeVisible(topInfoLabel);
+        
+        bottomInfoLabel.setJustificationType(juce::Justification::centred);
+        bottomInfoLabel.setFont(juce::Font(12.0f, juce::Font::bold));
+        bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colours::yellow);
+        bottomInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        addAndMakeVisible(bottomInfoLabel);
         
     // Configure MIDI Note display (no +/- buttons, will add Learn button)
     midiNoteLabel.setJustificationType(juce::Justification::centred);
@@ -2028,11 +2249,12 @@ public:
     addAndMakeVisible(midiNoteLabel);
         
         // Configure MIDI Channel controls
-        channelMinusButton.setButtonText("-");
-        channelMinusButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        channelMinusButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-        channelMinusButton.onClick = [this] { adjustMidiChannel(-1); };
-        addAndMakeVisible(channelMinusButton);
+        channelDownButton.setButtonText("-");
+        channelDownButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        channelDownButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        channelDownButton.onClick = [this] { adjustMidiChannel(-1); };
+        channelDownButton.setTooltip("Previous MIDI channel");
+        addAndMakeVisible(channelDownButton);
         
         midiChannelLabel.setJustificationType(juce::Justification::centred);
         midiChannelLabel.setFont(juce::Font(16.0f, juce::Font::bold));
@@ -2041,11 +2263,37 @@ public:
         updateMidiChannelDisplay();
         addAndMakeVisible(midiChannelLabel);
         
-        channelPlusButton.setButtonText("+");
-        channelPlusButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        channelPlusButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-        channelPlusButton.onClick = [this] { adjustMidiChannel(1); };
-        addAndMakeVisible(channelPlusButton);
+        channelUpButton.setButtonText("+");
+        channelUpButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        channelUpButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        channelUpButton.onClick = [this] { adjustMidiChannel(1); };
+        channelUpButton.setTooltip("Next MIDI channel");
+        addAndMakeVisible(channelUpButton);
+        
+        // Configure Pitch adjustment controls (similar to channel controls)
+        pitchDownButton.setButtonText("Down");
+        pitchDownButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        pitchDownButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        pitchDownButton.onClick = [this] { adjustPitchDown(); };
+        pitchDownButton.setTooltip("Lower pitch (longer duration)");
+        addAndMakeVisible(pitchDownButton);
+        
+        pitchLabel.setJustificationType(juce::Justification::centred);
+        pitchLabel.setFont(juce::Font(16.0f, juce::Font::bold));
+        pitchLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+        pitchLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+        updatePitchDisplay(pitchOffset);
+        addAndMakeVisible(pitchLabel);
+        
+        pitchUpButton.setButtonText("Up");
+        pitchUpButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        pitchUpButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        pitchUpButton.onClick = [this] { adjustPitchUp(); };
+        pitchUpButton.setTooltip("Higher pitch (shorter duration)");
+        addAndMakeVisible(pitchUpButton);
+        
+        // Update pitch button labels with tooltips
+        updatePitchButtonLabels();
         
         // Configure sample name label (bottom left)
         sampleNameLabel.setJustificationType(juce::Justification::centredLeft);
@@ -2059,13 +2307,10 @@ public:
         durationLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(durationLabel);
         
-        // Set up thumbnail listener
-        thumbnail.addChangeListener(this);
     }
     
     ~SampleCard() override
     {
-        thumbnail.removeChangeListener(this);
     }
     
     void resized() override
@@ -2075,66 +2320,70 @@ public:
         // Add margin around the entire card content (10px on each side)
         area.reduce(10, 10);
         
-        // Top row: + button and Prev/Next buttons
-        auto topRow = area.removeFromTop(30);
+        // Top row: All controls (height 40px to fit all buttons)
+        auto topRow = area.removeFromTop(40);
         
-        // + button on left
+        // + button on left (40px)
         addButton.setBounds(topRow.removeFromLeft(40).reduced(2));
         
-        // Prev/Next buttons on right (no Learn button here anymore)
-        auto navArea = topRow.removeFromRight(140);
-        prevButton.setBounds(navArea.removeFromLeft(60).reduced(2));
-        nextButton.setBounds(navArea.removeFromLeft(60).reduced(2));
+        // Leave some space between + button and MIDI controls
+        topRow.removeFromLeft(10);
         
-        // Add 5px margin between buttons and waveform
+        // Learn button (60px)
+        learnButton.setBounds(topRow.removeFromLeft(60).reduced(2));
+        
+        // MIDI Note display (100px)
+        midiNoteLabel.setBounds(topRow.removeFromLeft(100).reduced(2));
+        
+        // Space between note and channel controls
+        topRow.removeFromLeft(10);
+        
+        // MIDI Channel controls (total 120px: 30 + 60 + 30)
+        channelDownButton.setBounds(topRow.removeFromLeft(30).reduced(2));
+        midiChannelLabel.setBounds(topRow.removeFromLeft(60).reduced(2));
+        channelUpButton.setBounds(topRow.removeFromLeft(30).reduced(2));
+        
+        // Space before Prev/Next buttons
+        topRow.removeFromLeft(10);
+        
+        // Prev/Next buttons on right (total 120px: 60 + 60)
+        prevButton.setBounds(topRow.removeFromRight(60).reduced(2));
+        nextButton.setBounds(topRow.removeFromRight(60).reduced(2));
+        
+        // Add 5px margin between top row and waveform
         area.removeFromTop(5);
         
         // Calculate waveform height based on 4cm at 96 DPI (fixed height)
         const int waveformHeight = static_cast<int>(4 * 37.8); // ~151px
         
-        // Waveform area takes full width with margins
+        // Waveform area with viewport
         auto waveformRect = area.removeFromTop(waveformHeight);
-        waveformRect.reduce(10, 0);
+        waveformViewport.setBounds(waveformRect);
         
-        if (waveformComponent != nullptr)
-            waveformComponent->setBounds(waveformRect);
+        // Position fixed info labels within the viewport area
+        auto labelArea = waveformRect;
+        topInfoLabel.setBounds(labelArea.removeFromTop(20).reduced(2));
+        bottomInfoLabel.setBounds(labelArea.removeFromBottom(25).reduced(2));
         
-        // Add 5px margin between waveform and MIDI controls
+        // Update the waveform container and component size
+        updateWaveformSize();
+        
+        // Add 5px margin between waveform and pitch controls
         area.removeFromTop(5);
         
-        // MIDI Controls row (Note and Channel side by side)
-        auto midiRow = area.removeFromTop(30);
+        // Pitch adjustment controls row (below waveform, left corner)
+        auto pitchRow = area.removeFromTop(30);
         
-        // Split the row into two equal halves
-        auto leftHalf = midiRow.removeFromLeft(midiRow.getWidth() / 2);
-        auto rightHalf = midiRow;
+        // Position pitch controls at left corner (similar to channel controls layout)
+        const int pitchControlWidth = 180;  // 60 + 60 + 60 (matching Learn button width)
+        auto pitchControlArea = pitchRow.withWidth(pitchControlWidth);
         
-        // LEFT HALF: Learn button + MIDI Note display
-        const int leftControlWidth = 160;  // Enough for Learn button + note display
+        pitchDownButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
+        pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
+        pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         
-        auto learnNoteArea = leftHalf.withWidth(leftControlWidth).withCentre(leftHalf.getCentre());
-        
-        // Learn button on left (60px)
-        learnButton.setBounds(learnNoteArea.removeFromLeft(60).reduced(2));
-        
-        // Note display on right (100px)
-        midiNoteLabel.setBounds(learnNoteArea.removeFromLeft(100).reduced(2));
-        
-        // RIGHT HALF: MIDI Channel controls (-, display, +)
-        const int channelControlWidth = 120;
-        auto channelControlArea = rightHalf.withWidth(channelControlWidth).withCentre(rightHalf.getCentre());
-        
-        // - button on left (30px)
-        channelMinusButton.setBounds(channelControlArea.removeFromLeft(30).reduced(2));
-        
-        // Numeric display in middle (60px)
-        midiChannelLabel.setBounds(channelControlArea.removeFromLeft(60).reduced(2));
-        
-        // + button on right (30px)
-        channelPlusButton.setBounds(channelControlArea.removeFromLeft(30).reduced(2));
-        
-        // Add 5px margin between MIDI controls and bottom row
-        area.removeFromTop(5);
+        // Add margin before bottom row
+        area.removeFromTop(10);
         
         // Bottom row: sample name and duration
         auto bottomRow = area.removeFromBottom(25);
@@ -2164,7 +2413,20 @@ public:
     
     int getMidiNote() const { return currentMidiNote; }
     int getMidiChannel() const { return currentMidiChannel; }
-    
+    int getPitchOffset() const { return pitchOffset; }
+
+    void setPitchOffset(int offset)
+    {
+        // Constrain to reasonable range: ±48 semitones (4 octaves)
+        if (offset >= -48 && offset <= 48 && offset != pitchOffset)
+        {
+            pitchOffset = offset;
+            updatePitchDisplay(pitchOffset);
+            
+            printf("Pitch offset set to: %+d semitones\n", pitchOffset);
+        }
+    }
+
     void setMidiNote(int note)
     {
         if (note >= 0 && note <= 127 && note != currentMidiNote)
@@ -2204,39 +2466,142 @@ public:
     
     void setDuration(double seconds)
     {
-        durationLabel.setText(juce::String(seconds, 2) + " s", juce::dontSendNotification);
+        originalDuration = seconds;
+        // Apply current pitch factor to the displayed duration
+        double adjustedDuration = seconds / currentPitchFactor;
+        durationLabel.setText(juce::String(adjustedDuration, 2) + " s", juce::dontSendNotification);
+    }
+    
+    void setPitchFactor(double semitones)
+    {
+        // Convert semitones to pitch factor (2^(semitones/12))
+        currentPitchFactor = std::pow(2.0, semitones / 12.0);
+        
+        // Update duration display based on pitch factor
+        // Pitch up = shorter duration, Pitch down = longer duration
+        if (originalDuration > 0.0)
+        {
+            double adjustedDuration = originalDuration / currentPitchFactor;
+            durationLabel.setText(juce::String(adjustedDuration, 2) + " s", juce::dontSendNotification);
+        }
+        
+        // Trigger a repaint to show the "stretched" waveform visually
+        // Note: We can't actually stretch the thumbnail, but we can indicate pitch change
+        // by changing the waveform color or adding an overlay
+        repaint();
+        if (waveformComponent != nullptr)
+            waveformComponent->repaint();
+    }
+    
+    void updatePitchDisplay(int semitones)
+    {
+        // Update the pitch label
+        juce::String displayText;
+        if (semitones == 0)
+            displayText = "0";
+        else if (semitones > 0)
+            displayText = "+" + juce::String(semitones);
+        else
+            displayText = juce::String(semitones);
+        
+        pitchLabel.setText(displayText + " st", juce::dontSendNotification);
+        
+        // Calculate pitch factor correctly:
+        // Positive semitones = pitch up = shorter duration = divide by factor
+        // Negative semitones = pitch down = longer duration = divide by factor
+        double pitchFactor = std::pow(2.0, semitones / 12.0);
+        
+        // Store the current pitch factor for duration calculations
+        currentPitchFactor = pitchFactor;
+        
+        if (waveformComponent != nullptr)
+            waveformComponent->setPitchFactor(pitchFactor, semitones);
+        
+        // Update duration display - CORRECTED FORMULA
+        if (originalDuration > 0)
+        {
+            // When pitch goes UP (positive semitones), duration gets SHORTER
+            // So we divide by pitchFactor (which is > 1 for positive semitones)
+            double adjustedDuration = originalDuration / pitchFactor;
+            durationLabel.setText(juce::String(adjustedDuration, 2) + " s", juce::dontSendNotification);
+            
+            printf("Pitch: %+d, Factor: %.3f, Original: %.2f, Adjusted: %.2f\n", 
+                   semitones, pitchFactor, originalDuration, adjustedDuration);
+        }
+        
+        // Update the fixed info labels
+        if (semitones > 0)
+        {
+            double compressionFactor = 1.0 / pitchFactor;
+            topInfoLabel.setText(juce::String("Compressed: ") + juce::String(compressionFactor * 100, 1) + "%", 
+                                juce::dontSendNotification);
+            bottomInfoLabel.setText("PITCH: +" + juce::String(semitones) + " (↑ " + 
+                                   juce::String(pitchFactor, 2) + "x)", juce::dontSendNotification);
+        }
+        else if (semitones < 0)
+        {
+            double stretchFactor = 1.0 / pitchFactor;
+            topInfoLabel.setText(juce::String("Stretched: ") + juce::String(stretchFactor * 100, 1) + "%", 
+                                juce::dontSendNotification);
+            bottomInfoLabel.setText("PITCH: " + juce::String(semitones) + " (↓ " + 
+                                   juce::String(1.0/pitchFactor, 2) + "x)", juce::dontSendNotification);
+        }
+        else
+        {
+            topInfoLabel.setText("", juce::dontSendNotification);
+            bottomInfoLabel.setText("", juce::dontSendNotification);
+        }
+        
+        // Update waveform container size after pitch change
+        updateWaveformSize();
     }
     
     void setWaveform(const juce::File& audioFile)
     {
-        // Clear existing thumbnail
-        thumbnail.clear();
+        // Store the original file
+        currentAudioFile = audioFile;
         
-        // Create new thumbnail from file
         if (audioFile.existsAsFile())
         {
-            // Create a reader for the file
+            // Create a reader to get audio info
             std::unique_ptr<juce::AudioFormatReader> reader(
                 formatManager.createReaderFor(audioFile));
             
             if (reader != nullptr)
             {
-                // Set the thumbnail source
-                thumbnail.setSource(new juce::FileInputSource(audioFile));
+                // Store original info for duration calculations
+                originalLengthInSamples = reader->lengthInSamples;
+                originalSampleRate = reader->sampleRate;
+                
+                // Update waveform container size
+                updateWaveformSize();
                 
                 // Force a repaint
                 repaint();
                 if (waveformComponent != nullptr)
                     waveformComponent->repaint();
                     
-                printf("Waveform set for: %s\n", audioFile.getFileName().toRawUTF8());
+                printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n", 
+                       audioFile.getFileName().toRawUTF8(),
+                       originalSampleRate / 1000.0,
+                       originalLengthInSamples);
             }
+        }
+        else
+        {
+            // Clear audio info if file doesn't exist
+            originalLengthInSamples = 0;
+            originalSampleRate = 0.0;
+            
+            // Force a repaint
+            repaint();
+            if (waveformComponent != nullptr)
+                waveformComponent->repaint();
         }
     }
     
     void clearWaveform()
     {
-        thumbnail.clear();
         repaint();
         if (waveformComponent != nullptr)
             waveformComponent->repaint();
@@ -2257,6 +2622,7 @@ public:
         virtual void midiNoteChanged(int newNote) = 0;
         virtual void midiChannelChanged(int newChannel) = 0;
         virtual void learningModeChanged(bool isLearning) = 0;
+        virtual void pitchOffsetChanged(int pitchOffset) = 0;
     };
     
     void addListener(Listener* listener)
@@ -2313,59 +2679,446 @@ public:
         }
     }
 
-private:
-    // Custom component to handle waveform drawing
-    class WaveformComponent : public juce::Component
-    {
-    public:
-        WaveformComponent(juce::AudioThumbnail& thumb) : thumbnail(thumb)
-        {
-            setOpaque(true);
-        }
-        
-        void paint(juce::Graphics& g) override
-        {
-            auto bounds = getLocalBounds();
-            
-            // Fill background
-            g.setColour(juce::Colour(0xFF3A3A3A));
-            g.fillRect(bounds);
-            
-            // Draw border
-            g.setColour(juce::Colours::lightgrey);
-            g.drawRect(bounds, 2);
-            
-            // Draw waveform if loaded
-            if (thumbnail.getTotalLength() > 0.0)
-            {
-                // Draw the waveform
-                g.setColour(juce::Colours::cyan);
-                thumbnail.drawChannels(g, bounds.reduced(2), 0.0, thumbnail.getTotalLength(), 1.0f);
-            }
-            else
-            {
-                // Draw placeholder
-                g.setColour(juce::Colours::darkgrey);
-                g.setFont(juce::Font(14.0f, juce::Font::italic));
-                g.drawText("No waveform", bounds, juce::Justification::centred, true);
-            }
-        }
-        
     private:
-        juce::AudioThumbnail& thumbnail;
-    };
-    
-    // AudioThumbnail listener implementation
-    void changeListenerCallback(juce::ChangeBroadcaster* source) override
-    {
-        if (source == &thumbnail)
+        // High-resolution WaveformComponent that renders directly from audio data
+        class WaveformComponent : public juce::Component,
+                                  private juce::Timer
         {
-            // Thumbnail has been updated, repaint
-            repaint();
-            if (waveformComponent != nullptr)
-                waveformComponent->repaint();
-        }
-    }
+        public:
+            WaveformComponent(juce::AudioFormatManager& formatManager,
+                             juce::File& currentAudioFile,
+                             int& pitchOffsetRef)
+                : formatManager(formatManager),
+                  currentAudioFile(currentAudioFile),
+                  pitchOffset(pitchOffsetRef)
+            {
+                setOpaque(true);
+                startTimer(100); // Check for file/pitch changes every 100ms
+            }
+            
+            void paint(juce::Graphics& g) override
+            {
+                auto bounds = getLocalBounds();
+
+                // Fill background
+                g.setColour(juce::Colour(0xFF3A3A3A));
+                g.fillRect(bounds);
+
+                // Draw border
+                g.setColour(juce::Colours::lightgrey);
+                g.drawRect(bounds, 2);
+
+                if (!currentAudioFile.existsAsFile())
+                {
+                    g.setColour(juce::Colours::darkgrey);
+                    g.setFont(juce::Font(14.0f, juce::Font::italic));
+                    g.drawText("No waveform", bounds, juce::Justification::centred, true);
+                    return;
+                }
+
+                auto waveformBounds = bounds.reduced(2);
+                if (waveformBounds.isEmpty())
+                    return;
+
+                std::unique_ptr<juce::AudioFormatReader> reader(
+                    formatManager.createReaderFor(currentAudioFile));
+
+                if (reader == nullptr)
+                    return;
+
+                int renderWidth = waveformBounds.getWidth();
+                int renderHeight = waveformBounds.getHeight();
+                int renderTop = waveformBounds.getY();
+                int renderBottom = waveformBounds.getBottom();
+                int renderCenter = waveformBounds.getCentreY();
+
+                double totalLength = reader->lengthInSamples;
+                int numChannels = reader->numChannels;
+
+                // DEBUG: Print channel count and sample info
+                printf("Waveform - Channels: %d, Total samples: %lld\n", numChannels, (long long)totalLength);
+
+                // Calculate pitch factor (2^(semitones/12))
+                double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
+
+                // CORRECT PITCH BEHAVIOR: visibleSamples = totalLength / pitchFactor
+                double visibleSamples = totalLength / pitchFactor;
+                // Remove upper limit to allow stretching (visibleSamples > totalLength when pitchFactor < 1)
+                // Limit to reasonable maximum to avoid extreme values (up to 4x stretch = 2 octaves down)
+                visibleSamples = juce::jlimit(1.0, totalLength * 4.0, visibleSamples);
+
+                // Always start from beginning (anchor to left)
+                double startOffset = 0.0;
+                double samplesPerPixel = visibleSamples / renderWidth;
+                samplesPerPixel = juce::jmax(1.0, samplesPerPixel);
+
+                // Buffer for reading audio data
+                int bufferSize = 4096;
+                juce::AudioBuffer<float> tempBuffer(numChannels, bufferSize);
+
+                // Draw original waveform in background if pitch is changed
+                if (pitchOffset != 0)
+                {
+                    if (numChannels > 1)
+                    {
+                        // Stereo background with separate channels
+                        juce::Path leftOrigPath, rightOrigPath;
+                        bool leftStarted = false, rightStarted = false;
+                        double origSamplesPerPixel = totalLength / renderWidth;
+
+                        for (int x = 0; x < renderWidth; ++x)
+                        {
+                            double startSample = x * origSamplesPerPixel;
+                            double endSample = (x + 1) * origSamplesPerPixel;
+
+                            if (startSample >= totalLength) break;
+
+                            endSample = std::min(endSample, totalLength);
+                            int numSamples = static_cast<int>(endSample - startSample);
+                            if (numSamples <= 0) continue;
+
+                            reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+
+                            float leftMin = 1.0f, leftMax = -1.0f;
+                            float rightMin = 1.0f, rightMax = -1.0f;
+
+                            for (int s = 0; s < numSamples; ++s)
+                            {
+                                float leftVal = tempBuffer.getSample(0, s);
+                                leftMin = std::min(leftMin, leftVal);
+                                leftMax = std::max(leftMax, leftVal);
+                                
+                                if (numChannels > 1)
+                                {
+                                    float rightVal = tempBuffer.getSample(1, s);
+                                    rightMin = std::min(rightMin, rightVal);
+                                    rightMax = std::max(rightMax, rightVal);
+                                }
+                            }
+
+                            float xPos = waveformBounds.getX() + x;
+                            float centerY = renderTop + renderHeight * 0.5f;
+                            float halfHeight = renderHeight * 0.5f; // Use full height
+                            
+                            // Left channel background
+                            float leftYMin = centerY - (leftMin * halfHeight);
+                            float leftYMax = centerY - (leftMax * halfHeight);
+                            float leftYTop = std::min(leftYMin, leftYMax);
+                            float leftYBottom = std::max(leftYMin, leftYMax);
+                            
+                            leftYTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, leftYTop);
+                            leftYBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, leftYBottom);
+                            
+                            if (!leftStarted)
+                            {
+                                leftOrigPath.startNewSubPath(xPos, leftYTop);
+                                leftStarted = true;
+                            }
+                            leftOrigPath.lineTo(xPos, leftYBottom);
+                            
+                            // Right channel background
+                            float rightYMin = centerY - (rightMin * halfHeight);
+                            float rightYMax = centerY - (rightMax * halfHeight);
+                            float rightYTop = std::min(rightYMin, rightYMax);
+                            float rightYBottom = std::max(rightYMin, rightYMax);
+                            
+                            rightYTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, rightYTop);
+                            rightYBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, rightYBottom);
+                            
+                            if (!rightStarted)
+                            {
+                                rightOrigPath.startNewSubPath(xPos, rightYTop);
+                                rightStarted = true;
+                            }
+                            rightOrigPath.lineTo(xPos, rightYBottom);
+                        }
+
+                        g.setColour(juce::Colours::grey.withAlpha(0.15f));
+                        g.strokePath(leftOrigPath, juce::PathStrokeType(1.0f));
+                        
+                        g.setColour(juce::Colours::darkgrey.withAlpha(0.15f));
+                        g.strokePath(rightOrigPath, juce::PathStrokeType(1.0f));
+                    }
+                    else
+                    {
+                        // Mono background - original code
+                        juce::Path originalPath;
+                        bool pathStarted = false;
+                        double origSamplesPerPixel = totalLength / renderWidth;
+
+                        for (int x = 0; x < renderWidth; ++x)
+                        {
+                            double startSample = x * origSamplesPerPixel;
+                            double endSample = (x + 1) * origSamplesPerPixel;
+
+                            if (startSample >= totalLength) break;
+
+                            endSample = std::min(endSample, totalLength);
+                            int numSamples = static_cast<int>(endSample - startSample);
+                            if (numSamples <= 0) continue;
+
+                            reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+
+                            // Find min and max across all channels
+                            float minVal = 1.0f;
+                            float maxVal = -1.0f;
+
+                            for (int s = 0; s < numSamples; ++s)
+                            {
+                                for (int ch = 0; ch < numChannels; ++ch)
+                                {
+                                    float val = tempBuffer.getSample(ch, s);
+                                    if (val < minVal) minVal = val;
+                                    if (val > maxVal) maxVal = val;
+                                }
+                            }
+
+                            float xPos = waveformBounds.getX() + x;
+
+                            // CORRECTED MAPPING:
+                            // Map -1.0 to bottom, +1.0 to top
+                            float centerY = renderTop + renderHeight * 0.5f;
+                            float halfHeight = renderHeight * 0.5f;
+
+                            // For minVal (negative or positive):
+                            float yMin = centerY - (minVal * halfHeight);
+                            // For maxVal (positive or negative):
+                            float yMax = centerY - (maxVal * halfHeight);
+
+                            // Ensure proper ordering
+                            float yTop = std::min(yMin, yMax);
+                            float yBottom = std::max(yMin, yMax);
+
+                            yTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yTop);
+                            yBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yBottom);
+
+                            if (!pathStarted)
+                            {
+                                originalPath.startNewSubPath(xPos, yTop);
+                                pathStarted = true;
+                            }
+                            originalPath.lineTo(xPos, yBottom);
+                        }
+
+                        g.setColour(juce::Colours::grey.withAlpha(0.3f));
+                        g.strokePath(originalPath, juce::PathStrokeType(1.0f));
+                    }
+                }
+
+                // Draw main waveform with pitch adjustment
+                // DEBUG: Track if we're seeing any negative values
+                bool foundNegative = false;
+                bool foundPositive = false;
+
+                if (numChannels > 1)
+                {
+                    // For stereo, draw two waveforms that fill the entire height
+                    juce::Path leftPath, rightPath;
+                    bool leftStarted = false, rightStarted = false;
+                    
+                    for (int x = 0; x < renderWidth; ++x)
+                    {
+                        double startSample = x * samplesPerPixel;
+                        double endSample = (x + 1) * samplesPerPixel;
+                        
+                        if (startSample >= totalLength) break;
+                        
+                        endSample = std::min(endSample, totalLength);
+                        int numSamples = static_cast<int>(endSample - startSample);
+                        if (numSamples <= 0) continue;
+                        
+                        reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+                        
+                        float leftMin = 1.0f, leftMax = -1.0f;
+                        float rightMin = 1.0f, rightMax = -1.0f;
+                        
+                        for (int s = 0; s < numSamples; ++s)
+                        {
+                            float leftVal = tempBuffer.getSample(0, s);
+                            leftMin = std::min(leftMin, leftVal);
+                            leftMax = std::max(leftMax, leftVal);
+                            
+                            // Track if we're seeing any negative/positive values for left channel
+                            if (leftVal < 0) foundNegative = true;
+                            if (leftVal > 0) foundPositive = true;
+                            
+                            if (numChannels > 1)
+                            {
+                                float rightVal = tempBuffer.getSample(1, s);
+                                rightMin = std::min(rightMin, rightVal);
+                                rightMax = std::max(rightMax, rightVal);
+                                
+                                // Track if we're seeing any negative/positive values for right channel
+                                if (rightVal < 0) foundNegative = true;
+                                if (rightVal > 0) foundPositive = true;
+                            }
+                        }
+                        
+                        float xPos = waveformBounds.getX() + x;
+                        
+                        // Left channel - use full height with full opacity
+                        float centerY = renderTop + renderHeight * 0.5f;
+                        float halfHeight = renderHeight * 0.5f; // Use full height
+                        
+                        float leftYMin = centerY - (leftMin * halfHeight);
+                        float leftYMax = centerY - (leftMax * halfHeight);
+                        float leftYTop = std::min(leftYMin, leftYMax);
+                        float leftYBottom = std::max(leftYMin, leftYMax);
+                        
+                        leftYTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, leftYTop);
+                        leftYBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, leftYBottom);
+                        
+                        if (!leftStarted)
+                        {
+                            leftPath.startNewSubPath(xPos, leftYTop);
+                            leftStarted = true;
+                        }
+                        leftPath.lineTo(xPos, leftYBottom);
+                        
+                        // Right channel - use full height but with slightly lower opacity
+                        float rightYMin = centerY - (rightMin * halfHeight);
+                        float rightYMax = centerY - (rightMax * halfHeight);
+                        float rightYTop = std::min(rightYMin, rightYMax);
+                        float rightYBottom = std::max(rightYMin, rightYMax);
+                        
+                        rightYTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, rightYTop);
+                        rightYBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, rightYBottom);
+                        
+                        if (!rightStarted)
+                        {
+                            rightPath.startNewSubPath(xPos, rightYTop);
+                            rightStarted = true;
+                        }
+                        rightPath.lineTo(xPos, rightYBottom);
+                    }
+                    
+                    // Draw left channel (green) with full opacity
+                    g.setColour(juce::Colours::lightgreen.withAlpha(0.8f));
+                    g.strokePath(leftPath, juce::PathStrokeType(1.0f));
+                    
+                    // Draw right channel (orange) with full opacity
+                    g.setColour(juce::Colours::orange.withAlpha(0.8f));
+                    g.strokePath(rightPath, juce::PathStrokeType(1.0f));
+                    
+                    // Add a subtle divider line between channels
+                    g.setColour(juce::Colours::darkgrey.withAlpha(0.3f));
+                    g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
+                }
+                else
+                {
+                    // Mono - draw as before
+                    juce::Path waveformPath;
+                    bool pathStarted = false;
+
+                    for (int x = 0; x < renderWidth; ++x)
+                    {
+                        double startSample = x * samplesPerPixel;
+                        double endSample = (x + 1) * samplesPerPixel;
+
+                        if (startSample >= totalLength) break;
+
+                        endSample = std::min(endSample, totalLength);
+                        int numSamples = static_cast<int>(endSample - startSample);
+                        if (numSamples <= 0) continue;
+
+                        reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+
+                        float minVal = 1.0f;
+                        float maxVal = -1.0f;
+
+                        for (int s = 0; s < numSamples; ++s)
+                        {
+                            for (int ch = 0; ch < numChannels; ++ch)
+                            {
+                                float val = tempBuffer.getSample(ch, s);
+                                if (val < minVal) 
+                                {
+                                    minVal = val;
+                                    if (val < 0) foundNegative = true;
+                                }
+                                if (val > maxVal) 
+                                {
+                                    maxVal = val;
+                                    if (val > 0) foundPositive = true;
+                                }
+                            }
+                        }
+
+                        float xPos = waveformBounds.getX() + x;
+                        
+                        // CORRECTED MAPPING (same as above):
+                        float centerY = renderTop + renderHeight * 0.5f;
+                        float halfHeight = renderHeight * 0.5f;
+                        
+                        float yMin = centerY - (minVal * halfHeight);
+                        float yMax = centerY - (maxVal * halfHeight);
+                        
+                        float yTop = std::min(yMin, yMax);
+                        float yBottom = std::max(yMin, yMax);
+
+                        yTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yTop);
+                        yBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yBottom);
+
+                        if (!pathStarted)
+                        {
+                            waveformPath.startNewSubPath(xPos, yTop);
+                            pathStarted = true;
+                        }
+                        waveformPath.lineTo(xPos, yBottom);
+                    }
+
+                    // Set color based on pitch
+                    if (pitchOffset > 0)
+                        g.setColour(juce::Colours::orange);
+                    else if (pitchOffset < 0)
+                        g.setColour(juce::Colours::cyan);
+                    else
+                        g.setColour(juce::Colours::lightgreen);
+
+                    g.strokePath(waveformPath, juce::PathStrokeType(1.5f));
+                }
+
+                // DEBUG: Print what we found (always print for now)
+                printf("Waveform Debug - Found negative: %s, Found positive: %s, Pitch offset: %+d, Visible samples: %.1f, Render height: %d, Channels: %d\n", 
+                       foundNegative ? "YES" : "NO", 
+                       foundPositive ? "YES" : "NO", 
+                       pitchOffset, visibleSamples, renderHeight, numChannels);
+
+                // Draw center line
+                g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
+                g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
+            }
+            
+            void setPitchFactor(double factor, int semitones)
+            {
+                currentPitchFactor = factor;
+                currentSemitones = semitones;
+                repaint(); // Force immediate repaint on pitch change
+            }
+            
+        private:
+            void timerCallback() override
+            {
+                // Check if we need to regenerate due to file changes
+                if (currentAudioFile != lastFile)
+                {
+                    lastFile = currentAudioFile;
+                    repaint();
+                }
+            }
+            
+            juce::AudioFormatManager& formatManager;
+            juce::File& currentAudioFile;
+            int& pitchOffset;
+            double currentPitchFactor = 1.0;
+            int currentSemitones = 0;
+            
+            juce::File lastFile;
+            
+            JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
+        };
+    
+    
     
     void adjustMidiNote(int delta)
     {
@@ -2455,25 +3208,129 @@ private:
         }
     }
     
+    // Helper method to update pitch button tooltips
+    void updatePitchButtonLabels()
+    {
+        // Update button tooltips to reflect the new behavior
+        pitchDownButton.setTooltip("Lower pitch (longer duration)");
+        pitchUpButton.setTooltip("Higher pitch (shorter duration)");
+    }
+    
+    void adjustPitchUp()
+    {
+        // Up button = Higher pitch = POSITIVE semitones
+        int newOffset = pitchOffset + 1;
+        
+        // Constrain to reasonable range: ±48 semitones (4 octaves)
+        if (newOffset >= -48 && newOffset <= 48)
+        {
+            pitchOffset = newOffset;
+            updatePitchDisplay(pitchOffset);
+            
+            // Notify listeners of pitch offset change
+            listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
+            
+            if (pitchOffset > 0)
+                printf("Pitch UP: %+d semitones (higher pitch, shorter duration)\n", pitchOffset);
+            else if (pitchOffset < 0)
+                printf("Pitch UP: %+d semitones (less low pitch, shorter duration)\n", pitchOffset);
+            else
+                printf("Pitch reset to 0\n");
+        }
+    }
+
+    void adjustPitchDown()
+    {
+        // Down button = Lower pitch = NEGATIVE semitones
+        int newOffset = pitchOffset - 1;
+        
+        // Constrain to reasonable range: ±48 semitones (4 octaves)
+        if (newOffset >= -48 && newOffset <= 48)
+        {
+            pitchOffset = newOffset;
+            updatePitchDisplay(pitchOffset);
+            
+            // Notify listeners of pitch offset change
+            listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
+            
+            if (pitchOffset < 0)
+                printf("Pitch DOWN: %+d semitones (lower pitch, longer duration)\n", pitchOffset);
+            else if (pitchOffset > 0)
+                printf("Pitch DOWN: %+d semitones (less high pitch, longer duration)\n", pitchOffset);
+            else
+                printf("Pitch reset to 0\n");
+        }
+    }
+    
+    
+    void updateWaveformSize()
+    {
+        if (waveformComponent == nullptr || waveformContainer == nullptr)
+            return;
+        
+        auto viewportBounds = waveformViewport.getLocalBounds();
+        int containerWidth = viewportBounds.getWidth();
+        
+        // CORRECTED PITCH BEHAVIOR:
+        if (pitchOffset != 0)
+        {
+            double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
+            
+            // FIXED: Invert the relationship for correct visual behavior
+            // Pitch UP (positive): compressed = narrower container
+            // Pitch DOWN (negative): stretched = wider container
+            // containerWidth = viewportWidth / pitchFactor
+            containerWidth = (int)(viewportBounds.getWidth() / pitchFactor);
+        }
+        
+        // Ensure minimum width (can't be smaller than viewport)
+        containerWidth = juce::jmax(containerWidth, viewportBounds.getWidth());
+        
+        // Set container size
+        waveformContainer->setBounds(0, 0, containerWidth, viewportBounds.getHeight());
+        
+        // Set waveform component to fill the container
+        waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
+        
+        // Always anchor to left side
+        waveformViewport.setViewPosition(0, 0);
+    }
+    
     // UI Components
     juce::TextButton addButton{"+"};
     juce::TextButton prevButton{"Prev"};
     juce::TextButton nextButton{"Next"};
     juce::TextButton learnButton{"Learn"};  // MIDI Learn button
+    juce::Viewport waveformViewport;
+    std::unique_ptr<juce::Component> waveformContainer;
     std::unique_ptr<WaveformComponent> waveformComponent;
+    
+    // Fixed info labels for waveform display (don't scroll with viewport)
+    juce::Label topInfoLabel;      // For compression/stretching percentage
+    juce::Label bottomInfoLabel;   // For pitch information
     
     // MIDI Note controls
     juce::Label midiNoteLabel;
     int currentMidiNote = 60;  // Default to Middle C
     
     // MIDI Channel controls
-    juce::TextButton channelMinusButton{"-"};
+    juce::TextButton channelDownButton{"-"};
     juce::Label midiChannelLabel;
-    juce::TextButton channelPlusButton{"+"};
+    juce::TextButton channelUpButton{"+"};
     int currentMidiChannel = 1;  // Default to channel 1
     
     juce::Label sampleNameLabel;
     juce::Label durationLabel;
+    
+    // Pitch adjustment controls
+    juce::TextButton pitchDownButton{"Down"};  // Lower pitch = negative semitones = longer duration
+    juce::Label pitchLabel;
+    juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
+    int pitchOffset = 0;  // Pitch offset in semitones
+    
+    // Pitch factor tracking for visual feedback
+    double currentPitchFactor = 1.0;  // 1.0 = no pitch change
+    double originalDuration = 0.0;     // Store original duration
     
     // MIDI Learn state
     bool isLearning = false;
@@ -2481,9 +3338,10 @@ private:
     // Audio components
     juce::AudioFormatManager& formatManager;
     
-    // Waveform components
-    juce::AudioThumbnailCache thumbnailCache;
-    juce::AudioThumbnail thumbnail;
+    // Audio file info for resampling
+    juce::File currentAudioFile;
+    juce::int64 originalLengthInSamples = 0;
+    double originalSampleRate = 0.0;
     
     // Listener list
     juce::ListenerList<Listener> listeners;
@@ -2953,3 +3811,4 @@ public:
 private:
     OwnerInterface& owner;
 };
+

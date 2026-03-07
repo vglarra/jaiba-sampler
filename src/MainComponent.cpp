@@ -235,7 +235,7 @@ void MainComponent::resized()
     auto bodyArea = area.reduced(10, 5);
     
     // Make the card take most of the body width, but with max width to maintain proportions
-    const int cardMaxWidth = 600;  // Maximum width to keep card from getting too wide
+    const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
     const int cardHeight = 280;     // Fixed height
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
@@ -1056,14 +1056,16 @@ void MainComponent::updateSamplerSounds()
                sample->name.toRawUTF8(), sample->rootNote, sample->rootNote, sample->pitchOffset);
         
         // Create the sound with adjusted root note
-        // The sampler will calculate: played note - root note = pitch offset
-        // So if we play the root note, pitch offset is 0
-        // To achieve our desired pitch offset, we need to adjust the ROOT NOTE in the sampler
+        // Based on testing, the correct formula appears to be subtraction.
+        // JUCE calculates: pitch shift = playedNote - midiNoteForNormalPitch
+        // We want: pitch shift = pitchOffset (positive for pitch UP)
+        // So: sample->rootNote - midiNoteForNormalPitch = pitchOffset
+        // Therefore: midiNoteForNormalPitch = sample->rootNote - pitchOffset
         auto* sound = new juce::SamplerSound(
             sample->name,
             *reader,
             noteRange,
-            sample->rootNote + sample->pitchOffset,  // Adjust the root note by pitch offset
+            sample->rootNote - sample->pitchOffset,  // Subtraction is correct
             sample->attack,
             sample->release,
             10.0
@@ -1071,10 +1073,10 @@ void MainComponent::updateSamplerSounds()
         
         sampler.addSound(sound);
         
-        printf("Added sound from cache: %s -> triggers on note %d (adjusted root: %d) with pitch offset %+d\n", 
+        printf("Added sound from cache: %s -> triggers on note %d (adjusted root: %d) with pitch offset %+d\n",
                sample->name.toRawUTF8(),
                sample->rootNote,
-               sample->rootNote + sample->pitchOffset,
+               sample->rootNote - sample->pitchOffset,  // Correct: subtraction matches actual calculation
                sample->pitchOffset);
     }
     
@@ -1387,13 +1389,13 @@ void MainComponent::pitchOffsetChanged(int pitchOffset)
         sample->pitchOffset = pitchOffset;
         
         printf("Before update - Sample root: %d, pitch offset: %d, adjusted root: %d\n", 
-               sample->rootNote, sample->pitchOffset, sample->rootNote + sample->pitchOffset);
+               sample->rootNote, sample->pitchOffset, sample->rootNote - sample->pitchOffset);
         
         // Update sampler with new pitch offset
         updateSamplerSounds();
         
         printf("After update - Sample should now play at adjusted root: %d\n", 
-               sample->rootNote + sample->pitchOffset);
+               sample->rootNote - sample->pitchOffset);
         printf("Applied pitch offset %+d to sample: %s\n", pitchOffset, sample->name.toRawUTF8());
     }
     
@@ -1513,7 +1515,7 @@ void MainComponent::loadLastSession()
                 }
             }
             
-            // Load the sample but DON'T auto-play it, but DO use the saved pitch offset
+            // Load the sample but DON'T auto-play it, using the saved pitch offset
             loadSampleFileAsync(lastSample, false, savedPitchOffset);
         }
     }
@@ -1558,3 +1560,4 @@ void MainComponent::midiDeviceChanged(const juce::String& newDevice)
     currentMidiDeviceName = newDevice;
     saveCurrentSession();
 }
+

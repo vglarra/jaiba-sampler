@@ -334,3 +334,4 @@ void MappingComponent::buttonClicked(juce::Button* button)
     else if (button == &owner.getClearAllButton())
         owner.clearAllSamples();
 }
+

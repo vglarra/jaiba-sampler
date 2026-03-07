@@ -3,16 +3,13 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_audio_basics/juce_audio_basics.h>
 
-class SampleCard : public juce::Component,
-                   private juce::ChangeListener
+class SampleCard : public juce::Component
 {
 public:
     SampleCard(juce::AudioFormatManager& formatManager)
-        : formatManager(formatManager),
-          thumbnailCache(5),  // Cache 5 thumbnails
-          thumbnail(512, formatManager, thumbnailCache),
-          resampledThumbnail(512, formatManager, thumbnailCache)  // Add second thumbnail for resampled view
+        : formatManager(formatManager)
     {
         // Configure + button (top left)
         addButton.setButtonText("+");
@@ -41,7 +38,8 @@ public:
         addAndMakeVisible(learnButton);
         
         // Configure waveform area with viewport
-        waveformComponent = std::make_unique<WaveformComponent>(thumbnail, resampledThumbnail, pitchOffset);
+        waveformComponent = std::make_unique<WaveformComponent>(
+            formatManager, currentAudioFile, pitchOffset);
         
         // Create a container for the waveform that can be larger than the viewport
         waveformContainer = std::make_unique<juce::Component>();
@@ -133,15 +131,10 @@ public:
         durationLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
         addAndMakeVisible(durationLabel);
         
-        // Set up thumbnail listeners
-        thumbnail.addChangeListener(this);
-        resampledThumbnail.addChangeListener(this);
     }
     
     ~SampleCard() override
     {
-        thumbnail.removeChangeListener(this);
-        resampledThumbnail.removeChangeListener(this);
     }
     
     void resized() override
@@ -389,31 +382,20 @@ public:
     
     void setWaveform(const juce::File& audioFile)
     {
-        // Clear existing thumbnails
-        thumbnail.clear();
-        resampledThumbnail.clear();
-        
-        // Store the original file for resampling
+        // Store the original file
         currentAudioFile = audioFile;
         
-        // Create new thumbnail from file
         if (audioFile.existsAsFile())
         {
-            // Create a reader for the file
+            // Create a reader to get audio info
             std::unique_ptr<juce::AudioFormatReader> reader(
                 formatManager.createReaderFor(audioFile));
             
             if (reader != nullptr)
             {
-                // Store original length and sample rate for resampling calculations
+                // Store original info for duration calculations
                 originalLengthInSamples = reader->lengthInSamples;
                 originalSampleRate = reader->sampleRate;
-                
-                // Set the thumbnail source
-                thumbnail.setSource(new juce::FileInputSource(audioFile));
-                
-                // Update resampled waveform based on current pitch
-                updateResampledWaveform();
                 
                 // Update waveform container size
                 updateWaveformSize();
@@ -423,14 +405,27 @@ public:
                 if (waveformComponent != nullptr)
                     waveformComponent->repaint();
                     
-                printf("Waveform set for: %s\n", audioFile.getFileName().toRawUTF8());
+                printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n", 
+                       audioFile.getFileName().toRawUTF8(),
+                       originalSampleRate / 1000.0,
+                       originalLengthInSamples);
             }
+        }
+        else
+        {
+            // Clear audio info if file doesn't exist
+            originalLengthInSamples = 0;
+            originalSampleRate = 0.0;
+            
+            // Force a repaint
+            repaint();
+            if (waveformComponent != nullptr)
+                waveformComponent->repaint();
         }
     }
     
     void clearWaveform()
     {
-        thumbnail.clear();
         repaint();
         if (waveformComponent != nullptr)
             waveformComponent->repaint();
@@ -508,127 +503,448 @@ public:
         }
     }
 
-private:
-    // Custom component to handle waveform drawing
-    class WaveformComponent : public juce::Component
-    {
-    public:
-        WaveformComponent(juce::AudioThumbnail& thumb, juce::AudioThumbnail& resampledThumb, int& pitchOffsetRef)
-            : thumbnail(thumb), resampledThumbnail(resampledThumb), pitchOffset(pitchOffsetRef)
-        {
-            setOpaque(true);
-        }
-        
-    void paint(juce::Graphics& g) override
-    {
-        auto bounds = getLocalBounds();
-        
-        // Fill background
-        g.setColour(juce::Colour(0xFF3A3A3A));
-        g.fillRect(bounds);
-        
-        // Draw border
-        g.setColour(juce::Colours::lightgrey);
-        g.drawRect(bounds, 2);
-        
-        // Draw waveform if loaded
-        if (thumbnail.getTotalLength() > 0.0)
-        {
-            auto waveformBounds = bounds.reduced(2);
-            
-            if (pitchOffset == 0)
-            {
-                // No pitch change - draw normal waveform
-                g.setColour(juce::Colours::cyan);
-                thumbnail.drawChannels(g, waveformBounds, 0.0, thumbnail.getTotalLength(), 1.0f);
-            }
-            else
-            {
-                // Calculate the ACTUAL pitch factor for accurate visual scaling
-                double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
-                
-                // First, draw the ORIGINAL waveform in the background (light color)
-                g.setColour(juce::Colours::grey.withAlpha(0.3f));
-                thumbnail.drawChannels(g, waveformBounds, 0.0, thumbnail.getTotalLength(), 1.0f);
-                
-                if (pitchOffset > 0)
-                {
-                    // HIGHER PITCH (Up button) - waveform should appear COMPRESSED
-                    double compressionFactor = 1.0 / pitchFactor;
-                    
-                    // Save graphics state before transform
-                    juce::Graphics::ScopedSaveState saveState(g);
-                    
-                    // Apply horizontal compression from the LEFT edge
-                    g.addTransform(juce::AffineTransform::scale((float)compressionFactor, 1.0f, 
-                                                               (float)waveformBounds.getX(), (float)waveformBounds.getY()));
-                    
-                    // Draw COMPRESSED waveform on top
-                    g.setColour(juce::Colours::orange);
-                    thumbnail.drawChannels(g, waveformBounds, 0.0, thumbnail.getTotalLength(), 1.0f);
-                }
-                else // pitchOffset < 0
-                {
-                    // LOWER PITCH (Down button) - waveform should appear STRETCHED
-                    double stretchFactor = 1.0 / pitchFactor;  // This will be > 1
-                    double visiblePortion = 1.0 / stretchFactor;
-                    
-                    // Save graphics state before transform
-                    juce::Graphics::ScopedSaveState saveState(g);
-                    
-                    // Apply horizontal stretching from the LEFT edge
-                    g.addTransform(juce::AffineTransform::scale((float)stretchFactor, 1.0f,
-                                                               (float)waveformBounds.getX(), (float)waveformBounds.getY()));
-                    
-                    // Draw STRETCHED waveform on top (only visible portion)
-                    g.setColour(juce::Colours::orange);
-                    thumbnail.drawChannels(g, waveformBounds, 0.0, 
-                                          thumbnail.getTotalLength() * visiblePortion, 1.0f);
-                }
-            }
-        }
-        else
-        {
-            // Draw placeholder
-            g.setColour(juce::Colours::darkgrey);
-            g.setFont(juce::Font(14.0f, juce::Font::italic));
-            g.drawText("No waveform", bounds, juce::Justification::centred, true);
-        }
-    }
-        
-        // Update setPitchFactor to also store the semitone value
-        void setPitchFactor(double factor, int semitones)
-        {
-            currentPitchFactor = factor;
-            currentSemitones = semitones;
-            repaint();
-        }
-        
-        // Add a method to trigger repaint when pitch changes
-        void updatePitch()
-        {
-            repaint();
-        }
-        
     private:
-        juce::AudioThumbnail& thumbnail;
-        juce::AudioThumbnail& resampledThumbnail;
-        int& pitchOffset;
-        double currentPitchFactor = 1.0;
-        int currentSemitones = 0;
-    };
-    
-    // AudioThumbnail listener implementation
-    void changeListenerCallback(juce::ChangeBroadcaster* source) override
-    {
-        if (source == &thumbnail)
+        // High-resolution WaveformComponent that renders directly from audio data
+        class WaveformComponent : public juce::Component,
+                                private juce::Timer
         {
-            // Thumbnail has been updated, repaint
-            repaint();
-            if (waveformComponent != nullptr)
-                waveformComponent->repaint();
-        }
-    }
+        public:
+            WaveformComponent(juce::AudioFormatManager& formatManager,
+                            juce::File& currentAudioFile,
+                            int& pitchOffsetRef)
+                : formatManager(formatManager),
+                currentAudioFile(currentAudioFile),
+                pitchOffset(pitchOffsetRef)
+            {
+                setOpaque(true);
+                startTimer(100); // Check for file/pitch changes every 100ms
+            }
+            
+            void paint(juce::Graphics& g) override
+            {
+                auto bounds = getLocalBounds();
+
+                // Fill background
+                g.setColour(juce::Colour(0xFF3A3A3A));
+                g.fillRect(bounds);
+
+                // Draw border
+                g.setColour(juce::Colours::lightgrey);
+                g.drawRect(bounds, 2);
+
+                if (!currentAudioFile.existsAsFile())
+                {
+                    g.setColour(juce::Colours::darkgrey);
+                    g.setFont(juce::Font(14.0f, juce::Font::italic));
+                    g.drawText("No waveform", bounds, juce::Justification::centred, true);
+                    return;
+                }
+
+                auto waveformBounds = bounds.reduced(2);
+                if (waveformBounds.isEmpty())
+                    return;
+
+                std::unique_ptr<juce::AudioFormatReader> reader(
+                    formatManager.createReaderFor(currentAudioFile));
+
+                if (reader == nullptr)
+                    return;
+
+                int renderWidth = waveformBounds.getWidth();
+                int renderHeight = waveformBounds.getHeight();
+                int renderTop = waveformBounds.getY();
+                int renderBottom = waveformBounds.getBottom();
+                int renderCenter = waveformBounds.getCentreY();
+
+                double totalLength = reader->lengthInSamples;
+                int numChannels = reader->numChannels;
+
+                // Calculate pitch factor (2^(semitones/12))
+                double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
+
+                // visibleSamples = totalLength / pitchFactor
+                double visibleSamples = totalLength / pitchFactor;
+                visibleSamples = juce::jlimit(1.0, totalLength * 4.0, visibleSamples);
+
+                // Always start from beginning
+                double startOffset = 0.0;
+                double samplesPerPixel = visibleSamples / renderWidth;
+                samplesPerPixel = juce::jmax(1.0, samplesPerPixel);
+
+                // Buffer for reading audio data
+                int bufferSize = 4096;
+                juce::AudioBuffer<float> tempBuffer(numChannels, bufferSize);
+
+                // DEBUG flags - moved to outer scope so they're available everywhere
+                bool foundNegative = false;
+                bool foundPositive = false;
+
+                // ===== DRAW BACKGROUND (STATIC ORIGINAL WAVEFORM) =====
+                // This should ALWAYS be drawn, regardless of pitch, and should NEVER move/resize
+                // Use original samples per pixel (totalLength / renderWidth) for static display
+                {
+                    double origSamplesPerPixel = totalLength / renderWidth;
+
+                    if (numChannels > 1)
+                    {
+                        // STEREO - Draw channels in separate vertical spaces
+                        juce::Path leftOrigPath, rightOrigPath;
+                        bool leftStarted = false, rightStarted = false;
+                        
+                        // Split the height into two equal parts
+                        int halfHeight = renderHeight / 2;
+                        int leftTop = renderTop;
+                        int leftBottom = renderTop + halfHeight;
+                        int rightTop = renderTop + halfHeight;
+                        int rightBottom = renderBottom;
+                        
+                        for (int x = 0; x < renderWidth; ++x)
+                        {
+                            double startSample = x * origSamplesPerPixel;  // Use origSamplesPerPixel for background
+                            double endSample = (x + 1) * origSamplesPerPixel;
+                            
+                            if (startSample >= totalLength) break;
+                            
+                            endSample = std::min(endSample, totalLength);
+                            int numSamples = static_cast<int>(endSample - startSample);
+                            if (numSamples <= 0) continue;
+                            
+                            reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+                            
+                            float leftMin = 1.0f, leftMax = -1.0f;
+                            float rightMin = 1.0f, rightMax = -1.0f;
+                            
+                            for (int s = 0; s < numSamples; ++s)
+                            {
+                                float leftVal = tempBuffer.getSample(0, s);
+                                leftMin = std::min(leftMin, leftVal);
+                                leftMax = std::max(leftMax, leftVal);
+                                
+                                if (leftVal < 0) foundNegative = true;
+                                if (leftVal > 0) foundPositive = true;
+                                
+                                float rightVal = tempBuffer.getSample(1, s);
+                                rightMin = std::min(rightMin, rightVal);
+                                rightMax = std::max(rightMax, rightVal);
+                                
+                                if (rightVal < 0) foundNegative = true;
+                                if (rightVal > 0) foundPositive = true;
+                            }
+                            
+                            float xPos = waveformBounds.getX() + x;
+                            
+                            // Left channel - top half
+                            float leftCenterY = leftTop + halfHeight * 0.5f;
+                            float leftHalfHeight = halfHeight * 0.5f;
+                            
+                            float leftYMin = leftCenterY - (leftMin * leftHalfHeight);
+                            float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
+                            float leftYTop = std::min(leftYMin, leftYMax);
+                            float leftYBottom = std::max(leftYMin, leftYMax);
+                            
+                            leftYTop = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYTop);
+                            leftYBottom = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYBottom);
+                            
+                            if (!leftStarted)
+                            {
+                                leftOrigPath.startNewSubPath(xPos, leftYTop);
+                                leftStarted = true;
+                            }
+                            leftOrigPath.lineTo(xPos, leftYBottom);
+                            
+                            // Right channel - bottom half
+                            float rightCenterY = rightTop + halfHeight * 0.5f;
+                            float rightHalfHeight = halfHeight * 0.5f;
+                            
+                            float rightYMin = rightCenterY - (rightMin * rightHalfHeight);
+                            float rightYMax = rightCenterY - (rightMax * rightHalfHeight);
+                            float rightYTop = std::min(rightYMin, rightYMax);
+                            float rightYBottom = std::max(rightYMin, rightYMax);
+                            
+                            rightYTop = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYTop);
+                            rightYBottom = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYBottom);
+                            
+                            if (!rightStarted)
+                            {
+                                rightOrigPath.startNewSubPath(xPos, rightYTop);
+                                rightStarted = true;
+                            }
+                            rightOrigPath.lineTo(xPos, rightYBottom);
+                        }
+                        
+                        // Draw left channel background (grey)
+                        g.setColour(juce::Colours::grey.withAlpha(0.15f));
+                        g.strokePath(leftOrigPath, juce::PathStrokeType(1.0f));
+                        
+                        // Draw right channel background (dark grey)
+                        g.setColour(juce::Colours::darkgrey.withAlpha(0.15f));
+                        g.strokePath(rightOrigPath, juce::PathStrokeType(1.0f));
+                    }
+                    else
+                    {
+                        // Mono background
+                        juce::Path originalPath;
+                        bool pathStarted = false;
+
+                        for (int x = 0; x < renderWidth; ++x)
+                        {
+                            double startSample = x * origSamplesPerPixel;
+                            double endSample = (x + 1) * origSamplesPerPixel;
+
+                            if (startSample >= totalLength) break;
+
+                            endSample = std::min(endSample, totalLength);
+                            int numSamples = static_cast<int>(endSample - startSample);
+                            if (numSamples <= 0) continue;
+
+                            reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+
+                            float minVal = 1.0f;
+                            float maxVal = -1.0f;
+
+                            for (int s = 0; s < numSamples; ++s)
+                            {
+                                for (int ch = 0; ch < numChannels; ++ch)
+                                {
+                                    float val = tempBuffer.getSample(ch, s);
+                                    minVal = std::min(minVal, val);
+                                    maxVal = std::max(maxVal, val);
+                                    if (val < 0) foundNegative = true;
+                                    if (val > 0) foundPositive = true;
+                                }
+                            }
+
+                            float xPos = waveformBounds.getX() + x;
+                            float centerY = renderTop + renderHeight * 0.5f;
+                            float halfHeight = renderHeight * 0.5f;
+
+                            float yMin = centerY - (minVal * halfHeight);
+                            float yMax = centerY - (maxVal * halfHeight);
+                            float yTop = std::min(yMin, yMax);
+                            float yBottom = std::max(yMin, yMax);
+
+                            yTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yTop);
+                            yBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yBottom);
+
+                            if (!pathStarted)
+                            {
+                                originalPath.startNewSubPath(xPos, yTop);
+                                pathStarted = true;
+                            }
+                            originalPath.lineTo(xPos, yBottom);
+                        }
+
+                        g.setColour(juce::Colours::grey.withAlpha(0.3f));
+                        g.strokePath(originalPath, juce::PathStrokeType(1.0f));
+                    }
+                }
+
+                // ===== DRAW MAIN WAVEFORM (WITH PITCH ADJUSTMENT) =====
+                if (numChannels > 1)
+                {
+                    // STEREO - Draw channels in separate vertical spaces
+                    juce::Path leftPath, rightPath;
+                    bool leftStarted = false, rightStarted = false;
+                    
+                    // Split the height into two equal parts
+                    int halfHeight = renderHeight / 2;
+                    int leftTop = renderTop;
+                    int leftBottom = renderTop + halfHeight;
+                    int rightTop = renderTop + halfHeight;
+                    int rightBottom = renderBottom;
+                    
+                    for (int x = 0; x < renderWidth; ++x)
+                    {
+                        double startSample = startOffset + x * samplesPerPixel;
+                        double endSample = startSample + samplesPerPixel;
+                        
+                        if (startSample >= totalLength) break;
+                        
+                        endSample = std::min(endSample, totalLength);
+                        int numSamples = static_cast<int>(endSample - startSample);
+                        if (numSamples <= 0) continue;
+                        
+                        reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+                        
+                        float leftMin = 1.0f, leftMax = -1.0f;
+                        float rightMin = 1.0f, rightMax = -1.0f;
+                        
+                        for (int s = 0; s < numSamples; ++s)
+                        {
+                            float leftVal = tempBuffer.getSample(0, s);
+                            leftMin = std::min(leftMin, leftVal);
+                            leftMax = std::max(leftMax, leftVal);
+                            
+                            if (leftVal < 0) foundNegative = true;
+                            if (leftVal > 0) foundPositive = true;
+                            
+                            float rightVal = tempBuffer.getSample(1, s);
+                            rightMin = std::min(rightMin, rightVal);
+                            rightMax = std::max(rightMax, rightVal);
+                            
+                            if (rightVal < 0) foundNegative = true;
+                            if (rightVal > 0) foundPositive = true;
+                        }
+                        
+                        float xPos = waveformBounds.getX() + x;
+                        
+                        // Left channel - top half
+                        float leftCenterY = leftTop + halfHeight * 0.5f;
+                        float leftHalfHeight = halfHeight * 0.5f;
+                        
+                        float leftYMin = leftCenterY - (leftMin * leftHalfHeight);
+                        float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
+                        float leftYTop = std::min(leftYMin, leftYMax);
+                        float leftYBottom = std::max(leftYMin, leftYMax);
+                        
+                        leftYTop = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYTop);
+                        leftYBottom = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYBottom);
+                        
+                        if (!leftStarted)
+                        {
+                            leftPath.startNewSubPath(xPos, leftYTop);
+                            leftStarted = true;
+                        }
+                        leftPath.lineTo(xPos, leftYBottom);
+                        
+                        // Right channel - bottom half
+                        float rightCenterY = rightTop + halfHeight * 0.5f;
+                        float rightHalfHeight = halfHeight * 0.5f;
+                        
+                        float rightYMin = rightCenterY - (rightMin * rightHalfHeight);
+                        float rightYMax = rightCenterY - (rightMax * rightHalfHeight);
+                        float rightYTop = std::min(rightYMin, rightYMax);
+                        float rightYBottom = std::max(rightYMin, rightYMax);
+                        
+                        rightYTop = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYTop);
+                        rightYBottom = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYBottom);
+                        
+                        if (!rightStarted)
+                        {
+                            rightPath.startNewSubPath(xPos, rightYTop);
+                            rightStarted = true;
+                        }
+                        rightPath.lineTo(xPos, rightYBottom);
+                    }
+                    
+                    // Draw left channel (green) - top half
+                    g.setColour(juce::Colours::lightgreen);
+                    g.strokePath(leftPath, juce::PathStrokeType(1.0f));
+                    
+                    // Draw right channel (orange) - bottom half
+                    g.setColour(juce::Colours::orange);
+                    g.strokePath(rightPath, juce::PathStrokeType(1.0f));
+                    
+                    // Draw channel separator line
+                    g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
+                    g.drawHorizontalLine(renderTop + halfHeight, waveformBounds.getX(), waveformBounds.getRight());
+                    
+                    // Add channel labels
+                    g.setColour(juce::Colours::lightgrey);
+                    g.setFont(juce::Font(10.0f));
+                    g.drawText("L", waveformBounds.getX() + 5, leftTop + 2, 20, 15, juce::Justification::left);
+                    g.drawText("R", waveformBounds.getX() + 5, rightTop + 2, 20, 15, juce::Justification::left);
+                }
+                else
+                {
+                    // MONO - draw single waveform
+                    juce::Path waveformPath;
+                    bool pathStarted = false;
+
+                    for (int x = 0; x < renderWidth; ++x)
+                    {
+                        double startSample = startOffset + x * samplesPerPixel;
+                        double endSample = startSample + samplesPerPixel;
+
+                        if (startSample >= totalLength) break;
+
+                        endSample = std::min(endSample, totalLength);
+                        int numSamples = static_cast<int>(endSample - startSample);
+                        if (numSamples <= 0) continue;
+
+                        reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+
+                        float minVal = 1.0f;
+                        float maxVal = -1.0f;
+
+                        for (int s = 0; s < numSamples; ++s)
+                        {
+                            for (int ch = 0; ch < numChannels; ++ch)
+                            {
+                                float val = tempBuffer.getSample(ch, s);
+                                minVal = std::min(minVal, val);
+                                maxVal = std::max(maxVal, val);
+                                if (val < 0) foundNegative = true;
+                                if (val > 0) foundPositive = true;
+                            }
+                        }
+
+                        float xPos = waveformBounds.getX() + x;
+                        float centerY = renderTop + renderHeight * 0.5f;
+                        float halfHeight = renderHeight * 0.5f;
+                        
+                        float yMin = centerY - (minVal * halfHeight);
+                        float yMax = centerY - (maxVal * halfHeight);
+                        float yTop = std::min(yMin, yMax);
+                        float yBottom = std::max(yMin, yMax);
+
+                        yTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yTop);
+                        yBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yBottom);
+
+                        if (!pathStarted)
+                        {
+                            waveformPath.startNewSubPath(xPos, yTop);
+                            pathStarted = true;
+                        }
+                        waveformPath.lineTo(xPos, yBottom);
+                    }
+
+                    // Set color based on pitch
+                    if (pitchOffset > 0)
+                        g.setColour(juce::Colours::orange);
+                    else if (pitchOffset < 0)
+                        g.setColour(juce::Colours::cyan);
+                    else
+                        g.setColour(juce::Colours::lightgreen);
+
+                    g.strokePath(waveformPath, juce::PathStrokeType(1.5f));
+                }
+
+                // Draw center line (always)
+                g.setColour(juce::Colours::darkgrey.withAlpha(0.3f));
+                g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
+            }
+            
+            void setPitchFactor(double factor, int semitones)
+            {
+                currentPitchFactor = factor;
+                currentSemitones = semitones;
+                repaint(); // Force immediate repaint on pitch change
+            }
+            
+        private:
+            void timerCallback() override
+            {
+                // Check if we need to regenerate due to file changes
+                if (currentAudioFile != lastFile)
+                {
+                    lastFile = currentAudioFile;
+                    repaint();
+                }
+            }
+            
+            juce::AudioFormatManager& formatManager;
+            juce::File& currentAudioFile;
+            int& pitchOffset;
+            double currentPitchFactor = 1.0;
+            int currentSemitones = 0;
+            
+            juce::File lastFile;
+            
+            JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
+        };
+    
+    
     
     void adjustMidiNote(int delta)
     {
@@ -772,40 +1088,6 @@ private:
         }
     }
     
-    void updateResampledWaveform()
-    {
-        if (!currentAudioFile.existsAsFile())
-            return;
-            
-        // Clear the resampled thumbnail
-        resampledThumbnail.clear();
-        
-        // Create a reader for the file
-        std::unique_ptr<juce::AudioFormatReader> reader(
-            formatManager.createReaderFor(currentAudioFile));
-        
-        if (reader != nullptr)
-        {
-            // Calculate pitch ratio (2^(semitones/12))
-            double pitchRatio = std::pow(2.0, pitchOffset / 12.0);
-            
-            // For now, we'll just update the duration display and trigger a repaint
-            // Actual resampling would require creating a resampled AudioFormatReader
-            // and setting it as the source for resampledThumbnail
-            
-            // Update duration display
-            double adjustedDuration = (originalLengthInSamples / originalSampleRate) / pitchRatio;
-            setDuration(adjustedDuration);
-            
-            printf("Updated resampled waveform: pitch ratio %.3f, adjusted duration %.3f s\n", 
-                   pitchRatio, adjustedDuration);
-        }
-        
-        // Trigger repaint
-        repaint();
-        if (waveformComponent != nullptr)
-            waveformComponent->repaint();
-    }
     
     void updateWaveformSize()
     {
@@ -815,24 +1097,14 @@ private:
         auto viewportBounds = waveformViewport.getLocalBounds();
         int containerWidth = viewportBounds.getWidth();
         
-        // If pitch is applied, make the container wider to show the stretched/compressed waveform
         if (pitchOffset != 0)
         {
             double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
             
-            if (pitchOffset > 0)
-            {
-                // For compressed waveform (higher pitch), we can keep original width
-                // or make it slightly smaller - here we keep original
-                containerWidth = viewportBounds.getWidth();
-            }
-            else
-            {
-                // For stretched waveform (lower pitch), we need more width
-                // Stretch factor = 1 / pitchFactor (since pitchFactor < 1)
-                double stretchFactor = 1.0 / pitchFactor;
-                containerWidth = (int)(viewportBounds.getWidth() * stretchFactor);
-            }
+            // CORRECT: 
+            // UP (positive) = compressed = narrower container = viewportWidth / pitchFactor
+            // DOWN (negative) = stretched = wider container = viewportWidth / pitchFactor
+            containerWidth = (int)(viewportBounds.getWidth() / pitchFactor);
         }
         
         // Ensure minimum width
@@ -844,11 +1116,10 @@ private:
         // Set waveform component to fill the container
         waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
         
-        // Reset scroll position to start when waveform changes significantly
-        // Comment this out if you want to maintain scroll position
+        // Always anchor to left side
         waveformViewport.setViewPosition(0, 0);
     }
-    
+        
     // UI Components
     juce::TextButton addButton{"+"};
     juce::TextButton prevButton{"Prev"};
@@ -891,11 +1162,6 @@ private:
     // Audio components
     juce::AudioFormatManager& formatManager;
     
-    // Waveform components
-    juce::AudioThumbnailCache thumbnailCache;
-    juce::AudioThumbnail thumbnail;
-    juce::AudioThumbnail resampledThumbnail;  // For resampled waveform display
-    
     // Audio file info for resampling
     juce::File currentAudioFile;
     juce::int64 originalLengthInSamples = 0;
@@ -904,5 +1170,4 @@ private:
     // Listener list
     juce::ListenerList<Listener> listeners;
 };
-
 

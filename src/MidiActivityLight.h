@@ -85,3 +85,4 @@ private:
     bool isActive = false;
     juce::uint64 lastActivityTime = 0;
 };
+
