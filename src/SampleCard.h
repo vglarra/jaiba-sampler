@@ -319,15 +319,16 @@ public:
     
     void updatePitchDisplay(int semitones)
     {
-        // Update the pitch label
+        // Update the pitch label – invert the sign for display
+        int displaySemitones = -semitones;
         juce::String displayText;
-        if (semitones == 0)
+        if (displaySemitones == 0)
             displayText = "0";
-        else if (semitones > 0)
-            displayText = "+" + juce::String(semitones);
+        else if (displaySemitones > 0)
+            displayText = "+" + juce::String(displaySemitones);
         else
-            displayText = juce::String(semitones);
-        
+            displayText = juce::String(displaySemitones);
+
         pitchLabel.setText(displayText + " st", juce::dontSendNotification);
         
         // Calculate pitch factor correctly:
@@ -559,11 +560,15 @@ public:
                 double totalLength = reader->lengthInSamples;
                 int numChannels = reader->numChannels;
 
-                // Calculate pitch factor (2^(semitones/12))
+                 // Calculate pitch factor (2^(semitones/12))
                 double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
 
                 // visibleSamples = totalLength / pitchFactor
                 double visibleSamples = totalLength / pitchFactor;
+
+                //double pitchFactor = std::pow(2.0, -pitchOffset / 12.0);   // note the minus sign
+                //double visibleSamples = totalLength * pitchFactor;         // now using multiplication
+                
                 visibleSamples = juce::jlimit(1.0, totalLength * 4.0, visibleSamples);
 
                 // Always start from beginning
@@ -633,11 +638,12 @@ public:
                             
                             float xPos = waveformBounds.getX() + x;
                             
-                            // Left channel - top half
+                            // Left channel - top half - FIXED FORMULA
                             float leftCenterY = leftTop + halfHeight * 0.5f;
                             float leftHalfHeight = halfHeight * 0.5f;
                             
-                            float leftYMin = leftCenterY - (leftMin * leftHalfHeight);
+                            // CORRECTED: Use + for min (negative values go down), - for max (positive values go up)
+                            float leftYMin = leftCenterY + (leftMin * leftHalfHeight);
                             float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
                             float leftYTop = std::min(leftYMin, leftYMax);
                             float leftYBottom = std::max(leftYMin, leftYMax);
@@ -652,11 +658,12 @@ public:
                             }
                             leftOrigPath.lineTo(xPos, leftYBottom);
                             
-                            // Right channel - bottom half
+                            // Right channel - bottom half - FIXED FORMULA
                             float rightCenterY = rightTop + halfHeight * 0.5f;
                             float rightHalfHeight = halfHeight * 0.5f;
                             
-                            float rightYMin = rightCenterY - (rightMin * rightHalfHeight);
+                            // CORRECTED: Use + for min (negative values go down), - for max (positive values go up)
+                            float rightYMin = rightCenterY + (rightMin * rightHalfHeight);
                             float rightYMax = rightCenterY - (rightMax * rightHalfHeight);
                             float rightYTop = std::min(rightYMin, rightYMax);
                             float rightYBottom = std::max(rightYMin, rightYMax);
@@ -788,11 +795,13 @@ public:
                         
                         float xPos = waveformBounds.getX() + x;
                         
-                        // Left channel - top half
+                        // Left channel - use FULL height of top half
                         float leftCenterY = leftTop + halfHeight * 0.5f;
                         float leftHalfHeight = halfHeight * 0.5f;
                         
-                        float leftYMin = leftCenterY - (leftMin * leftHalfHeight);
+                        // CORRECTED: Use the full range of the channel's lane
+                        // Map -1.0 to bottom of lane, +1.0 to top of lane
+                        float leftYMin = leftCenterY + (leftMin * leftHalfHeight);  // Note: + instead of -
                         float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
                         float leftYTop = std::min(leftYMin, leftYMax);
                         float leftYBottom = std::max(leftYMin, leftYMax);
@@ -807,11 +816,12 @@ public:
                         }
                         leftPath.lineTo(xPos, leftYBottom);
                         
-                        // Right channel - bottom half
+                        // Right channel - use FULL height of bottom half
                         float rightCenterY = rightTop + halfHeight * 0.5f;
                         float rightHalfHeight = halfHeight * 0.5f;
                         
-                        float rightYMin = rightCenterY - (rightMin * rightHalfHeight);
+                        // CORRECTED: Use the full range of the channel's lane
+                        float rightYMin = rightCenterY + (rightMin * rightHalfHeight);  // Note: + instead of -
                         float rightYMax = rightCenterY - (rightMax * rightHalfHeight);
                         float rightYTop = std::min(rightYMin, rightYMax);
                         float rightYBottom = std::max(rightYMin, rightYMax);
@@ -1042,10 +1052,10 @@ public:
         pitchUpButton.setTooltip("Higher pitch (shorter duration)");
     }
     
-    void adjustPitchUp()
+    void adjustPitchUp() 
     {
         // Up button = Higher pitch = POSITIVE semitones
-        int newOffset = pitchOffset + 1;
+        int newOffset = pitchOffset - 1;
         
         // Constrain to reasonable range: ±48 semitones (4 octaves)
         if (newOffset >= -48 && newOffset <= 48)
@@ -1065,10 +1075,10 @@ public:
         }
     }
 
-    void adjustPitchDown()
+    void adjustPitchDown() 
     {
         // Down button = Lower pitch = NEGATIVE semitones
-        int newOffset = pitchOffset - 1;
+        int newOffset = pitchOffset + 1;
         
         // Constrain to reasonable range: ±48 semitones (4 octaves)
         if (newOffset >= -48 && newOffset <= 48)
@@ -1088,7 +1098,6 @@ public:
         }
     }
     
-    
     void updateWaveformSize()
     {
         if (waveformComponent == nullptr || waveformContainer == nullptr)
@@ -1099,12 +1108,15 @@ public:
         
         if (pitchOffset != 0)
         {
+
+
+            // double pitchFactor = std::pow(2.0, -pitchOffset / 12.0);
+            //containerWidth = (int)(viewportBounds.getWidth() * pitchFactor);
+
             double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
-            
-            // CORRECT: 
-            // UP (positive) = compressed = narrower container = viewportWidth / pitchFactor
-            // DOWN (negative) = stretched = wider container = viewportWidth / pitchFactor
-            containerWidth = (int)(viewportBounds.getWidth() / pitchFactor);
+            containerWidth = (int)(viewportBounds.getWidth() * pitchFactor);
+            // containerWidth = (int)(viewportBounds.getWidth() / pitchFactor);
+
         }
         
         // Ensure minimum width
@@ -1118,8 +1130,8 @@ public:
         
         // Always anchor to left side
         waveformViewport.setViewPosition(0, 0);
-    }
-        
+    }   
+    
     // UI Components
     juce::TextButton addButton{"+"};
     juce::TextButton prevButton{"Prev"};

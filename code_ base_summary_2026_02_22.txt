@@ -211,7 +211,6 @@ private:
 
 START_JUCE_APPLICATION(SamplerApplication)
 
-
 #include "MainComponent.h"
 #include "UIComponents.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -2682,15 +2681,15 @@ public:
     private:
         // High-resolution WaveformComponent that renders directly from audio data
         class WaveformComponent : public juce::Component,
-                                  private juce::Timer
+                                private juce::Timer
         {
         public:
             WaveformComponent(juce::AudioFormatManager& formatManager,
-                             juce::File& currentAudioFile,
-                             int& pitchOffsetRef)
+                            juce::File& currentAudioFile,
+                            int& pitchOffsetRef)
                 : formatManager(formatManager),
-                  currentAudioFile(currentAudioFile),
-                  pitchOffset(pitchOffsetRef)
+                currentAudioFile(currentAudioFile),
+                pitchOffset(pitchOffsetRef)
             {
                 setOpaque(true);
                 startTimer(100); // Check for file/pitch changes every 100ms
@@ -2735,19 +2734,14 @@ public:
                 double totalLength = reader->lengthInSamples;
                 int numChannels = reader->numChannels;
 
-                // DEBUG: Print channel count and sample info
-                printf("Waveform - Channels: %d, Total samples: %lld\n", numChannels, (long long)totalLength);
-
                 // Calculate pitch factor (2^(semitones/12))
                 double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
 
-                // CORRECT PITCH BEHAVIOR: visibleSamples = totalLength / pitchFactor
+                // visibleSamples = totalLength / pitchFactor
                 double visibleSamples = totalLength / pitchFactor;
-                // Remove upper limit to allow stretching (visibleSamples > totalLength when pitchFactor < 1)
-                // Limit to reasonable maximum to avoid extreme values (up to 4x stretch = 2 octaves down)
                 visibleSamples = juce::jlimit(1.0, totalLength * 4.0, visibleSamples);
 
-                // Always start from beginning (anchor to left)
+                // Always start from beginning
                 double startOffset = 0.0;
                 double samplesPerPixel = visibleSamples / renderWidth;
                 samplesPerPixel = juce::jmax(1.0, samplesPerPixel);
@@ -2756,58 +2750,76 @@ public:
                 int bufferSize = 4096;
                 juce::AudioBuffer<float> tempBuffer(numChannels, bufferSize);
 
-                // Draw original waveform in background if pitch is changed
-                if (pitchOffset != 0)
+                // DEBUG flags - moved to outer scope so they're available everywhere
+                bool foundNegative = false;
+                bool foundPositive = false;
+
+                // ===== DRAW BACKGROUND (STATIC ORIGINAL WAVEFORM) =====
+                // This should ALWAYS be drawn, regardless of pitch, and should NEVER move/resize
+                // Use original samples per pixel (totalLength / renderWidth) for static display
                 {
+                    double origSamplesPerPixel = totalLength / renderWidth;
+
                     if (numChannels > 1)
                     {
-                        // Stereo background with separate channels
+                        // STEREO - Draw channels in separate vertical spaces
                         juce::Path leftOrigPath, rightOrigPath;
                         bool leftStarted = false, rightStarted = false;
-                        double origSamplesPerPixel = totalLength / renderWidth;
-
+                        
+                        // Split the height into two equal parts
+                        int halfHeight = renderHeight / 2;
+                        int leftTop = renderTop;
+                        int leftBottom = renderTop + halfHeight;
+                        int rightTop = renderTop + halfHeight;
+                        int rightBottom = renderBottom;
+                        
                         for (int x = 0; x < renderWidth; ++x)
                         {
-                            double startSample = x * origSamplesPerPixel;
+                            double startSample = x * origSamplesPerPixel;  // Use origSamplesPerPixel for background
                             double endSample = (x + 1) * origSamplesPerPixel;
-
+                            
                             if (startSample >= totalLength) break;
-
+                            
                             endSample = std::min(endSample, totalLength);
                             int numSamples = static_cast<int>(endSample - startSample);
                             if (numSamples <= 0) continue;
-
+                            
                             reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
-
+                            
                             float leftMin = 1.0f, leftMax = -1.0f;
                             float rightMin = 1.0f, rightMax = -1.0f;
-
+                            
                             for (int s = 0; s < numSamples; ++s)
                             {
                                 float leftVal = tempBuffer.getSample(0, s);
                                 leftMin = std::min(leftMin, leftVal);
                                 leftMax = std::max(leftMax, leftVal);
                                 
-                                if (numChannels > 1)
-                                {
-                                    float rightVal = tempBuffer.getSample(1, s);
-                                    rightMin = std::min(rightMin, rightVal);
-                                    rightMax = std::max(rightMax, rightVal);
-                                }
+                                if (leftVal < 0) foundNegative = true;
+                                if (leftVal > 0) foundPositive = true;
+                                
+                                float rightVal = tempBuffer.getSample(1, s);
+                                rightMin = std::min(rightMin, rightVal);
+                                rightMax = std::max(rightMax, rightVal);
+                                
+                                if (rightVal < 0) foundNegative = true;
+                                if (rightVal > 0) foundPositive = true;
                             }
-
-                            float xPos = waveformBounds.getX() + x;
-                            float centerY = renderTop + renderHeight * 0.5f;
-                            float halfHeight = renderHeight * 0.5f; // Use full height
                             
-                            // Left channel background
-                            float leftYMin = centerY - (leftMin * halfHeight);
-                            float leftYMax = centerY - (leftMax * halfHeight);
+                            float xPos = waveformBounds.getX() + x;
+                            
+                            // Left channel - top half - FIXED FORMULA
+                            float leftCenterY = leftTop + halfHeight * 0.5f;
+                            float leftHalfHeight = halfHeight * 0.5f;
+                            
+                            // CORRECTED: Use + for min (negative values go down), - for max (positive values go up)
+                            float leftYMin = leftCenterY + (leftMin * leftHalfHeight);
+                            float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
                             float leftYTop = std::min(leftYMin, leftYMax);
                             float leftYBottom = std::max(leftYMin, leftYMax);
                             
-                            leftYTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, leftYTop);
-                            leftYBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, leftYBottom);
+                            leftYTop = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYTop);
+                            leftYBottom = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYBottom);
                             
                             if (!leftStarted)
                             {
@@ -2816,14 +2828,18 @@ public:
                             }
                             leftOrigPath.lineTo(xPos, leftYBottom);
                             
-                            // Right channel background
-                            float rightYMin = centerY - (rightMin * halfHeight);
-                            float rightYMax = centerY - (rightMax * halfHeight);
+                            // Right channel - bottom half - FIXED FORMULA
+                            float rightCenterY = rightTop + halfHeight * 0.5f;
+                            float rightHalfHeight = halfHeight * 0.5f;
+                            
+                            // CORRECTED: Use + for min (negative values go down), - for max (positive values go up)
+                            float rightYMin = rightCenterY + (rightMin * rightHalfHeight);
+                            float rightYMax = rightCenterY - (rightMax * rightHalfHeight);
                             float rightYTop = std::min(rightYMin, rightYMax);
                             float rightYBottom = std::max(rightYMin, rightYMax);
                             
-                            rightYTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, rightYTop);
-                            rightYBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, rightYBottom);
+                            rightYTop = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYTop);
+                            rightYBottom = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYBottom);
                             
                             if (!rightStarted)
                             {
@@ -2832,19 +2848,20 @@ public:
                             }
                             rightOrigPath.lineTo(xPos, rightYBottom);
                         }
-
+                        
+                        // Draw left channel background (grey)
                         g.setColour(juce::Colours::grey.withAlpha(0.15f));
                         g.strokePath(leftOrigPath, juce::PathStrokeType(1.0f));
                         
+                        // Draw right channel background (dark grey)
                         g.setColour(juce::Colours::darkgrey.withAlpha(0.15f));
                         g.strokePath(rightOrigPath, juce::PathStrokeType(1.0f));
                     }
                     else
                     {
-                        // Mono background - original code
+                        // Mono background
                         juce::Path originalPath;
                         bool pathStarted = false;
-                        double origSamplesPerPixel = totalLength / renderWidth;
 
                         for (int x = 0; x < renderWidth; ++x)
                         {
@@ -2859,7 +2876,6 @@ public:
 
                             reader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
 
-                            // Find min and max across all channels
                             float minVal = 1.0f;
                             float maxVal = -1.0f;
 
@@ -2868,24 +2884,19 @@ public:
                                 for (int ch = 0; ch < numChannels; ++ch)
                                 {
                                     float val = tempBuffer.getSample(ch, s);
-                                    if (val < minVal) minVal = val;
-                                    if (val > maxVal) maxVal = val;
+                                    minVal = std::min(minVal, val);
+                                    maxVal = std::max(maxVal, val);
+                                    if (val < 0) foundNegative = true;
+                                    if (val > 0) foundPositive = true;
                                 }
                             }
 
                             float xPos = waveformBounds.getX() + x;
-
-                            // CORRECTED MAPPING:
-                            // Map -1.0 to bottom, +1.0 to top
                             float centerY = renderTop + renderHeight * 0.5f;
                             float halfHeight = renderHeight * 0.5f;
 
-                            // For minVal (negative or positive):
                             float yMin = centerY - (minVal * halfHeight);
-                            // For maxVal (positive or negative):
                             float yMax = centerY - (maxVal * halfHeight);
-
-                            // Ensure proper ordering
                             float yTop = std::min(yMin, yMax);
                             float yBottom = std::max(yMin, yMax);
 
@@ -2905,21 +2916,24 @@ public:
                     }
                 }
 
-                // Draw main waveform with pitch adjustment
-                // DEBUG: Track if we're seeing any negative values
-                bool foundNegative = false;
-                bool foundPositive = false;
-
+                // ===== DRAW MAIN WAVEFORM (WITH PITCH ADJUSTMENT) =====
                 if (numChannels > 1)
                 {
-                    // For stereo, draw two waveforms that fill the entire height
+                    // STEREO - Draw channels in separate vertical spaces
                     juce::Path leftPath, rightPath;
                     bool leftStarted = false, rightStarted = false;
                     
+                    // Split the height into two equal parts
+                    int halfHeight = renderHeight / 2;
+                    int leftTop = renderTop;
+                    int leftBottom = renderTop + halfHeight;
+                    int rightTop = renderTop + halfHeight;
+                    int rightBottom = renderBottom;
+                    
                     for (int x = 0; x < renderWidth; ++x)
                     {
-                        double startSample = x * samplesPerPixel;
-                        double endSample = (x + 1) * samplesPerPixel;
+                        double startSample = startOffset + x * samplesPerPixel;
+                        double endSample = startSample + samplesPerPixel;
                         
                         if (startSample >= totalLength) break;
                         
@@ -2938,35 +2952,32 @@ public:
                             leftMin = std::min(leftMin, leftVal);
                             leftMax = std::max(leftMax, leftVal);
                             
-                            // Track if we're seeing any negative/positive values for left channel
                             if (leftVal < 0) foundNegative = true;
                             if (leftVal > 0) foundPositive = true;
                             
-                            if (numChannels > 1)
-                            {
-                                float rightVal = tempBuffer.getSample(1, s);
-                                rightMin = std::min(rightMin, rightVal);
-                                rightMax = std::max(rightMax, rightVal);
-                                
-                                // Track if we're seeing any negative/positive values for right channel
-                                if (rightVal < 0) foundNegative = true;
-                                if (rightVal > 0) foundPositive = true;
-                            }
+                            float rightVal = tempBuffer.getSample(1, s);
+                            rightMin = std::min(rightMin, rightVal);
+                            rightMax = std::max(rightMax, rightVal);
+                            
+                            if (rightVal < 0) foundNegative = true;
+                            if (rightVal > 0) foundPositive = true;
                         }
                         
                         float xPos = waveformBounds.getX() + x;
                         
-                        // Left channel - use full height with full opacity
-                        float centerY = renderTop + renderHeight * 0.5f;
-                        float halfHeight = renderHeight * 0.5f; // Use full height
+                        // Left channel - use FULL height of top half
+                        float leftCenterY = leftTop + halfHeight * 0.5f;
+                        float leftHalfHeight = halfHeight * 0.5f;
                         
-                        float leftYMin = centerY - (leftMin * halfHeight);
-                        float leftYMax = centerY - (leftMax * halfHeight);
+                        // CORRECTED: Use the full range of the channel's lane
+                        // Map -1.0 to bottom of lane, +1.0 to top of lane
+                        float leftYMin = leftCenterY + (leftMin * leftHalfHeight);  // Note: + instead of -
+                        float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
                         float leftYTop = std::min(leftYMin, leftYMax);
                         float leftYBottom = std::max(leftYMin, leftYMax);
                         
-                        leftYTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, leftYTop);
-                        leftYBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, leftYBottom);
+                        leftYTop = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYTop);
+                        leftYBottom = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYBottom);
                         
                         if (!leftStarted)
                         {
@@ -2975,14 +2986,18 @@ public:
                         }
                         leftPath.lineTo(xPos, leftYBottom);
                         
-                        // Right channel - use full height but with slightly lower opacity
-                        float rightYMin = centerY - (rightMin * halfHeight);
-                        float rightYMax = centerY - (rightMax * halfHeight);
+                        // Right channel - use FULL height of bottom half
+                        float rightCenterY = rightTop + halfHeight * 0.5f;
+                        float rightHalfHeight = halfHeight * 0.5f;
+                        
+                        // CORRECTED: Use the full range of the channel's lane
+                        float rightYMin = rightCenterY + (rightMin * rightHalfHeight);  // Note: + instead of -
+                        float rightYMax = rightCenterY - (rightMax * rightHalfHeight);
                         float rightYTop = std::min(rightYMin, rightYMax);
                         float rightYBottom = std::max(rightYMin, rightYMax);
                         
-                        rightYTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, rightYTop);
-                        rightYBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, rightYBottom);
+                        rightYTop = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYTop);
+                        rightYBottom = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYBottom);
                         
                         if (!rightStarted)
                         {
@@ -2992,28 +3007,34 @@ public:
                         rightPath.lineTo(xPos, rightYBottom);
                     }
                     
-                    // Draw left channel (green) with full opacity
-                    g.setColour(juce::Colours::lightgreen.withAlpha(0.8f));
+                    // Draw left channel (green) - top half
+                    g.setColour(juce::Colours::lightgreen);
                     g.strokePath(leftPath, juce::PathStrokeType(1.0f));
                     
-                    // Draw right channel (orange) with full opacity
-                    g.setColour(juce::Colours::orange.withAlpha(0.8f));
+                    // Draw right channel (orange) - bottom half
+                    g.setColour(juce::Colours::orange);
                     g.strokePath(rightPath, juce::PathStrokeType(1.0f));
                     
-                    // Add a subtle divider line between channels
-                    g.setColour(juce::Colours::darkgrey.withAlpha(0.3f));
-                    g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
+                    // Draw channel separator line
+                    g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
+                    g.drawHorizontalLine(renderTop + halfHeight, waveformBounds.getX(), waveformBounds.getRight());
+                    
+                    // Add channel labels
+                    g.setColour(juce::Colours::lightgrey);
+                    g.setFont(juce::Font(10.0f));
+                    g.drawText("L", waveformBounds.getX() + 5, leftTop + 2, 20, 15, juce::Justification::left);
+                    g.drawText("R", waveformBounds.getX() + 5, rightTop + 2, 20, 15, juce::Justification::left);
                 }
                 else
                 {
-                    // Mono - draw as before
+                    // MONO - draw single waveform
                     juce::Path waveformPath;
                     bool pathStarted = false;
 
                     for (int x = 0; x < renderWidth; ++x)
                     {
-                        double startSample = x * samplesPerPixel;
-                        double endSample = (x + 1) * samplesPerPixel;
+                        double startSample = startOffset + x * samplesPerPixel;
+                        double endSample = startSample + samplesPerPixel;
 
                         if (startSample >= totalLength) break;
 
@@ -3031,28 +3052,19 @@ public:
                             for (int ch = 0; ch < numChannels; ++ch)
                             {
                                 float val = tempBuffer.getSample(ch, s);
-                                if (val < minVal) 
-                                {
-                                    minVal = val;
-                                    if (val < 0) foundNegative = true;
-                                }
-                                if (val > maxVal) 
-                                {
-                                    maxVal = val;
-                                    if (val > 0) foundPositive = true;
-                                }
+                                minVal = std::min(minVal, val);
+                                maxVal = std::max(maxVal, val);
+                                if (val < 0) foundNegative = true;
+                                if (val > 0) foundPositive = true;
                             }
                         }
 
                         float xPos = waveformBounds.getX() + x;
-                        
-                        // CORRECTED MAPPING (same as above):
                         float centerY = renderTop + renderHeight * 0.5f;
                         float halfHeight = renderHeight * 0.5f;
                         
                         float yMin = centerY - (minVal * halfHeight);
                         float yMax = centerY - (maxVal * halfHeight);
-                        
                         float yTop = std::min(yMin, yMax);
                         float yBottom = std::max(yMin, yMax);
 
@@ -3078,14 +3090,8 @@ public:
                     g.strokePath(waveformPath, juce::PathStrokeType(1.5f));
                 }
 
-                // DEBUG: Print what we found (always print for now)
-                printf("Waveform Debug - Found negative: %s, Found positive: %s, Pitch offset: %+d, Visible samples: %.1f, Render height: %d, Channels: %d\n", 
-                       foundNegative ? "YES" : "NO", 
-                       foundPositive ? "YES" : "NO", 
-                       pitchOffset, visibleSamples, renderHeight, numChannels);
-
-                // Draw center line
-                g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
+                // Draw center line (always)
+                g.setColour(juce::Colours::darkgrey.withAlpha(0.3f));
                 g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
             }
             
@@ -3216,7 +3222,7 @@ public:
         pitchUpButton.setTooltip("Higher pitch (shorter duration)");
     }
     
-    void adjustPitchUp()
+    void adjustPitchUp() 
     {
         // Up button = Higher pitch = POSITIVE semitones
         int newOffset = pitchOffset + 1;
@@ -3239,7 +3245,7 @@ public:
         }
     }
 
-    void adjustPitchDown()
+    void adjustPitchDown() 
     {
         // Down button = Lower pitch = NEGATIVE semitones
         int newOffset = pitchOffset - 1;
@@ -3262,7 +3268,6 @@ public:
         }
     }
     
-    
     void updateWaveformSize()
     {
         if (waveformComponent == nullptr || waveformContainer == nullptr)
@@ -3271,19 +3276,19 @@ public:
         auto viewportBounds = waveformViewport.getLocalBounds();
         int containerWidth = viewportBounds.getWidth();
         
-        // CORRECTED PITCH BEHAVIOR:
         if (pitchOffset != 0)
         {
             double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
             
-            // FIXED: Invert the relationship for correct visual behavior
-            // Pitch UP (positive): compressed = narrower container
-            // Pitch DOWN (negative): stretched = wider container
-            // containerWidth = viewportWidth / pitchFactor
-            containerWidth = (int)(viewportBounds.getWidth() / pitchFactor);
+            // CORRECT: 
+            // UP (positive) = compressed = narrower container = viewportWidth / pitchFactor
+            // DOWN (negative) = stretched = wider container = viewportWidth / pitchFactor
+            containerWidth = (int)(viewportBounds.getWidth() * pitchFactor);
+            // containerWidth = (int)(viewportBounds.getWidth() / pitchFactor);
+
         }
         
-        // Ensure minimum width (can't be smaller than viewport)
+        // Ensure minimum width
         containerWidth = juce::jmax(containerWidth, viewportBounds.getWidth());
         
         // Set container size
@@ -3294,7 +3299,7 @@ public:
         
         // Always anchor to left side
         waveformViewport.setViewPosition(0, 0);
-    }
+    }   
     
     // UI Components
     juce::TextButton addButton{"+"};
@@ -3811,4 +3816,5 @@ public:
 private:
     OwnerInterface& owner;
 };
+
 

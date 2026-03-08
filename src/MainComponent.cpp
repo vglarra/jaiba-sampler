@@ -1065,7 +1065,7 @@ void MainComponent::updateSamplerSounds()
             sample->name,
             *reader,
             noteRange,
-            sample->rootNote - sample->pitchOffset,  // Subtraction is correct
+            sample->rootNote + sample->pitchOffset,  // Subtraction is correct
             sample->attack,
             sample->release,
             10.0
