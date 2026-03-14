@@ -562,6 +562,7 @@ public:
                 }
             }
          
+
             void paint(juce::Graphics& g) override
             {
                 auto bounds = getLocalBounds();
@@ -630,45 +631,67 @@ public:
                 auto visibleArea = viewport->getViewArea();
                 int visibleX = visibleArea.getX();
                 int visibleWidth = visibleArea.getWidth();
-
-                // Calculate samples per pixel for the current zoom level
-                double baseSamplesPerPixel = totalLength / getWidth();
-                
-                // For pitch expansion/compression, we adjust the visual scaling
-                double displaySamplesPerPixel;
-                
-                if (pitchOffset > 0) // Pitch UP - COMPRESSED view (show less samples per pixel)
-                {
-                    displaySamplesPerPixel = baseSamplesPerPixel / pitchFactor;
-                }
-                else if (pitchOffset < 0) // Pitch DOWN - EXPANDED view (show more samples per pixel)
-                {
-                    displaySamplesPerPixel = baseSamplesPerPixel * pitchFactor;
-                }
-                else
-                {
-                    displaySamplesPerPixel = baseSamplesPerPixel;
-                }
-
-                // Ensure we don't divide by zero
-                displaySamplesPerPixel = juce::jmax(1.0, displaySamplesPerPixel);
+                int containerWidth = getWidth(); // Total width of this component (the container)
 
                 // Calculate which portion of the audio to render based on visible area
-                double startSample = visibleX * displaySamplesPerPixel;
-                double endSample = (visibleX + visibleWidth) * displaySamplesPerPixel;
-                
+                double startSample, endSample;
+
+                if (pitchOffset < 0) // Pitch DOWN - EXPANDED view
+                {
+                    double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
+                    expansionFactor = juce::jmin(expansionFactor, 4.0); // Cap at 4x
+                    
+                    // In expanded mode, the container is wider than the viewport
+                    // The total samples we can show is totalLength * expansionFactor
+                    double totalVisibleSamples = totalLength * expansionFactor;
+                    
+                    // Calculate what percentage of the container is scrolled
+                    // containerWidth is the total width of this component
+                    // visibleWidth is the width of the viewport
+                    double maxScroll = containerWidth - visibleWidth;
+                    
+                    if (maxScroll > 0)
+                    {
+                        // Map scroll position (0 to maxScroll) to sample position (0 to extra samples)
+                        double scrollPercentage = (double)visibleX / maxScroll;
+                        
+                        // The extra samples beyond the original length that we can show
+                        double extraSamples = totalVisibleSamples - totalLength;
+                        
+                        // Start sample is offset by the scroll percentage of the extra samples
+                        startSample = scrollPercentage * extraSamples;
+                        endSample = startSample + totalLength;
+                        
+                        printf("SCROLL: pitch=%d, scrollX=%d, maxScroll=%d, percentage=%.3f, startSample=%.0f\n", 
+                            pitchOffset, visibleX, (int)maxScroll, scrollPercentage, startSample);
+                    }
+                    else
+                    {
+                        startSample = 0;
+                        endSample = totalLength;
+                    }
+                }
+                else // Pitch UP or ZERO
+                {
+                    // For compressed or normal view, we show the entire file
+                    // The visual compression happens by showing fewer samples per pixel
+                    startSample = 0;
+                    endSample = totalLength;
+                }
+
                 // Clamp to valid range
-                startSample = juce::jlimit(0.0, (double)totalLength, startSample);
-                endSample = juce::jlimit(0.0, (double)totalLength, endSample);
-                
+                startSample = juce::jlimit(0.0, totalLength, startSample);
+                endSample = juce::jlimit(0.0, totalLength, endSample);
+
                 int numVisiblePixels = visibleWidth;
-                
+                double samplesPerPixel = (endSample - startSample) / numVisiblePixels;
+                samplesPerPixel = juce::jmax(1.0, samplesPerPixel);
+
                 // Buffer for reading audio data
                 int bufferSize = 4096;
                 juce::AudioBuffer<float> tempBuffer(numChannels, bufferSize);
 
-                // ===== DRAW MAIN WAVEFORM (WITH PITCH ADJUSTMENT) =====
-                // In the stereo section of paint(), replace the channel rendering with:
+                // ===== DRAW MAIN WAVEFORM =====
                 if (numChannels > 1)
                 {
                     // STEREO - Draw channels in separate vertical spaces
@@ -685,8 +708,10 @@ public:
                     // Only render the visible portion
                     for (int x = 0; x < numVisiblePixels; ++x)
                     {
-                        double pixelStartSample = startSample + x * displaySamplesPerPixel;
-                        double pixelEndSample = pixelStartSample + displaySamplesPerPixel;
+                        // CRITICAL FIX: Use startSample + x * samplesPerPixel
+                        // This ensures we render different portions as we scroll
+                        double pixelStartSample = startSample + x * samplesPerPixel;
+                        double pixelEndSample = pixelStartSample + samplesPerPixel;
                         
                         if (pixelStartSample >= totalLength) break;
                         
@@ -733,6 +758,10 @@ public:
                             leftPath.startNewSubPath(xPos, leftYTop);
                             leftStarted = true;
                         }
+                        else
+                        {
+                            leftPath.lineTo(xPos, leftYTop);
+                        }
                         leftPath.lineTo(xPos, leftYBottom);
                         
                         // Right channel - consistent sign handling
@@ -751,6 +780,10 @@ public:
                         {
                             rightPath.startNewSubPath(xPos, rightYTop);
                             rightStarted = true;
+                        }
+                        else
+                        {
+                            rightPath.lineTo(xPos, rightYTop);
                         }
                         rightPath.lineTo(xPos, rightYBottom);
                     }
@@ -782,8 +815,8 @@ public:
                     // Only render the visible portion
                     for (int x = 0; x < numVisiblePixels; ++x)
                     {
-                        double pixelStartSample = startSample + x * displaySamplesPerPixel;
-                        double pixelEndSample = pixelStartSample + displaySamplesPerPixel;
+                        double pixelStartSample = startSample + x * samplesPerPixel;
+                        double pixelEndSample = pixelStartSample + samplesPerPixel;
 
                         if (pixelStartSample >= totalLength) break;
 
@@ -840,7 +873,7 @@ public:
                 // Draw center line (always)
                 g.setColour(juce::Colours::darkgrey.withAlpha(0.3f));
                 g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
-            }
+            }           
 
             
             void setPitchFactor(double factor, int semitones)
@@ -1045,7 +1078,7 @@ void adjustPitchUp()
         waveformViewport.setViewPosition(0, 0);
     }  */
     
-void updateWaveformSize()
+    void updateWaveformSize()
     {
         if (waveformComponent == nullptr || waveformContainer == nullptr)
             return;
@@ -1058,42 +1091,29 @@ void updateWaveformSize()
         
         int containerWidth;
         
-        // ALWAYS make the container wider than the viewport to force scrollbar
-        // Base width is viewport width + 20% extra to always show scrollbar
-        const double baseExpansion = 1.2; // 20% extra width to force scrollbar
-        
-        if (pitchOffset < 0) // Pitch DOWN - EXPAND (make it even wider)
+        if (pitchOffset < 0) // Pitch DOWN - EXPAND (container gets wider to show more detail)
         {
             double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
             // Cap the expansion factor to prevent extreme values
             expansionFactor = juce::jmin(expansionFactor, 4.0); // Max 4x expansion
             
-            // Apply both pitch expansion and base expansion
-            containerWidth = (int)(viewportBounds.getWidth() * expansionFactor * baseExpansion);
+            // For expansion, container width increases to show more of the waveform
+            containerWidth = (int)(viewportBounds.getWidth() * expansionFactor);
             
             printf("EXPAND: pitch=%d, factor=%.3f, container=%d\n", 
                 pitchOffset, expansionFactor, containerWidth);
         }
-        else if (pitchOffset > 0) // Pitch UP - COMPRESS (still add base expansion)
+        else // Pitch UP (positive) or ZERO - container stays at viewport width
         {
-            double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
-            // For compression, we actually want to show LESS of the waveform
-            // So we use 1.0 / compressionFactor to reduce the visible portion
-            double visibleFactor = 1.0 / compressionFactor;
+            // For compression or normal view, container width equals viewport width
+            // The visual compression happens in the rendering, not in container size
+            containerWidth = viewportBounds.getWidth();
             
-            // Apply visible factor and base expansion
-            containerWidth = (int)(viewportBounds.getWidth() * visibleFactor * baseExpansion);
-            
-            // Ensure minimum width
-            containerWidth = juce::jmax(containerWidth, (int)(viewportBounds.getWidth() * baseExpansion));
-            
-            printf("COMPRESS: pitch=%d, factor=%.3f, visible=%.3f, container=%d\n", 
-                pitchOffset, compressionFactor, visibleFactor, containerWidth);
-        }
-        else // No pitch offset - still add base expansion for scrollbar
-        {
-            containerWidth = (int)(viewportBounds.getWidth() * baseExpansion);
-            printf("NORMAL: container=%d (with scrollbar)\n", containerWidth);
+            if (pitchOffset > 0)
+                printf("COMPRESS: pitch=%d, container=%d (fixed width, visual compression in render)\n", 
+                    pitchOffset, containerWidth);
+            else
+                printf("NORMAL: pitch=0, container=%d\n", containerWidth);
         }
         
         // Absolute maximum width to prevent crashes
@@ -1105,13 +1125,14 @@ void updateWaveformSize()
         }
         
         // Ensure minimum width
-        containerWidth = juce::jmax(containerWidth, 100);
+        containerWidth = juce::jmax(containerWidth, viewportBounds.getWidth());
         
         waveformContainer->setBounds(0, 0, containerWidth, viewportBounds.getHeight());
         waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
         
-        // Always show horizontal scrollbar, never show vertical scrollbar
-        waveformViewport.setScrollBarsShown(false, true);
+        // Show horizontal scrollbar only when container is wider than viewport
+        bool needsHorizontalScroll = (containerWidth > viewportBounds.getWidth());
+        waveformViewport.setScrollBarsShown(false, needsHorizontalScroll);
         
         // Reset scroll position to left
         waveformViewport.setViewPosition(0, 0);
