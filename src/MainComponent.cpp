@@ -1065,7 +1065,7 @@ void MainComponent::updateSamplerSounds()
             sample->name,
             *reader,
             noteRange,
-            sample->rootNote + sample->pitchOffset,  // Subtraction is correct
+            sample->rootNote - sample->pitchOffset,  // Subtraction is correct
             sample->attack,
             sample->release,
             10.0
@@ -1161,6 +1161,11 @@ void MainComponent::navigateToFile(int index)
         
         // Stop all currently playing notes before loading new sample
         sampler.allNotesOff(1, false);
+        
+        // CRITICAL: Reset the viewport position on the UI thread
+        juce::MessageManager::callAsync([this]() {
+            sampleCard.resetViewport();  // You'll need to add this method
+        });
         
         // Clear the sampler sounds immediately on the message thread
         juce::MessageManager::callAsync([this]() {
@@ -1560,4 +1565,6 @@ void MainComponent::midiDeviceChanged(const juce::String& newDevice)
     currentMidiDeviceName = newDevice;
     saveCurrentSession();
 }
+
+
 
