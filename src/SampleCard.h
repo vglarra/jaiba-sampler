@@ -635,48 +635,61 @@ public:
 
                 // Calculate which portion of the audio to render based on visible area
                 double startSample, endSample;
+                double samplesPerPixel;  // Declare once at the beginning
 
-                if (pitchOffset < 0) // Pitch DOWN - EXPANDED view
+                if (pitchOffset < 0) // Pitch DOWN - EXPANDED view (show more detail)
                 {
+                    // Expansion factor: 2^(|pitchOffset|/12)
+                    // At -12 semitones: 2x expansion, at -24: 4x, at -48: 16x
                     double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
-                    expansionFactor = juce::jmin(expansionFactor, 4.0); // Cap at 4x
+                    expansionFactor = juce::jmin(expansionFactor, 16.0); // Cap at 16x for -48 semitones
                     
-                    // In expanded mode, the container is wider than the viewport
-                    // The total samples we can show is totalLength * expansionFactor
+                    // In expanded mode, we want to show MORE detail = FEWER samples per pixel
+                    // So samplesPerPixel should be SMALLER than normal
+                    double normalSamplesPerPixel = totalLength / visibleWidth;
+                    samplesPerPixel = normalSamplesPerPixel / expansionFactor;
+                    
+                    // Total samples we can show across the entire container
                     double totalVisibleSamples = totalLength * expansionFactor;
                     
-                    // Calculate what percentage of the container is scrolled
-                    // containerWidth is the total width of this component
-                    // visibleWidth is the width of the viewport
+                    // Calculate scroll range and position
                     double maxScroll = containerWidth - visibleWidth;
+                    double scrollPercentage = (maxScroll > 0) ? (double)visibleX / maxScroll : 0.0;
                     
-                    if (maxScroll > 0)
-                    {
-                        // Map scroll position (0 to maxScroll) to sample position (0 to extra samples)
-                        double scrollPercentage = (double)visibleX / maxScroll;
-                        
-                        // The extra samples beyond the original length that we can show
-                        double extraSamples = totalVisibleSamples - totalLength;
-                        
-                        // Start sample is offset by the scroll percentage of the extra samples
-                        startSample = scrollPercentage * extraSamples;
-                        endSample = startSample + totalLength;
-                        
-                        printf("SCROLL: pitch=%d, scrollX=%d, maxScroll=%d, percentage=%.3f, startSample=%.0f\n", 
-                            pitchOffset, visibleX, (int)maxScroll, scrollPercentage, startSample);
-                    }
-                    else
-                    {
-                        startSample = 0;
-                        endSample = totalLength;
-                    }
+                    // Start sample is offset by scroll percentage of the extra samples
+                    double extraSamples = totalVisibleSamples - totalLength;
+                    startSample = scrollPercentage * extraSamples;
+                    endSample = startSample + totalLength;
+                    
+                    printf("EXPANDED: pitch=%d, factor=%.2fx, samplesPerPixel=%.2f (normal=%.2f), startSample=%.0f\n", 
+                        pitchOffset, expansionFactor, samplesPerPixel, normalSamplesPerPixel, startSample);
                 }
-                else // Pitch UP or ZERO
+                else if (pitchOffset > 0) // Pitch UP - COMPRESSED view (show overview)
                 {
-                    // For compressed or normal view, we show the entire file
-                    // The visual compression happens by showing fewer samples per pixel
+                    // Compression factor: 2^(pitchOffset/12)
+                    // At +12 semitones: show every other sample (50% density)
+                    // At +24 semitones: show 25% density, etc.
+                    double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
+                    compressionFactor = juce::jmin(compressionFactor, 16.0); // Cap at 16x for +48 semitones
+                    
+                    // Show the entire file, but with fewer samples per pixel
                     startSample = 0;
                     endSample = totalLength;
+                    
+                    // Samples per pixel is INCREASED by compression factor
+                    // This means each pixel represents more samples = compressed look
+                    samplesPerPixel = (totalLength / visibleWidth) * compressionFactor;
+                    
+                    printf("COMPRESSED: pitch=%d, factor=%.2fx, samplesPerPixel=%.2f\n", 
+                        pitchOffset, compressionFactor, samplesPerPixel);
+                }
+                else // pitchOffset == 0 - Normal view
+                {
+                    startSample = 0;
+                    endSample = totalLength;
+                    samplesPerPixel = totalLength / visibleWidth;
+                    
+                    printf("NORMAL: samplesPerPixel=%.2f\n", samplesPerPixel);
                 }
 
                 // Clamp to valid range
@@ -684,7 +697,8 @@ public:
                 endSample = juce::jlimit(0.0, totalLength, endSample);
 
                 int numVisiblePixels = visibleWidth;
-                double samplesPerPixel = (endSample - startSample) / numVisiblePixels;
+
+                // Ensure samplesPerPixel is at least 1
                 samplesPerPixel = juce::jmax(1.0, samplesPerPixel);
 
                 // Buffer for reading audio data
@@ -696,7 +710,6 @@ public:
                 {
                     // STEREO - Draw channels in separate vertical spaces
                     juce::Path leftPath, rightPath;
-                    bool leftStarted = false, rightStarted = false;
                     
                     // Split the height into two equal parts
                     int halfHeight = renderHeight / 2;
@@ -708,8 +721,6 @@ public:
                     // Only render the visible portion
                     for (int x = 0; x < numVisiblePixels; ++x)
                     {
-                        // CRITICAL FIX: Use startSample + x * samplesPerPixel
-                        // This ensures we render different portions as we scroll
                         double pixelStartSample = startSample + x * samplesPerPixel;
                         double pixelEndSample = pixelStartSample + samplesPerPixel;
                         
@@ -737,14 +748,20 @@ public:
                                 rightMax = std::max(rightMax, rightVal);
                             }
                         }
+
+                        // Debug for first pixel
+                        if (x == 0)
+                        {
+                            printf("Pixel 0: startSample=%.0f, leftMin=%.2f, leftMax=%.2f, rightMin=%.2f, rightMax=%.2f\n", 
+                                pixelStartSample, leftMin, leftMax, rightMin, rightMax);
+                        }
                         
                         float xPos = waveformBounds.getX() + x;
                         
-                        // Left channel - consistent sign handling
+                        // Left channel - draw a vertical line from min to max
                         float leftCenterY = leftTop + halfHeight * 0.5f;
                         float leftHalfHeight = halfHeight * 0.5f;
                         
-                        // Use consistent mapping: -1.0 = bottom, +1.0 = top
                         float leftYMin = leftCenterY - (leftMin * leftHalfHeight);
                         float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
                         float leftYTop = std::min(leftYMin, leftYMax);
@@ -753,18 +770,11 @@ public:
                         leftYTop = juce::jlimit((float)leftTop + 1.0f, (float)leftBottom - 1.0f, leftYTop);
                         leftYBottom = juce::jlimit((float)leftTop + 1.0f, (float)leftBottom - 1.0f, leftYBottom);
                         
-                        if (!leftStarted)
-                        {
-                            leftPath.startNewSubPath(xPos, leftYTop);
-                            leftStarted = true;
-                        }
-                        else
-                        {
-                            leftPath.lineTo(xPos, leftYTop);
-                        }
+                        // Draw a vertical line for this column
+                        leftPath.startNewSubPath(xPos, leftYTop);
                         leftPath.lineTo(xPos, leftYBottom);
                         
-                        // Right channel - consistent sign handling
+                        // Right channel - draw a vertical line from min to max
                         float rightCenterY = rightTop + halfHeight * 0.5f;
                         float rightHalfHeight = halfHeight * 0.5f;
                         
@@ -776,25 +786,18 @@ public:
                         rightYTop = juce::jlimit((float)rightTop + 1.0f, (float)rightBottom - 1.0f, rightYTop);
                         rightYBottom = juce::jlimit((float)rightTop + 1.0f, (float)rightBottom - 1.0f, rightYBottom);
                         
-                        if (!rightStarted)
-                        {
-                            rightPath.startNewSubPath(xPos, rightYTop);
-                            rightStarted = true;
-                        }
-                        else
-                        {
-                            rightPath.lineTo(xPos, rightYTop);
-                        }
+                        // Draw a vertical line for this column
+                        rightPath.startNewSubPath(xPos, rightYTop);
                         rightPath.lineTo(xPos, rightYBottom);
                     }
                     
-                    // Draw left channel (green) - top half
-                    g.setColour(juce::Colours::lightgreen);
-                    g.strokePath(leftPath, juce::PathStrokeType(1.0f));
+                    // Draw left channel (bright green) - top half
+                    g.setColour(juce::Colours::greenyellow);
+                    g.strokePath(leftPath, juce::PathStrokeType(1.5f));
                     
-                    // Draw right channel (orange) - bottom half
-                    g.setColour(juce::Colours::orange);
-                    g.strokePath(rightPath, juce::PathStrokeType(1.0f));
+                    // Draw right channel (gold) - bottom half
+                    g.setColour(juce::Colours::gold);
+                    g.strokePath(rightPath, juce::PathStrokeType(1.5f));
                     
                     // Draw channel separator line
                     g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
@@ -1091,33 +1094,32 @@ void adjustPitchUp()
         
         int containerWidth;
         
-        if (pitchOffset < 0) // Pitch DOWN - EXPAND (container gets wider to show more detail)
+        if (pitchOffset < 0) // Pitch DOWN - EXPAND (container gets wider)
         {
+            // Expansion follows the table: -12 = 2x, -24 = 4x, -48 = 16x
             double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
-            // Cap the expansion factor to prevent extreme values
-            expansionFactor = juce::jmin(expansionFactor, 4.0); // Max 4x expansion
+            expansionFactor = juce::jmin(expansionFactor, 16.0); // Max 16x expansion
             
-            // For expansion, container width increases to show more of the waveform
             containerWidth = (int)(viewportBounds.getWidth() * expansionFactor);
             
-            printf("EXPAND: pitch=%d, factor=%.3f, container=%d\n", 
-                pitchOffset, expansionFactor, containerWidth);
+            printf("EXPAND: pitch=%d, factor=%.3f, container=%d (%.1fx wider)\n", 
+                pitchOffset, expansionFactor, containerWidth, expansionFactor);
         }
-        else // Pitch UP (positive) or ZERO - container stays at viewport width
+        else if (pitchOffset > 0) // Pitch UP - container stays at viewport width
         {
-            // For compression or normal view, container width equals viewport width
-            // The visual compression happens in the rendering, not in container size
             containerWidth = viewportBounds.getWidth();
-            
-            if (pitchOffset > 0)
-                printf("COMPRESS: pitch=%d, container=%d (fixed width, visual compression in render)\n", 
-                    pitchOffset, containerWidth);
-            else
-                printf("NORMAL: pitch=0, container=%d\n", containerWidth);
+            double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
+            printf("COMPRESS: pitch=%d, factor=%.3f, container=%d (visual density %.1fx)\n", 
+                pitchOffset, compressionFactor, containerWidth, compressionFactor);
+        }
+        else // pitchOffset == 0
+        {
+            containerWidth = viewportBounds.getWidth();
+            printf("NORMAL: pitch=0, container=%d\n", containerWidth);
         }
         
         // Absolute maximum width to prevent crashes
-        const int maxWidth = 3000;
+        const int maxWidth = 11200; // 700px * 16 = 11200px for -48 semitones
         if (containerWidth > maxWidth)
         {
             containerWidth = maxWidth;
@@ -1191,4 +1193,3 @@ void adjustPitchUp()
     juce::ListenerList<Listener> listeners;
     int fixedViewportWidth = 700;  // Will be updated in resized()
 };
-
