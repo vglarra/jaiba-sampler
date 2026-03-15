@@ -128,6 +128,7 @@ private:
     std::unique_ptr<juce::PropertiesFile> propertiesFile;
 };
 
+
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "MainComponent.h"
 #include <cstdio>
@@ -2374,10 +2375,17 @@ public:
         auto labelArea = waveformRect;
         topInfoLabel.setBounds(labelArea.removeFromTop(20).reduced(2));
         bottomInfoLabel.setBounds(labelArea.removeFromBottom(25).reduced(2));
+
+        // Configure scrollbar visibility - ALWAYS show horizontal scrollbar
+        waveformViewport.setScrollBarsShown(false, true); // false for vertical, true for horizontal
         
-        // Update the waveform container and component size
-        updateWaveformSize();
-        waveformViewport.setViewPosition(0, 0);  // Reset scroll position
+        // ADD SAFETY CHECK HERE
+        if (waveformComponent != nullptr && waveformContainer != nullptr)
+        {
+            // Update the waveform container and component size
+            updateWaveformSize();
+            waveformViewport.setViewPosition(0, 0);  // Reset scroll position
+        }
         
         // Add 5px margin between waveform and pitch controls
         area.removeFromTop(5);
@@ -2598,6 +2606,12 @@ public:
             {
                 printf("ERROR: Could not create reader for file: %s\n", 
                     audioFile.getFileName().toRawUTF8());
+                
+                // Clear waveform if we can't read it
+                if (waveformComponent != nullptr)
+                {
+                    waveformComponent->setFile(juce::File());
+                }
             }
         }
         else
@@ -2606,9 +2620,14 @@ public:
             originalLengthInSamples = 0;
             originalSampleRate = 0.0;
             
-            // Force a repaint
+            // Clear the waveform component
             if (waveformComponent != nullptr)
-                waveformComponent->repaint();
+            {
+                waveformComponent->setFile(juce::File());
+            }
+            
+            // Force a repaint
+            repaint();
         }
     }
     
@@ -2723,7 +2742,8 @@ public:
                     repaint();
                 }
             }
-            
+         
+
             void paint(juce::Graphics& g) override
             {
                 auto bounds = getLocalBounds();
@@ -2779,83 +2799,98 @@ public:
                 int renderCenter = waveformBounds.getCentreY();
 
                 double totalLength = cachedTotalLength;
-                int numChannels = cachedNumChannels;  // FIXED TYPO
+                int numChannels = cachedNumChannels;
 
                 // Calculate pitch factor (2^(semitones/12))
                 double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
+                
+                // Get the parent viewport to determine visible area
+                auto* viewport = findParentComponentOfClass<juce::Viewport>();
+                if (!viewport) return;
+                
+                // Get the visible area within the container
+                auto visibleArea = viewport->getViewArea();
+                int visibleX = visibleArea.getX();
+                int visibleWidth = visibleArea.getWidth();
+                int containerWidth = getWidth(); // Total width of this component (the container)
 
-                double visibleSamples;
-                double startOffset = 0.0;
+                // Calculate which portion of the audio to render based on visible area
+                double startSample, endSample;
+                double samplesPerPixel;  // Declare once at the beginning
 
-                // Use the fixed viewport width stored in the parent SampleCard
-                int fixedWidth = 700; // default
-                if (auto* parent = findParentComponentOfClass<SampleCard>())
-                    fixedWidth = parent->fixedViewportWidth;
-
-                // Calculate base samples per pixel using the FIXED viewport width
-                double baseSamplesPerPixel = totalLength / fixedWidth;
-                double samplesPerPixel;
-
-                if (pitchOffset > 0) // Pitch UP - should look COMPRESSED (dense)
+                if (pitchOffset < 0) // Pitch DOWN - EXPANDED view (show more detail)
                 {
-                    // Show LESS of the waveform in the same space = compressed look
-                    double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
-                    visibleSamples = totalLength / compressionFactor;
-                    
-                    // For compressed look, samplesPerPixel should be SMALLER
-                    samplesPerPixel = baseSamplesPerPixel / compressionFactor;
-                    
-                    printf("Compression: pitch=%d, factor=%.3f, visible=%.0f of %.0f\n", 
-                        pitchOffset, compressionFactor, visibleSamples, totalLength);
-                }
-                else if (pitchOffset < 0) // Pitch DOWN - should look EXPANDED (wide)
-                {
-                    // Show MORE of the waveform = expanded look with scrollbar
+                    // Expansion factor: 2^(|pitchOffset|/12)
+                    // At -12 semitones: 2x expansion, at -24: 4x, at -48: 16x
                     double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
-                    visibleSamples = totalLength * expansionFactor;
+                    expansionFactor = juce::jmin(expansionFactor, 16.0); // Cap at 16x for -48 semitones
                     
-                    // For expanded look, samplesPerPixel should be LARGER
-                    samplesPerPixel = baseSamplesPerPixel * expansionFactor;
+                    // In expanded mode, we want to show MORE detail = FEWER samples per pixel
+                    // So samplesPerPixel should be SMALLER than normal
+                    double normalSamplesPerPixel = totalLength / visibleWidth;
+                    samplesPerPixel = normalSamplesPerPixel / expansionFactor;
                     
-                    printf("Expansion: pitch=%d, factor=%.3f, visible=%.0f of %.0f\n", 
-                        pitchOffset, expansionFactor, visibleSamples, totalLength);
+                    // Total samples we can show across the entire container
+                    double totalVisibleSamples = totalLength * expansionFactor;
+                    
+                    // Calculate scroll range and position
+                    double maxScroll = containerWidth - visibleWidth;
+                    double scrollPercentage = (maxScroll > 0) ? (double)visibleX / maxScroll : 0.0;
+                    
+                    // Start sample is offset by scroll percentage of the extra samples
+                    double extraSamples = totalVisibleSamples - totalLength;
+                    startSample = scrollPercentage * extraSamples;
+                    endSample = startSample + totalLength;
+                    
+                    printf("EXPANDED: pitch=%d, factor=%.2fx, samplesPerPixel=%.2f (normal=%.2f), startSample=%.0f\n", 
+                        pitchOffset, expansionFactor, samplesPerPixel, normalSamplesPerPixel, startSample);
                 }
-                else
+                else if (pitchOffset > 0) // Pitch UP - COMPRESSED view (show overview)
                 {
-                    visibleSamples = totalLength;
-                    samplesPerPixel = baseSamplesPerPixel;
+                    // Compression factor: 2^(pitchOffset/12)
+                    // At +12 semitones: show every other sample (50% density)
+                    // At +24 semitones: show 25% density, etc.
+                    double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
+                    compressionFactor = juce::jmin(compressionFactor, 16.0); // Cap at 16x for +48 semitones
+                    
+                    // Show the entire file, but with fewer samples per pixel
+                    startSample = 0;
+                    endSample = totalLength;
+                    
+                    // Samples per pixel is INCREASED by compression factor
+                    // This means each pixel represents more samples = compressed look
+                    samplesPerPixel = (totalLength / visibleWidth) * compressionFactor;
+                    
+                    printf("COMPRESSED: pitch=%d, factor=%.2fx, samplesPerPixel=%.2f\n", 
+                        pitchOffset, compressionFactor, samplesPerPixel);
+                }
+                else // pitchOffset == 0 - Normal view
+                {
+                    startSample = 0;
+                    endSample = totalLength;
+                    samplesPerPixel = totalLength / visibleWidth;
+                    
+                    printf("NORMAL: samplesPerPixel=%.2f\n", samplesPerPixel);
                 }
 
-                // Ensure visibleSamples is within valid range
-                visibleSamples = juce::jlimit(1.0, totalLength * 16.0, visibleSamples);
+                // Clamp to valid range
+                startSample = juce::jlimit(0.0, totalLength, startSample);
+                endSample = juce::jlimit(0.0, totalLength, endSample);
+
+                int numVisiblePixels = visibleWidth;
+
+                // Ensure samplesPerPixel is at least 1
                 samplesPerPixel = juce::jmax(1.0, samplesPerPixel);
-
-                double displayFactor;
-                if (pitchOffset > 0)
-                    displayFactor = 1.0 / std::pow(2.0, pitchOffset / 12.0);
-                else if (pitchOffset < 0)
-                    displayFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
-                else
-                    displayFactor = 1.0;
-
-                printf("DEBUG: pitch=%d, baseSPP=%.2f, actualSPP=%.2f, factor=%.2fx\n", 
-                    pitchOffset, baseSamplesPerPixel, samplesPerPixel, displayFactor);
 
                 // Buffer for reading audio data
                 int bufferSize = 4096;
                 juce::AudioBuffer<float> tempBuffer(numChannels, bufferSize);
 
-                // DEBUG flags - moved to outer scope so they're available everywhere
-                bool foundNegative = false;
-                bool foundPositive = false;
-
-
-                // ===== DRAW MAIN WAVEFORM (WITH PITCH ADJUSTMENT) =====
+                // ===== DRAW MAIN WAVEFORM =====
                 if (numChannels > 1)
                 {
                     // STEREO - Draw channels in separate vertical spaces
                     juce::Path leftPath, rightPath;
-                    bool leftStarted = false, rightStarted = false;
                     
                     // Split the height into two equal parts
                     int halfHeight = renderHeight / 2;
@@ -2864,19 +2899,19 @@ public:
                     int rightTop = renderTop + halfHeight;
                     int rightBottom = renderBottom;
                     
-                    for (int x = 0; x < renderWidth; ++x)
+                    // Only render the visible portion
+                    for (int x = 0; x < numVisiblePixels; ++x)
                     {
-                        double startSample = startOffset + x * samplesPerPixel;
-                        double endSample = startSample + samplesPerPixel;
+                        double pixelStartSample = startSample + x * samplesPerPixel;
+                        double pixelEndSample = pixelStartSample + samplesPerPixel;
                         
-                        if (startSample >= totalLength) break;
+                        if (pixelStartSample >= totalLength) break;
                         
-                        endSample = std::min(endSample, totalLength);
-                        int numSamples = static_cast<int>(endSample - startSample);
+                        pixelEndSample = std::min(pixelEndSample, totalLength);
+                        int numSamples = static_cast<int>(pixelEndSample - pixelStartSample);
                         if (numSamples <= 0) continue;
                         
-                        // FIXED: Use cachedReader instead of reader
-                        cachedReader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+                        cachedReader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(pixelStartSample), true, true);
                         
                         float leftMin = 1.0f, leftMax = -1.0f;
                         float rightMin = 1.0f, rightMax = -1.0f;
@@ -2887,68 +2922,63 @@ public:
                             leftMin = std::min(leftMin, leftVal);
                             leftMax = std::max(leftMax, leftVal);
                             
-                            if (leftVal < 0) foundNegative = true;
-                            if (leftVal > 0) foundPositive = true;
-                            
-                            float rightVal = tempBuffer.getSample(1, s);
-                            rightMin = std::min(rightMin, rightVal);
-                            rightMax = std::max(rightMax, rightVal);
-                            
-                            if (rightVal < 0) foundNegative = true;
-                            if (rightVal > 0) foundPositive = true;
+                            if (numChannels > 1)
+                            {
+                                float rightVal = tempBuffer.getSample(1, s);
+                                rightMin = std::min(rightMin, rightVal);
+                                rightMax = std::max(rightMax, rightVal);
+                            }
+                        }
+
+                        // Debug for first pixel
+                        if (x == 0)
+                        {
+                            printf("Pixel 0: startSample=%.0f, leftMin=%.2f, leftMax=%.2f, rightMin=%.2f, rightMax=%.2f\n", 
+                                pixelStartSample, leftMin, leftMax, rightMin, rightMax);
                         }
                         
                         float xPos = waveformBounds.getX() + x;
                         
-                        // Left channel - use FULL height of top half
+                        // Left channel - draw a vertical line from min to max
                         float leftCenterY = leftTop + halfHeight * 0.5f;
                         float leftHalfHeight = halfHeight * 0.5f;
                         
-                        // CORRECTED: Use the full range of the channel's lane
-                        // Map -1.0 to bottom of lane, +1.0 to top of lane
-                        float leftYMin = leftCenterY + (leftMin * leftHalfHeight);  // Note: + instead of -
+                        float leftYMin = leftCenterY - (leftMin * leftHalfHeight);
                         float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
                         float leftYTop = std::min(leftYMin, leftYMax);
                         float leftYBottom = std::max(leftYMin, leftYMax);
                         
-                        leftYTop = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYTop);
-                        leftYBottom = juce::jlimit(leftTop + 1.0f, leftBottom - 1.0f, leftYBottom);
+                        leftYTop = juce::jlimit((float)leftTop + 1.0f, (float)leftBottom - 1.0f, leftYTop);
+                        leftYBottom = juce::jlimit((float)leftTop + 1.0f, (float)leftBottom - 1.0f, leftYBottom);
                         
-                        if (!leftStarted)
-                        {
-                            leftPath.startNewSubPath(xPos, leftYTop);
-                            leftStarted = true;
-                        }
+                        // Draw a vertical line for this column
+                        leftPath.startNewSubPath(xPos, leftYTop);
                         leftPath.lineTo(xPos, leftYBottom);
                         
-                        // Right channel - use FULL height of bottom half
+                        // Right channel - draw a vertical line from min to max
                         float rightCenterY = rightTop + halfHeight * 0.5f;
                         float rightHalfHeight = halfHeight * 0.5f;
                         
-                        // CORRECTED: Use the full range of the channel's lane
-                        float rightYMin = rightCenterY + (rightMin * rightHalfHeight);  // Note: + instead of -
+                        float rightYMin = rightCenterY - (rightMin * rightHalfHeight);
                         float rightYMax = rightCenterY - (rightMax * rightHalfHeight);
                         float rightYTop = std::min(rightYMin, rightYMax);
                         float rightYBottom = std::max(rightYMin, rightYMax);
                         
-                        rightYTop = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYTop);
-                        rightYBottom = juce::jlimit(rightTop + 1.0f, rightBottom - 1.0f, rightYBottom);
+                        rightYTop = juce::jlimit((float)rightTop + 1.0f, (float)rightBottom - 1.0f, rightYTop);
+                        rightYBottom = juce::jlimit((float)rightTop + 1.0f, (float)rightBottom - 1.0f, rightYBottom);
                         
-                        if (!rightStarted)
-                        {
-                            rightPath.startNewSubPath(xPos, rightYTop);
-                            rightStarted = true;
-                        }
+                        // Draw a vertical line for this column
+                        rightPath.startNewSubPath(xPos, rightYTop);
                         rightPath.lineTo(xPos, rightYBottom);
                     }
                     
-                    // Draw left channel (green) - top half
-                    g.setColour(juce::Colours::lightgreen);
-                    g.strokePath(leftPath, juce::PathStrokeType(1.0f));
+                    // Draw left channel (bright green) - top half
+                    g.setColour(juce::Colours::greenyellow);
+                    g.strokePath(leftPath, juce::PathStrokeType(1.5f));
                     
-                    // Draw right channel (orange) - bottom half
-                    g.setColour(juce::Colours::orange);
-                    g.strokePath(rightPath, juce::PathStrokeType(1.0f));
+                    // Draw right channel (gold) - bottom half
+                    g.setColour(juce::Colours::gold);
+                    g.strokePath(rightPath, juce::PathStrokeType(1.5f));
                     
                     // Draw channel separator line
                     g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
@@ -2966,19 +2996,19 @@ public:
                     juce::Path waveformPath;
                     bool pathStarted = false;
 
-                    for (int x = 0; x < renderWidth; ++x)
+                    // Only render the visible portion
+                    for (int x = 0; x < numVisiblePixels; ++x)
                     {
-                        double startSample = startOffset + x * samplesPerPixel;
-                        double endSample = startSample + samplesPerPixel;
+                        double pixelStartSample = startSample + x * samplesPerPixel;
+                        double pixelEndSample = pixelStartSample + samplesPerPixel;
 
-                        if (startSample >= totalLength) break;
+                        if (pixelStartSample >= totalLength) break;
 
-                        endSample = std::min(endSample, totalLength);
-                        int numSamples = static_cast<int>(endSample - startSample);
+                        pixelEndSample = std::min(pixelEndSample, totalLength);
+                        int numSamples = static_cast<int>(pixelEndSample - pixelStartSample);
                         if (numSamples <= 0) continue;
 
-                        // FIXED: Use cachedReader instead of reader
-                        cachedReader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(startSample), true, true);
+                        cachedReader->read(&tempBuffer, 0, numSamples, static_cast<juce::int64>(pixelStartSample), true, true);
 
                         float minVal = 1.0f;
                         float maxVal = -1.0f;
@@ -2990,8 +3020,6 @@ public:
                                 float val = tempBuffer.getSample(ch, s);
                                 minVal = std::min(minVal, val);
                                 maxVal = std::max(maxVal, val);
-                                if (val < 0) foundNegative = true;
-                                if (val > 0) foundPositive = true;
                             }
                         }
 
@@ -3029,7 +3057,8 @@ public:
                 // Draw center line (always)
                 g.setColour(juce::Colours::darkgrey.withAlpha(0.3f));
                 g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
-            }
+            }           
+
             
             void setPitchFactor(double factor, int semitones)
             {
@@ -3233,63 +3262,66 @@ void adjustPitchUp()
         waveformViewport.setViewPosition(0, 0);
     }  */
     
-void updateWaveformSize()
-{
-    if (waveformComponent == nullptr || waveformContainer == nullptr)
-        return;
-    
-    auto viewportBounds = waveformViewport.getLocalBounds();
-    
-    // Sanity check - if viewport bounds are invalid, return
-    if (viewportBounds.getWidth() <= 0 || viewportBounds.getHeight() <= 0)
-        return;
-    
-    int containerWidth;
-    
-    if (pitchOffset < 0) // Pitch DOWN - EXPAND
+    void updateWaveformSize()
     {
-        double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
-        // Cap the expansion factor to prevent extreme values
-        expansionFactor = juce::jmin(expansionFactor, 16.0); // Max 16x expansion
+        if (waveformComponent == nullptr || waveformContainer == nullptr)
+            return;
         
-        // Calculate container width with a safety maximum
-        containerWidth = (int)(viewportBounds.getWidth() * expansionFactor);
+        auto viewportBounds = waveformViewport.getLocalBounds();
         
-        // Absolute maximum width to prevent crashes (e.g., 10000 pixels)
-        const int maxWidth = 10000;
+        // Sanity check - if viewport bounds are invalid, return
+        if (viewportBounds.getWidth() <= 0 || viewportBounds.getHeight() <= 0)
+            return;
+        
+        int containerWidth;
+        
+        if (pitchOffset < 0) // Pitch DOWN - EXPAND (container gets wider)
+        {
+            // Expansion follows the table: -12 = 2x, -24 = 4x, -48 = 16x
+            double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
+            expansionFactor = juce::jmin(expansionFactor, 16.0); // Max 16x expansion
+            
+            containerWidth = (int)(viewportBounds.getWidth() * expansionFactor);
+            
+            printf("EXPAND: pitch=%d, factor=%.3f, container=%d (%.1fx wider)\n", 
+                pitchOffset, expansionFactor, containerWidth, expansionFactor);
+        }
+        else if (pitchOffset > 0) // Pitch UP - container stays at viewport width
+        {
+            containerWidth = viewportBounds.getWidth();
+            double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
+            printf("COMPRESS: pitch=%d, factor=%.3f, container=%d (visual density %.1fx)\n", 
+                pitchOffset, compressionFactor, containerWidth, compressionFactor);
+        }
+        else // pitchOffset == 0
+        {
+            containerWidth = viewportBounds.getWidth();
+            printf("NORMAL: pitch=0, container=%d\n", containerWidth);
+        }
+        
+        // Absolute maximum width to prevent crashes
+        const int maxWidth = 11200; // 700px * 16 = 11200px for -48 semitones
         if (containerWidth > maxWidth)
         {
             containerWidth = maxWidth;
             printf("WARNING: Container width capped at %d pixels\n", maxWidth);
         }
         
-        printf("EXPAND: pitch=%d, factor=%.3f, container=%d\n", 
-               pitchOffset, expansionFactor, containerWidth);
+        // Ensure minimum width
+        containerWidth = juce::jmax(containerWidth, viewportBounds.getWidth());
+        
+        waveformContainer->setBounds(0, 0, containerWidth, viewportBounds.getHeight());
+        waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
+        
+        // Show horizontal scrollbar only when container is wider than viewport
+        bool needsHorizontalScroll = (containerWidth > viewportBounds.getWidth());
+        waveformViewport.setScrollBarsShown(false, needsHorizontalScroll);
+        
+        // Reset scroll position to left
+        waveformViewport.setViewPosition(0, 0);
+        
+        waveformComponent->repaint();
     }
-    else if (pitchOffset > 0) // Pitch UP - COMPRESS
-    {
-        containerWidth = viewportBounds.getWidth();
-    }
-    else
-    {
-        containerWidth = viewportBounds.getWidth();
-    }
-    
-    // Ensure minimum width
-    containerWidth = juce::jmax(containerWidth, 100);
-    
-    waveformContainer->setBounds(0, 0, containerWidth, viewportBounds.getHeight());
-    waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
-    
-    waveformViewport.setViewPosition(0, 0);
-    
-    bool needsHorizontalScroll = containerWidth > viewportBounds.getWidth();
-    waveformViewport.setScrollBarsShown(false, needsHorizontalScroll);
-    
-    waveformComponent->repaint();
-}
-
-
 
     // UI Components
     juce::TextButton addButton{"+"};
@@ -3807,7 +3839,6 @@ public:
 private:
     OwnerInterface& owner;
 };
-
 
 
 
