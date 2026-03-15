@@ -111,7 +111,27 @@ public:
         pitchUpButton.onClick = [this] { adjustPitchUp(); };
         pitchUpButton.setTooltip("Higher pitch (shorter duration)");
         addAndMakeVisible(pitchUpButton);
-        
+
+        // Volume knob
+        volumeKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        volumeKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        volumeKnob.setRange(0.0, 1.0, 0.01);
+        volumeKnob.setValue(1.0, juce::dontSendNotification);
+        volumeKnob.setTooltip("Volume (drag up/down)");
+        volumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFF9DC95C));
+        volumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF4A4A4A));
+        volumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
+        volumeKnob.onValueChange = [this] {
+            listeners.call([this](Listener& l) { l.volumeChanged((float)volumeKnob.getValue()); });
+        };
+        addAndMakeVisible(volumeKnob);
+
+        volumeLabel.setText("Vol", juce::dontSendNotification);
+        volumeLabel.setJustificationType(juce::Justification::centred);
+        volumeLabel.setFont(juce::Font(10.0f));
+        volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF7A7A7A));
+        addAndMakeVisible(volumeLabel);
+
         // Update pitch button labels with tooltips
         updatePitchButtonLabels();
         
@@ -211,28 +231,29 @@ public:
         area.removeFromTop(5);
         
         // ===== Pitch adjustment controls row (below waveform, left corner) =====
-        // Keep this at 30px to match top row
-        auto pitchRow = area.removeFromTop(30);
+        auto pitchRow = area.removeFromTop(50);
         
-        // Position pitch controls at left corner (similar to channel controls layout)
-        const int pitchControlWidth = 180;  // 60 + 60 + 60 (matching Learn button width)
-        auto pitchControlArea = pitchRow.withWidth(pitchControlWidth);
+        // Position pitch buttons vertically centred (30px tall) within the 50px row
+        const int pitchControlWidth = 180;  // 60 + 60 + 60
+        auto pitchControlArea = pitchRow.withWidth(pitchControlWidth)
+                                        .withSizeKeepingCentre(pitchControlWidth, 30);
         pitchDownButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
+
+        // Volume knob on right side — full 50px height gives a proper circle
+        volumeLabel.setBounds(pitchRow.removeFromRight(28).removeFromBottom(20).reduced(2));
+        volumeKnob.setBounds(pitchRow.removeFromRight(60).reduced(2));
         
-        // Add margin before bottom row
-        area.removeFromTop(8);  // Increased from 10 to 8 to save space
-        
-        // ===== FIX: Bottom row with MORE space for filename and pitch/duration indicators =====
-        auto bottomRow = area.removeFromBottom(32);  // Increased from 25 to 32px
-        
-        // ===== CRITICAL FIX #4: Sample name gets 65% of width (increased from 50%) =====
+        // Add margin before bottom info row
+        area.removeFromTop(5);
+
+        // ===== Bottom info row: filename | duration | pitch indicator =====
+        auto bottomRow = area.removeFromTop(22);
+
         int filenameWidth = static_cast<int>(bottomRow.getWidth() * 0.65);
         sampleNameLabel.setBounds(bottomRow.removeFromLeft(filenameWidth).reduced(3, 0));
-        
-        // ===== CRITICAL FIX #5: Pitch indicator in bottom row (left of duration) =====
-        // Give pitch indicator about 35% of remaining width
+
         int pitchIndicatorWidth = static_cast<int>(bottomRow.getWidth() * 0.50);
         bottomInfoLabel.setBounds(bottomRow.removeFromRight(pitchIndicatorWidth).reduced(3, 0));
         
@@ -266,6 +287,12 @@ public:
     int getMidiNote() const { return currentMidiNote; }
     int getMidiChannel() const { return currentMidiChannel; }
     int getPitchOffset() const { return pitchOffset; }
+    float getVolume() const { return (float)volumeKnob.getValue(); }
+
+    void setVolume(float volume)
+    {
+        volumeKnob.setValue(juce::jlimit(0.0f, 1.0f, volume), juce::dontSendNotification);
+    }
 
     void setPitchOffset(int offset)
     {
@@ -480,6 +507,7 @@ public:
         virtual void midiChannelChanged(int newChannel) = 0;
         virtual void learningModeChanged(bool isLearning) = 0;
         virtual void pitchOffsetChanged(int pitchOffset) = 0;
+        virtual void volumeChanged(float volume) = 0;
     };
     
     void addListener(Listener* listener)
@@ -1129,6 +1157,10 @@ void adjustPitchUp()
     juce::Label pitchLabel;
     juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
     int pitchOffset = 0;  // Pitch offset in semitones
+
+    // Volume knob
+    juce::Slider volumeKnob;
+    juce::Label volumeLabel;
     
     // Pitch factor tracking for visual feedback
     double currentPitchFactor = 1.0;  // 1.0 = no pitch change

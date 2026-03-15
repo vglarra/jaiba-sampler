@@ -116,6 +116,7 @@ private:
     void midiChannelChanged(int newChannel) override;
     void learningModeChanged(bool isLearning) override;
     void pitchOffsetChanged(int pitchOffset) override;
+    void volumeChanged(float volume) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -156,6 +157,10 @@ private:
     // MIDI Learn mode
     bool isLearningMode = false;
     
+    //==============================================================================
+    // Volume
+    std::atomic<float> volumeGain { 1.0f };
+
     //==============================================================================
     // Sine wave generation
     bool sineWaveActive = false;

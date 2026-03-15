@@ -143,7 +143,12 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     midiMessages.addEvents(incomingMidi, 0, bufferToFill.numSamples, 0);
     
     sampler.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
-    
+
+    // Apply volume gain
+    float gain = volumeGain.load();
+    if (gain != 1.0f)
+        bufferToFill.buffer->applyGain(gain);
+
     if (sineWaveActive)
     {
         const double sampleRate = sampler.getSampleRate();
@@ -236,7 +241,7 @@ void MainComponent::resized()
     
     // Make the card take most of the body width, but with max width to maintain proportions
     const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
-    const int cardHeight = 280;     // Fixed height
+    const int cardHeight = 320;     // Fixed height
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
     
@@ -1414,6 +1419,13 @@ void MainComponent::pitchOffsetChanged(int pitchOffset)
     saveCurrentSession();
 }
 
+void MainComponent::volumeChanged(float volume)
+{
+    volumeGain.store(volume);
+    if (configManager != nullptr)
+        configManager->saveVolume(volume);
+}
+
 void MainComponent::handleMidiLearn(int noteNumber)
 {
     if (isLearningMode)
@@ -1463,6 +1475,11 @@ void MainComponent::loadLastSession()
     printf("Loading saved MIDI device: %s\n", savedDevice.toRawUTF8());
     printf("Loading saved pitch offset: %+d\n", savedPitchOffset);
     
+    // Restore volume
+    float savedVolume = configManager->getVolume();
+    volumeGain.store(savedVolume);
+    sampleCard.setVolume(savedVolume);
+
     // Apply MIDI settings to the card
     sampleCard.setMidiNote(savedNote);
     sampleCard.setPitchOffset(savedPitchOffset);

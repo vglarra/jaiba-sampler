@@ -72,6 +72,12 @@ public:
         propertiesFile->setValue("pitchOffset", pitchOffset);
         propertiesFile->saveIfNeeded();
     }
+
+    void saveVolume(float volume)
+    {
+        propertiesFile->setValue("volume", (double)volume);
+        propertiesFile->saveIfNeeded();
+    }
     
     // NEW: Save audio device settings
     void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
@@ -101,6 +107,11 @@ public:
     int getPitchOffset()
     {
         return propertiesFile->getIntValue("pitchOffset", 0); // Default to 0 (no transposition)
+    }
+
+    float getVolume()
+    {
+        return (float)propertiesFile->getDoubleValue("volume", 1.0); // Default to full volume
     }
     
     // NEW: Get audio settings
