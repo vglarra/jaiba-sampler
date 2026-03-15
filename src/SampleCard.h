@@ -12,7 +12,7 @@ public:
     SampleCard(juce::AudioFormatManager& formatManager)
         : formatManager(formatManager)
     {
-        // Configure + button (top left)
+        // Top row buttons - font size 14px to match pitch controls
         addButton.setButtonText("+");
         addButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         addButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -30,7 +30,7 @@ public:
         nextButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
         addAndMakeVisible(nextButton);
         
-        // Configure MIDI Learn button
+        // Learn button - font size 14px
         learnButton.setButtonText("Learn");
         learnButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         learnButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -54,26 +54,23 @@ public:
         
         // Set up fixed info labels
         topInfoLabel.setJustificationType(juce::Justification::centred);
-        topInfoLabel.setFont(juce::Font(10.0f, juce::Font::bold));
         topInfoLabel.setColour(juce::Label::textColourId, juce::Colours::white);
         topInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         addAndMakeVisible(topInfoLabel);
         
         bottomInfoLabel.setJustificationType(juce::Justification::centred);
-        bottomInfoLabel.setFont(juce::Font(12.0f, juce::Font::bold));
         bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colours::yellow);
         bottomInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         addAndMakeVisible(bottomInfoLabel);
         
-        // Configure MIDI Note display (no +/- buttons, will add Learn button)
+        // MIDI Note display - font size 14px (reduced from 16px)
         midiNoteLabel.setJustificationType(juce::Justification::centred);
-        midiNoteLabel.setFont(juce::Font(16.0f, juce::Font::bold));
         midiNoteLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
         midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
         updateMidiNoteDisplay();
         addAndMakeVisible(midiNoteLabel);
         
-        // Configure MIDI Channel controls
+        // MIDI Channel controls - font size 14px
         channelDownButton.setButtonText("-");
         channelDownButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         channelDownButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -82,7 +79,6 @@ public:
         addAndMakeVisible(channelDownButton);
         
         midiChannelLabel.setJustificationType(juce::Justification::centred);
-        midiChannelLabel.setFont(juce::Font(16.0f, juce::Font::bold));
         midiChannelLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
         midiChannelLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
         updateMidiChannelDisplay();
@@ -95,7 +91,7 @@ public:
         channelUpButton.setTooltip("Next MIDI channel");
         addAndMakeVisible(channelUpButton);
         
-        // Configure Pitch adjustment controls (similar to channel controls)
+        // Pitch adjustment controls - keep font size 14px (already correct)
         pitchDownButton.setButtonText("Down");
         pitchDownButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         pitchDownButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -104,7 +100,6 @@ public:
         addAndMakeVisible(pitchDownButton);
         
         pitchLabel.setJustificationType(juce::Justification::centred);
-        pitchLabel.setFont(juce::Font(16.0f, juce::Font::bold));
         pitchLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
         pitchLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
         updatePitchDisplay(pitchOffset);
@@ -122,14 +117,14 @@ public:
         
         // Configure sample name label (bottom left)
         sampleNameLabel.setJustificationType(juce::Justification::centredLeft);
-        sampleNameLabel.setFont(juce::Font(14.0f, juce::Font::bold));
+        sampleNameLabel.setFont(juce::Font(11.0f, juce::Font::bold));  // Matches pitch indicator
         sampleNameLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
         addAndMakeVisible(sampleNameLabel);
-        
+
         // Configure duration label (bottom right)
         durationLabel.setJustificationType(juce::Justification::centredRight);
-        durationLabel.setFont(juce::Font(12.0f));
-        durationLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+        durationLabel.setFont(juce::Font(11.0f, juce::Font::bold));  // Matches other indicators
+        durationLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFADFF2F));  // Light yellow-green
         addAndMakeVisible(durationLabel);
         
     }
@@ -146,23 +141,23 @@ public:
     void resized() override
     {
         auto area = getLocalBounds();
-        
         // Add margin around the entire card content (10px on each side)
         area.reduce(10, 10);
         
-        // Top row: All controls (height 40px to fit all buttons)
-        auto topRow = area.removeFromTop(40);
+        // ===== CRITICAL FIX: Change top row height from 40px to 30px =====
+        // Top row: All controls (height 30px to match pitch controls)
+        auto topRow = area.removeFromTop(30);  // ← CHANGED from 40 to 30
         
-        // + button on left (40px)
+        // + button on left (40px wide, 30px tall)
         addButton.setBounds(topRow.removeFromLeft(40).reduced(2));
         
         // Leave some space between + button and MIDI controls
         topRow.removeFromLeft(10);
         
-        // Learn button (60px)
+        // Learn button (60px wide, 30px tall)
         learnButton.setBounds(topRow.removeFromLeft(60).reduced(2));
         
-        // MIDI Note display (100px)
+        // MIDI Note display (100px wide, 30px tall)
         midiNoteLabel.setBounds(topRow.removeFromLeft(100).reduced(2));
         
         // Space between note and channel controls
@@ -186,18 +181,23 @@ public:
         // Calculate waveform height based on 4cm at 96 DPI (fixed height)
         const int waveformHeight = static_cast<int>(4 * 37.8); // ~151px
         
-        // Waveform area with viewport
-        auto waveformRect = area.removeFromTop(waveformHeight);
+        // ===== CRITICAL FIX #1: Reserve scrollbar space in viewport bounds =====
+        // Viewport needs extra height to accommodate scrollbar without squishing content
+        auto waveformRect = area.removeFromTop(waveformHeight + SCROLLBAR_HEIGHT);
         waveformViewport.setBounds(waveformRect);
         fixedViewportWidth = waveformRect.getWidth();
         
         // Position fixed info labels within the viewport area
         auto labelArea = waveformRect;
         topInfoLabel.setBounds(labelArea.removeFromTop(20).reduced(2));
-        bottomInfoLabel.setBounds(labelArea.removeFromBottom(25).reduced(2));
-
-        // Configure scrollbar visibility - ALWAYS show horizontal scrollbar
-        waveformViewport.setScrollBarsShown(false, true); // false for vertical, true for horizontal
+        
+        // ===== CRITICAL FIX #2: Remove bottomInfoLabel from waveform viewport =====
+        // It will now appear in the bottom row with the duration indicator
+        // bottomInfoLabel.setBounds(labelArea.removeFromBottom(25).reduced(2));  // REMOVE THIS
+        
+        // ===== CRITICAL FIX #3: Always show scrollbar (disable when not needed) =====
+        // This prevents height changes when scrollbar appears/disappears
+        waveformViewport.setScrollBarsShown(false, true); // false for vertical, ALWAYS true for horizontal
         
         // ADD SAFETY CHECK HERE
         if (waveformComponent != nullptr && waveformContainer != nullptr)
@@ -210,28 +210,41 @@ public:
         // Add 5px margin between waveform and pitch controls
         area.removeFromTop(5);
         
-        // Pitch adjustment controls row (below waveform, left corner)
+        // ===== Pitch adjustment controls row (below waveform, left corner) =====
+        // Keep this at 30px to match top row
         auto pitchRow = area.removeFromTop(30);
         
         // Position pitch controls at left corner (similar to channel controls layout)
         const int pitchControlWidth = 180;  // 60 + 60 + 60 (matching Learn button width)
         auto pitchControlArea = pitchRow.withWidth(pitchControlWidth);
-        
         pitchDownButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         
         // Add margin before bottom row
-        area.removeFromTop(10);
+        area.removeFromTop(8);  // Increased from 10 to 8 to save space
         
-        // Bottom row: sample name and duration
-        auto bottomRow = area.removeFromBottom(25);
+        // ===== FIX: Bottom row with MORE space for filename and pitch/duration indicators =====
+        auto bottomRow = area.removeFromBottom(32);  // Increased from 25 to 32px
         
-        // Sample name on left
-        sampleNameLabel.setBounds(bottomRow.removeFromLeft(bottomRow.getWidth() / 2).reduced(5, 0));
+        // ===== CRITICAL FIX #4: Sample name gets 65% of width (increased from 50%) =====
+        int filenameWidth = static_cast<int>(bottomRow.getWidth() * 0.65);
+        sampleNameLabel.setBounds(bottomRow.removeFromLeft(filenameWidth).reduced(3, 0));
         
-        // Duration on right
-        durationLabel.setBounds(bottomRow.reduced(5, 0));
+        // ===== CRITICAL FIX #5: Pitch indicator in bottom row (left of duration) =====
+        // Give pitch indicator about 35% of remaining width
+        int pitchIndicatorWidth = static_cast<int>(bottomRow.getWidth() * 0.50);
+        bottomInfoLabel.setBounds(bottomRow.removeFromRight(pitchIndicatorWidth).reduced(3, 0));
+        
+        // ===== CRITICAL FIX #6: Duration on far right (remaining space) =====
+        durationLabel.setBounds(bottomRow.reduced(3, 0));
+        
+        // Make duration label use smaller font to fit better
+        durationLabel.setFont(juce::Font(11.0f));
+        
+        // Make pitch indicator use yellow color and bold font
+        bottomInfoLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+        bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colours::yellow);
     }
     
     void paint(juce::Graphics& g) override
@@ -302,13 +315,17 @@ public:
         sampleNameLabel.setText(name, juce::dontSendNotification);
         repaint();
     }
-    
+
     void setDuration(double seconds)
     {
         originalDuration = seconds;
+        
         // Apply current pitch factor to the displayed duration
         double adjustedDuration = seconds / currentPitchFactor;
         durationLabel.setText(juce::String(adjustedDuration, 2) + " s", juce::dontSendNotification);
+        
+        // Force repaint
+        durationLabel.repaint();
     }
     
     void setPitchFactor(double semitones)
@@ -334,60 +351,59 @@ public:
     
     void updatePitchDisplay(int semitones)
     {
-    // REMOVE the sign inversion - show actual semitone value
-    juce::String displayText;
-    if (semitones == 0)
-        displayText = "0";
-    else if (semitones > 0)
-        displayText = "+" + juce::String(semitones);
-    else
-        displayText = juce::String(semitones);
-
-    pitchLabel.setText(displayText + " st", juce::dontSendNotification);
+        // Show actual semitone value
+        juce::String displayText;
+        if (semitones == 0)
+            displayText = "0";
+        else if (semitones > 0)
+            displayText = "+" + juce::String(semitones);
+        else
+            displayText = juce::String(semitones);
         
-        // Calculate pitch factor correctly:
-        // Positive semitones = pitch up = shorter duration = divide by factor
-        // Negative semitones = pitch down = longer duration = divide by factor
+        pitchLabel.setText(displayText + " st", juce::dontSendNotification);
+        
+        // Calculate pitch factor correctly
         double pitchFactor = std::pow(2.0, semitones / 12.0);
-        
-        // Store the current pitch factor for duration calculations
         currentPitchFactor = pitchFactor;
         
         if (waveformComponent != nullptr)
             waveformComponent->setPitchFactor(pitchFactor, semitones);
         
-        // Update duration display - CORRECTED FORMULA
+        // Update duration display
         if (originalDuration > 0)
         {
-            // When pitch goes UP (positive semitones), duration gets SHORTER
-            // So we divide by pitchFactor (which is > 1 for positive semitones)
             double adjustedDuration = originalDuration / pitchFactor;
             durationLabel.setText(juce::String(adjustedDuration, 2) + " s", juce::dontSendNotification);
-            
-            printf("Pitch: %+d, Factor: %.3f, Original: %.2f, Adjusted: %.2f\n", 
-                   semitones, pitchFactor, originalDuration, adjustedDuration);
+            printf("Pitch: %+d, Factor: %.3f, Original: %.2f, Adjusted: %.2f\n",
+                semitones, pitchFactor, originalDuration, adjustedDuration);
         }
         
-        // Update the fixed info labels
-    if (semitones > 0)
-    {
-        topInfoLabel.setText("COMPRESSED", juce::dontSendNotification);
-        bottomInfoLabel.setText("PITCH UP: +" + juce::String(semitones), juce::dontSendNotification);
+        // ===== CRITICAL FIX: Always show pitch indicator (even at 0) =====
+        if (semitones > 0)
+        {
+            topInfoLabel.setText("COMPRESSED", juce::dontSendNotification);
+            bottomInfoLabel.setText("PITCH UP: +" + juce::String(semitones), juce::dontSendNotification);
+        }
+        else if (semitones < 0)
+        {
+            topInfoLabel.setText("EXPANDED", juce::dontSendNotification);
+            bottomInfoLabel.setText("PITCH DOWN: " + juce::String(semitones), juce::dontSendNotification);
+        }
+        else
+        {
+            // ===== NEW: Show "ORIGINAL" label when pitch is 0 =====
+            topInfoLabel.setText("", juce::dontSendNotification);
+            bottomInfoLabel.setText("ORIGINAL WAVE", juce::dontSendNotification);  // ← Changed from empty string
+        }
+        
+        // Force label updates
+        topInfoLabel.repaint();
+        bottomInfoLabel.repaint();
+        durationLabel.repaint();
+        
+        updateWaveformSize();
     }
-    else if (semitones < 0)
-    {
-        topInfoLabel.setText("EXPANDED", juce::dontSendNotification);
-        bottomInfoLabel.setText("PITCH DOWN: " + juce::String(semitones), juce::dontSendNotification);
-    }
-    else
-    {
-        topInfoLabel.setText("", juce::dontSendNotification);
-        bottomInfoLabel.setText("", juce::dontSendNotification);
-    }
-    
-    updateWaveformSize();
-    }
-    
+        
     void setWaveform(const juce::File& audioFile)
     {
         // CRITICAL FIX #1: Store file FIRST
@@ -521,6 +537,9 @@ public:
     }
 
     private:
+
+        // Scrollbar height constant (Windows default ~14px, macOS ~15px)
+        static constexpr int SCROLLBAR_HEIGHT = 14;
         // High-resolution WaveformComponent that renders directly from audio data
         // In SampleCard.h - Replace the WaveformComponent class with this fixed version
 
@@ -1053,8 +1072,12 @@ void adjustPitchUp()
         if (viewportBounds.getWidth() <= 0 || viewportBounds.getHeight() <= 0)
             return;
         
-        int containerWidth;
+        // ===== CRITICAL FIX: Account for scrollbar height in container =====
+        // Container height = viewport height - scrollbar height (so waveform isn't squished)
+        int containerHeight = viewportBounds.getHeight() - SCROLLBAR_HEIGHT;
+        containerHeight = juce::jmax(1, containerHeight);  // Ensure positive
         
+        int containerWidth;
         if (pitchOffset < 0) // Pitch DOWN - EXPAND
         {
             double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
@@ -1071,11 +1094,14 @@ void adjustPitchUp()
         containerWidth = juce::jmin(containerWidth, maxWidth);
         containerWidth = juce::jmax(containerWidth, viewportBounds.getWidth());
         
-        waveformContainer->setBounds(0, 0, containerWidth, viewportBounds.getHeight());
+        // Set container bounds with adjusted height
+        waveformContainer->setBounds(0, 0, containerWidth, containerHeight);
         waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
         
-        bool needsHorizontalScroll = (containerWidth > viewportBounds.getWidth());
-        waveformViewport.setScrollBarsShown(false, needsHorizontalScroll);
+        // ===== CRITICAL FIX #3: Always show scrollbar (true = always visible) =====
+        waveformViewport.setScrollBarsShown(false, true);
+        
+        // Reset scroll position
         waveformViewport.setViewPosition(0, 0);
         waveformComponent->repaint();
     }
