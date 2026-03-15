@@ -4,6 +4,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <cmath>  // ← ADD THIS for std::ceil
 
 class SampleCard : public juce::Component
 {
@@ -64,13 +65,13 @@ public:
         bottomInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         addAndMakeVisible(bottomInfoLabel);
         
-    // Configure MIDI Note display (no +/- buttons, will add Learn button)
-    midiNoteLabel.setJustificationType(juce::Justification::centred);
-    midiNoteLabel.setFont(juce::Font(16.0f, juce::Font::bold));
-    midiNoteLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
-    midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
-    updateMidiNoteDisplay();
-    addAndMakeVisible(midiNoteLabel);
+        // Configure MIDI Note display (no +/- buttons, will add Learn button)
+        midiNoteLabel.setJustificationType(juce::Justification::centred);
+        midiNoteLabel.setFont(juce::Font(16.0f, juce::Font::bold));
+        midiNoteLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
+        midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+        updateMidiNoteDisplay();
+        addAndMakeVisible(midiNoteLabel);
         
         // Configure MIDI Channel controls
         channelDownButton.setButtonText("-");
@@ -389,63 +390,53 @@ public:
     
     void setWaveform(const juce::File& audioFile)
     {
-        // Store the original file
+        // CRITICAL FIX #1: Store file FIRST
         currentAudioFile = audioFile;
         
         if (audioFile.existsAsFile())
         {
-            // Create a reader to get audio info
             std::unique_ptr<juce::AudioFormatReader> reader(
                 formatManager.createReaderFor(audioFile));
             
             if (reader != nullptr)
             {
-                // Store original info for duration calculations
                 originalLengthInSamples = reader->lengthInSamples;
                 originalSampleRate = reader->sampleRate;
                 
-                // CRITICAL: Reset scroll position before updating size
+                // CRITICAL FIX #2: Reset scroll position BEFORE anything else
                 waveformViewport.setViewPosition(0, 0);
                 
-                // Update waveform container size
-                updateWaveformSize();
-                
-                // Notify the waveform component about the new file
+                // CRITICAL FIX #3: Force waveform component to invalidate ALL cache
                 if (waveformComponent != nullptr)
                 {
-                    waveformComponent->setFile(audioFile);
+                    waveformComponent->setFile(audioFile);  // This clears cachedTotalLength, cachedNumChannels
                 }
                 
-                printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n", 
+                // CRITICAL FIX #4: Update container size AFTER file is set
+                updateWaveformSize();
+                
+                printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n",
                     audioFile.getFileName().toRawUTF8(),
                     originalSampleRate / 1000.0,
                     originalLengthInSamples);
             }
             else
             {
-                printf("ERROR: Could not create reader for file: %s\n", 
+                printf("ERROR: Could not create reader for file: %s\n",
                     audioFile.getFileName().toRawUTF8());
                 
-                // Clear waveform if we can't read it
                 if (waveformComponent != nullptr)
-                {
                     waveformComponent->setFile(juce::File());
-                }
             }
         }
         else
         {
-            // Clear audio info if file doesn't exist
             originalLengthInSamples = 0;
             originalSampleRate = 0.0;
             
-            // Clear the waveform component
             if (waveformComponent != nullptr)
-            {
                 waveformComponent->setFile(juce::File());
-            }
             
-            // Force a repaint
             repaint();
         }
     }
@@ -553,8 +544,13 @@ public:
                 if (currentAudioFile != newFile)
                 {
                     currentAudioFile = newFile;
+                    
+                    // CRITICAL FIX: Clear ALL cached data, not just the reader
                     cachedReader.reset();
-                    lastFile = juce::File();
+                    cachedTotalLength = 0;      // CLEAR THIS!
+                    cachedNumChannels = 0;      // CLEAR THIS!
+                    lastFile = juce::File();    // Force cache regeneration on next paint()
+                    
                     repaint();
                 }
             }
@@ -579,19 +575,28 @@ public:
                     return;
                 }
                 
-                // Check if file has changed or reader is null
-                if (currentAudioFile != lastFile || cachedReader == nullptr)
+                // ===== CRITICAL FIX #1: Regenerate reader if cache is invalid =====
+                if (currentAudioFile != lastFile || cachedReader == nullptr || cachedTotalLength <= 0)
                 {
                     cachedReader.reset(formatManager.createReaderFor(currentAudioFile));
                     lastFile = currentAudioFile;
+                    
                     if (cachedReader != nullptr)
                     {
                         cachedTotalLength = cachedReader->lengthInSamples;
                         cachedNumChannels = cachedReader->numChannels;
+                        printf("WaveformComponent: NEW READER for %s (%lld samples, %d ch)\n",
+                            currentAudioFile.getFileName().toRawUTF8(),
+                            cachedTotalLength, cachedNumChannels);
+                    }
+                    else
+                    {
+                        printf("WaveformComponent: FAILED to create reader for %s\n",
+                            currentAudioFile.getFileName().toRawUTF8());
                     }
                 }
                 
-                if (cachedReader == nullptr)
+                if (cachedReader == nullptr || cachedTotalLength <= 0)
                 {
                     g.setColour(juce::Colours::darkgrey);
                     g.setFont(juce::Font(14.0f, juce::Font::italic));
@@ -603,53 +608,53 @@ public:
                 if (waveformBounds.isEmpty())
                     return;
                 
-                // ===== KEY FIX: Use component width (container), not viewport visible width =====
-                int renderWidth = waveformBounds.getWidth();   // Full container width
+                int renderWidth = waveformBounds.getWidth();
                 int renderHeight = waveformBounds.getHeight();
                 int renderTop = waveformBounds.getY();
                 int renderBottom = waveformBounds.getBottom();
                 int renderCenter = waveformBounds.getCentreY();
                 
-                double totalLength = cachedTotalLength;
+                // Use double for totalLength to preserve precision
+                double totalLength = static_cast<double>(cachedTotalLength);
                 int numChannels = cachedNumChannels;
                 
-                // Calculate pitch factor
-                double pitchFactor = std::pow(2.0, pitchOffset / 12.0);
+                if (totalLength <= 0 || numChannels <= 0)
+                {
+                    g.setColour(juce::Colours::darkgrey);
+                    g.setFont(juce::Font(14.0f, juce::Font::italic));
+                    g.drawText("Invalid audio data", bounds, juce::Justification::centred, true);
+                    return;
+                }
                 
-                // ===== CORRECTED samplesPerPixel calculation =====
+                // ===== CRITICAL FIX #2: Calculate samplesPerPixel correctly =====
                 double samplesPerPixel;
-                double startSample = 0;
-                double endSample = totalLength;
+                double expansionFactor = 1.0;
                 
                 if (pitchOffset < 0) // Pitch DOWN - EXPANDED view
                 {
-                    // Expansion factor: 2^(|pitchOffset|/12)
-                    double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
-                    expansionFactor = juce::jmin(expansionFactor, 16.0); // Cap at 16x
+                    expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
+                    expansionFactor = juce::jmin(expansionFactor, 16.0);
                     
-                    // CRITICAL FIX: samplesPerPixel should be SMALLER to show MORE detail
-                    // Original audio length spread across EXPANDED container width
+                    // CRITICAL: Allow fractional samplesPerPixel (below 1.0!)
                     samplesPerPixel = totalLength / (renderWidth * expansionFactor);
-                    samplesPerPixel = juce::jmax(1.0, samplesPerPixel);
                     
-                    printf("EXPANDED: pitch=%d, expansion=%.2fx, renderWidth=%d, samplesPerPixel=%.2f\n",
-                        pitchOffset, expansionFactor, renderWidth, samplesPerPixel);
+                    // Cap at 0.5 minimum (allows 2x oversampling)
+                    // DO NOT cap at 1.0 - this breaks -40 to -48 semitones!
+                    if (samplesPerPixel < 0.5)
+                        samplesPerPixel = 0.5;
+                    
+                    printf("EXPANDED: pitch=%d, expansion=%.2fx, renderWidth=%d, samplesPerPixel=%.4f, totalSamples=%lld\n",
+                        pitchOffset, expansionFactor, renderWidth, samplesPerPixel, cachedTotalLength);
                 }
                 else if (pitchOffset > 0) // Pitch UP - COMPRESSED view
                 {
                     double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
                     compressionFactor = juce::jmin(compressionFactor, 16.0);
-                    
-                    // Show entire file compressed into viewport width
                     samplesPerPixel = (totalLength / renderWidth) * compressionFactor;
-                    
-                    printf("COMPRESSED: pitch=%d, compression=%.2fx, samplesPerPixel=%.2f\n",
-                        pitchOffset, compressionFactor, samplesPerPixel);
                 }
                 else // Normal view
                 {
                     samplesPerPixel = totalLength / renderWidth;
-                    printf("NORMAL: samplesPerPixel=%.2f\n", samplesPerPixel);
                 }
                 
                 // Buffer for reading audio data
@@ -668,20 +673,34 @@ public:
                     int rightTop = renderTop + halfHeight;
                     int rightBottom = renderBottom;
                     
-                    // CRITICAL FIX: Iterate across FULL renderWidth, not visible area
                     for (int x = 0; x < renderWidth; ++x)
                     {
-                        double pixelStartSample = startSample + x * samplesPerPixel;
+                        double pixelStartSample = x * samplesPerPixel;
                         double pixelEndSample = pixelStartSample + samplesPerPixel;
                         
-                        if (pixelStartSample >= totalLength) break;
-                        pixelEndSample = std::min(pixelEndSample, totalLength);
+                        if (pixelStartSample >= totalLength)
+                            break;
                         
-                        int numSamples = static_cast<int>(pixelEndSample - pixelStartSample);
-                        if (numSamples <= 0) continue;
+                        pixelEndSample = juce::jmin(pixelEndSample, totalLength);
                         
-                        cachedReader->read(&tempBuffer, 0, numSamples, 
-                                        static_cast<juce::int64>(pixelStartSample), true, true);
+                        // ===== CRITICAL FIX #3: Ensure at least 1 sample is read =====
+                        double sampleRange = pixelEndSample - pixelStartSample;
+                        int numSamples = juce::jmax(1, static_cast<int>(std::ceil(sampleRange)));
+                        
+                        // Ensure we don't read past the end of the file
+                        if (pixelStartSample + numSamples > totalLength)
+                            numSamples = static_cast<int>(totalLength - pixelStartSample);
+                        
+                        if (numSamples <= 0)
+                            continue;
+                        
+                        // Read audio data
+                        bool readSuccess = cachedReader->read(&tempBuffer, 0, numSamples,
+                                                            static_cast<juce::int64>(pixelStartSample),
+                                                            true, true);
+                        
+                        if (!readSuccess)
+                            continue;
                         
                         float leftMin = 1.0f, leftMax = -1.0f;
                         float rightMin = 1.0f, rightMax = -1.0f;
@@ -736,14 +755,14 @@ public:
                     g.strokePath(rightPath, juce::PathStrokeType(1.5f));
                     
                     g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
-                    g.drawHorizontalLine(renderTop + halfHeight, 
+                    g.drawHorizontalLine(renderTop + halfHeight,
                                         waveformBounds.getX(), waveformBounds.getRight());
                     
                     g.setColour(juce::Colours::lightgrey);
                     g.setFont(juce::Font(10.0f));
-                    g.drawText("L", waveformBounds.getX() + 5, leftTop + 2, 20, 15, 
+                    g.drawText("L", waveformBounds.getX() + 5, leftTop + 2, 20, 15,
                             juce::Justification::left);
-                    g.drawText("R", waveformBounds.getX() + 5, rightTop + 2, 20, 15, 
+                    g.drawText("R", waveformBounds.getX() + 5, rightTop + 2, 20, 15,
                             juce::Justification::left);
                 }
                 else
@@ -752,20 +771,32 @@ public:
                     juce::Path waveformPath;
                     bool pathStarted = false;
                     
-                    // CRITICAL FIX: Iterate across FULL renderWidth
                     for (int x = 0; x < renderWidth; ++x)
                     {
-                        double pixelStartSample = startSample + x * samplesPerPixel;
+                        double pixelStartSample = x * samplesPerPixel;
                         double pixelEndSample = pixelStartSample + samplesPerPixel;
                         
-                        if (pixelStartSample >= totalLength) break;
-                        pixelEndSample = std::min(pixelEndSample, totalLength);
+                        if (pixelStartSample >= totalLength)
+                            break;
                         
-                        int numSamples = static_cast<int>(pixelEndSample - pixelStartSample);
-                        if (numSamples <= 0) continue;
+                        pixelEndSample = juce::jmin(pixelEndSample, totalLength);
                         
-                        cachedReader->read(&tempBuffer, 0, numSamples, 
-                                        static_cast<juce::int64>(pixelStartSample), true, true);
+                        // ===== CRITICAL FIX #3: Ensure at least 1 sample is read =====
+                        double sampleRange = pixelEndSample - pixelStartSample;
+                        int numSamples = juce::jmax(1, static_cast<int>(std::ceil(sampleRange)));
+                        
+                        if (pixelStartSample + numSamples > totalLength)
+                            numSamples = static_cast<int>(totalLength - pixelStartSample);
+                        
+                        if (numSamples <= 0)
+                            continue;
+                        
+                        bool readSuccess = cachedReader->read(&tempBuffer, 0, numSamples,
+                                                            static_cast<juce::int64>(pixelStartSample),
+                                                            true, true);
+                        
+                        if (!readSuccess)
+                            continue;
                         
                         float minVal = 1.0f;
                         float maxVal = -1.0f;
@@ -1029,34 +1060,23 @@ void adjustPitchUp()
             double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
             expansionFactor = juce::jmin(expansionFactor, 16.0);
             containerWidth = (int)(viewportBounds.getWidth() * expansionFactor);
-            
-            printf("EXPAND: pitch=%d, factor=%.3f, container=%d\n",
-                pitchOffset, expansionFactor, containerWidth);
         }
-        else if (pitchOffset > 0) // Pitch UP - Keep viewport width
-        {
-            containerWidth = viewportBounds.getWidth();
-        }
-        else // Normal
+        else
         {
             containerWidth = viewportBounds.getWidth();
         }
         
-        // Cap maximum width to prevent crashes
+        // Cap maximum width
         const int maxWidth = 11200;
-        if (containerWidth > maxWidth)
-            containerWidth = maxWidth;
-        
+        containerWidth = juce::jmin(containerWidth, maxWidth);
         containerWidth = juce::jmax(containerWidth, viewportBounds.getWidth());
         
         waveformContainer->setBounds(0, 0, containerWidth, viewportBounds.getHeight());
         waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
         
-        // Show scrollbar only when needed
         bool needsHorizontalScroll = (containerWidth > viewportBounds.getWidth());
         waveformViewport.setScrollBarsShown(false, needsHorizontalScroll);
         waveformViewport.setViewPosition(0, 0);
-        
         waveformComponent->repaint();
     }
 
