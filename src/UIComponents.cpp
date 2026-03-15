@@ -222,14 +222,14 @@ void SampleListModel::paintListBoxItem(int rowNumber, juce::Graphics& g,
         int rootNote = mainOwner.getSampleRootNote(rowNumber);
         
         if (rowIsSelected)
-            g.fillAll(juce::Colours::lightblue);
-        
+            g.fillAll(juce::Colour(0xFF3C5A7A));
+
         juce::String text = name;
-        text += " [" + juce::String(lowNote) + "-" + 
-                juce::String(highNote) + "] root:" + 
+        text += " [" + juce::String(lowNote) + "-" +
+                juce::String(highNote) + "] root:" +
                 juce::String(rootNote);
-        
-        g.setColour(juce::Colours::black);
+
+        g.setColour(juce::Colour(0xFFCECECE));
         g.drawText(text, 2, 0, width - 4, height, 
                   juce::Justification::centredLeft, true);
     }
@@ -247,7 +247,7 @@ MappingComponent::MappingComponent(OwnerInterface& owner) : owner(owner)
 {
     // Set up the UI
     addAndMakeVisible(owner.getSampleListBox());
-    owner.getSampleListBox().setColour(juce::ListBox::backgroundColourId, juce::Colours::white);
+    owner.getSampleListBox().setColour(juce::ListBox::backgroundColourId, juce::Colour(0xFF363636));
     
     addAndMakeVisible(owner.getAddSampleButton());
     owner.getAddSampleButton().addListener(this);

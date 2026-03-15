@@ -15,26 +15,26 @@ public:
         // Top row buttons - font size 14px to match pitch controls
         addButton.setButtonText("+");
         addButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        addButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        addButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
         addAndMakeVisible(addButton);
         
         // Configure Prev button (top right)
         prevButton.setButtonText("Prev");
         prevButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        prevButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        prevButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
         addAndMakeVisible(prevButton);
         
         // Configure Next button (top right)
         nextButton.setButtonText("Next");
         nextButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        nextButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        nextButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
         addAndMakeVisible(nextButton);
         
         // Learn button - font size 14px
         learnButton.setButtonText("Learn");
         learnButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        learnButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-        learnButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::orange);
+        learnButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        learnButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFE25A00));
         learnButton.onClick = [this] { toggleLearnMode(); };
         addAndMakeVisible(learnButton);
         
@@ -54,39 +54,39 @@ public:
         
         // Set up fixed info labels
         topInfoLabel.setJustificationType(juce::Justification::centred);
-        topInfoLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+        topInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
         topInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         addAndMakeVisible(topInfoLabel);
         
         bottomInfoLabel.setJustificationType(juce::Justification::centred);
-        bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colours::yellow);
+        bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFD4A017));
         bottomInfoLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         addAndMakeVisible(bottomInfoLabel);
         
         // MIDI Note display - font size 14px (reduced from 16px)
         midiNoteLabel.setJustificationType(juce::Justification::centred);
-        midiNoteLabel.setColour(juce::Label::textColourId, juce::Colours::orange);
-        midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+        midiNoteLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFE25A00));
+        midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
         updateMidiNoteDisplay();
         addAndMakeVisible(midiNoteLabel);
         
         // MIDI Channel controls - font size 14px
         channelDownButton.setButtonText("-");
         channelDownButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        channelDownButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        channelDownButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
         channelDownButton.onClick = [this] { adjustMidiChannel(-1); };
         channelDownButton.setTooltip("Previous MIDI channel");
         addAndMakeVisible(channelDownButton);
         
         midiChannelLabel.setJustificationType(juce::Justification::centred);
-        midiChannelLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
-        midiChannelLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+        midiChannelLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
+        midiChannelLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
         updateMidiChannelDisplay();
         addAndMakeVisible(midiChannelLabel);
         
         channelUpButton.setButtonText("+");
         channelUpButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        channelUpButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        channelUpButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
         channelUpButton.onClick = [this] { adjustMidiChannel(1); };
         channelUpButton.setTooltip("Next MIDI channel");
         addAndMakeVisible(channelUpButton);
@@ -94,20 +94,20 @@ public:
         // Pitch adjustment controls - keep font size 14px (already correct)
         pitchDownButton.setButtonText("Down");
         pitchDownButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        pitchDownButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        pitchDownButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
         pitchDownButton.onClick = [this] { adjustPitchDown(); };
         pitchDownButton.setTooltip("Lower pitch (longer duration)");
         addAndMakeVisible(pitchDownButton);
         
         pitchLabel.setJustificationType(juce::Justification::centred);
-        pitchLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
-        pitchLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF3A3A3A));
+        pitchLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF8CBCDC));
+        pitchLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
         updatePitchDisplay(pitchOffset);
         addAndMakeVisible(pitchLabel);
         
         pitchUpButton.setButtonText("Up");
         pitchUpButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        pitchUpButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        pitchUpButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
         pitchUpButton.onClick = [this] { adjustPitchUp(); };
         pitchUpButton.setTooltip("Higher pitch (shorter duration)");
         addAndMakeVisible(pitchUpButton);
@@ -118,13 +118,13 @@ public:
         // Configure sample name label (bottom left)
         sampleNameLabel.setJustificationType(juce::Justification::centredLeft);
         sampleNameLabel.setFont(juce::Font(11.0f, juce::Font::bold));  // Matches pitch indicator
-        sampleNameLabel.setColour(juce::Label::textColourId, juce::Colours::lightblue);
+        sampleNameLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF8CBCDC));
         addAndMakeVisible(sampleNameLabel);
 
         // Configure duration label (bottom right)
         durationLabel.setJustificationType(juce::Justification::centredRight);
         durationLabel.setFont(juce::Font(11.0f, juce::Font::bold));  // Matches other indicators
-        durationLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFADFF2F));  // Light yellow-green
+        durationLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
         addAndMakeVisible(durationLabel);
         
     }
@@ -244,17 +244,17 @@ public:
         
         // Make pitch indicator use yellow color and bold font
         bottomInfoLabel.setFont(juce::Font(11.0f, juce::Font::bold));
-        bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colours::yellow);
+        bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFD4A017));
     }
     
     void paint(juce::Graphics& g) override
     {
         // Draw card background
-        g.setColour(juce::Colour(0xFF2A2A2A));
+        g.setColour(juce::Colour(0xFF2E2E2E));
         g.fillRoundedRectangle(getLocalBounds().toFloat(), 8.0f);
-        
+
         // Draw card border
-        g.setColour(juce::Colour(0xFF4A4A4A));
+        g.setColour(juce::Colour(0xFF5A5A5A));
         g.drawRoundedRectangle(getLocalBounds().toFloat(), 8.0f, 1.5f);
     }
     
@@ -579,16 +579,16 @@ public:
                 auto bounds = getLocalBounds();
                 
                 // Fill background
-                g.setColour(juce::Colour(0xFF3A3A3A));
+                g.setColour(juce::Colour(0xFF363636));
                 g.fillRect(bounds);
-                
+
                 // Draw border
-                g.setColour(juce::Colours::lightgrey);
+                g.setColour(juce::Colour(0xFF505050));
                 g.drawRect(bounds, 2);
                 
                 if (!currentAudioFile.existsAsFile())
                 {
-                    g.setColour(juce::Colours::darkgrey);
+                    g.setColour(juce::Colour(0xFF585858));
                     g.setFont(juce::Font(14.0f, juce::Font::italic));
                     g.drawText("No waveform", bounds, juce::Justification::centred, true);
                     return;
@@ -617,7 +617,7 @@ public:
                 
                 if (cachedReader == nullptr || cachedTotalLength <= 0)
                 {
-                    g.setColour(juce::Colours::darkgrey);
+                    g.setColour(juce::Colour(0xFF585858));
                     g.setFont(juce::Font(14.0f, juce::Font::italic));
                     g.drawText("Cannot read audio file", bounds, juce::Justification::centred, true);
                     return;
@@ -639,7 +639,7 @@ public:
                 
                 if (totalLength <= 0 || numChannels <= 0)
                 {
-                    g.setColour(juce::Colours::darkgrey);
+                    g.setColour(juce::Colour(0xFF585858));
                     g.setFont(juce::Font(14.0f, juce::Font::italic));
                     g.drawText("Invalid audio data", bounds, juce::Justification::centred, true);
                     return;
@@ -653,15 +653,11 @@ public:
                 {
                     expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
                     expansionFactor = juce::jmin(expansionFactor, 16.0);
-                    
-                    // CRITICAL: Allow fractional samplesPerPixel (below 1.0!)
-                    samplesPerPixel = totalLength / (renderWidth * expansionFactor);
-                    
-                    // Cap at 0.5 minimum (allows 2x oversampling)
-                    // DO NOT cap at 1.0 - this breaks -40 to -48 semitones!
-                    if (samplesPerPixel < 0.5)
-                        samplesPerPixel = 0.5;
-                    
+
+                    // renderWidth is already viewportWidth * expansionFactor (set in updateWaveformSize)
+                    // so simply divide totalLength by renderWidth to get samples per pixel
+                    samplesPerPixel = totalLength / renderWidth;
+
                     printf("EXPANDED: pitch=%d, expansion=%.2fx, renderWidth=%d, samplesPerPixel=%.4f, totalSamples=%lld\n",
                         pitchOffset, expansionFactor, renderWidth, samplesPerPixel, cachedTotalLength);
                 }
@@ -767,17 +763,17 @@ public:
                         rightPath.lineTo(xPos, rightYBottom);
                     }
                     
-                    g.setColour(juce::Colours::greenyellow);
+                    g.setColour(juce::Colour(0xFF9DC95C));
                     g.strokePath(leftPath, juce::PathStrokeType(1.5f));
-                    
-                    g.setColour(juce::Colours::gold);
+
+                    g.setColour(juce::Colour(0xFFD4A017));
                     g.strokePath(rightPath, juce::PathStrokeType(1.5f));
                     
-                    g.setColour(juce::Colours::darkgrey.withAlpha(0.5f));
+                    g.setColour(juce::Colour(0xFF585858).withAlpha(0.5f));
                     g.drawHorizontalLine(renderTop + halfHeight,
                                         waveformBounds.getX(), waveformBounds.getRight());
                     
-                    g.setColour(juce::Colours::lightgrey);
+                    g.setColour(juce::Colour(0xFF7A7A7A));
                     g.setFont(juce::Font(10.0f));
                     g.drawText("L", waveformBounds.getX() + 5, leftTop + 2, 20, 15,
                             juce::Justification::left);
@@ -788,38 +784,37 @@ public:
                 {
                     // MONO - draw single waveform
                     juce::Path waveformPath;
-                    bool pathStarted = false;
-                    
+
                     for (int x = 0; x < renderWidth; ++x)
                     {
                         double pixelStartSample = x * samplesPerPixel;
                         double pixelEndSample = pixelStartSample + samplesPerPixel;
-                        
+
                         if (pixelStartSample >= totalLength)
                             break;
-                        
+
                         pixelEndSample = juce::jmin(pixelEndSample, totalLength);
-                        
+
                         // ===== CRITICAL FIX #3: Ensure at least 1 sample is read =====
                         double sampleRange = pixelEndSample - pixelStartSample;
                         int numSamples = juce::jmax(1, static_cast<int>(std::ceil(sampleRange)));
-                        
+
                         if (pixelStartSample + numSamples > totalLength)
                             numSamples = static_cast<int>(totalLength - pixelStartSample);
-                        
+
                         if (numSamples <= 0)
                             continue;
-                        
+
                         bool readSuccess = cachedReader->read(&tempBuffer, 0, numSamples,
                                                             static_cast<juce::int64>(pixelStartSample),
                                                             true, true);
-                        
+
                         if (!readSuccess)
                             continue;
-                        
+
                         float minVal = 1.0f;
                         float maxVal = -1.0f;
-                        
+
                         for (int s = 0; s < numSamples; ++s)
                         {
                             for (int ch = 0; ch < numChannels; ++ch)
@@ -829,7 +824,7 @@ public:
                                 maxVal = std::max(maxVal, val);
                             }
                         }
-                        
+
                         float xPos = waveformBounds.getX() + x;
                         float centerY = renderTop + renderHeight * 0.5f;
                         float halfHeight = renderHeight * 0.5f;
@@ -839,28 +834,25 @@ public:
                         float yBottom = std::max(yMin, yMax);
                         yTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yTop);
                         yBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yBottom);
-                        
-                        if (!pathStarted)
-                        {
-                            waveformPath.startNewSubPath(xPos, yTop);
-                            pathStarted = true;
-                        }
+
+                        // Draw vertical bar from min to max for each pixel (full waveform)
+                        waveformPath.startNewSubPath(xPos, yTop);
                         waveformPath.lineTo(xPos, yBottom);
                     }
                     
                     // Set color based on pitch
                     if (pitchOffset > 0)
-                        g.setColour(juce::Colours::orange);
+                        g.setColour(juce::Colour(0xFFE25A00));
                     else if (pitchOffset < 0)
-                        g.setColour(juce::Colours::cyan);
+                        g.setColour(juce::Colour(0xFF5B9BD5));
                     else
-                        g.setColour(juce::Colours::lightgreen);
+                        g.setColour(juce::Colour(0xFF9DC95C));
                     
                     g.strokePath(waveformPath, juce::PathStrokeType(1.5f));
                 }
                 
                 // Draw center line
-                g.setColour(juce::Colours::darkgrey.withAlpha(0.3f));
+                g.setColour(juce::Colour(0xFF585858).withAlpha(0.3f));
                 g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
             }
 

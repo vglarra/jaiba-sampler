@@ -43,13 +43,13 @@ MainComponent::MainComponent()
     // Configure buttons
     menuButton.setButtonText("Menu");
     menuButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-    menuButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    menuButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
     addAndMakeVisible(menuButton);
     menuButton.addListener(this);
     
       testToneButton.setButtonText("Test tone");
       testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-      testToneButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+      testToneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
       addAndMakeVisible(testToneButton);
       testToneButton.addListener(this);
 
@@ -74,17 +74,17 @@ MainComponent::MainComponent()
       addAndMakeVisible(audioDeviceInfoLabel);
       audioDeviceInfoLabel.setJustificationType(juce::Justification::left);
       audioDeviceInfoLabel.setFont(juce::Font(12.0f));
-      audioDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+      audioDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF7A7A7A));
 
       addAndMakeVisible(midiDeviceInfoLabel);
       midiDeviceInfoLabel.setJustificationType(juce::Justification::left);
       midiDeviceInfoLabel.setFont(juce::Font(12.0f));
-      midiDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
+      midiDeviceInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF7A7A7A));
 
       addAndMakeVisible(cpuUsageLabel);
       cpuUsageLabel.setJustificationType(juce::Justification::right);
       cpuUsageLabel.setFont(juce::Font(12.0f, juce::Font::bold));
-      cpuUsageLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
+      cpuUsageLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
     
     // Configure sliders
     lowNoteSlider.setRange(0, 127, 1);
@@ -175,10 +175,10 @@ void MainComponent::releaseResources()
 //==============================================================================
 void MainComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xFF2A2A2A));
+    g.fillAll(juce::Colour(0xFF4A4A4A));
     
     // Draw title
-    g.setColour(juce::Colours::white);
+    g.setColour(juce::Colour(0xFFCECECE));
     g.setFont(juce::Font(24.0f, juce::Font::bold));
     
     // Title area matches reduced top bar height (30px)
@@ -186,8 +186,8 @@ void MainComponent::paint(juce::Graphics& g)
     g.drawText("Jaiva Sampler V001", titleArea, juce::Justification::centred, true);
     
     // Draw separator lines
-    g.setColour(juce::Colours::darkgrey);
-    
+    g.setColour(juce::Colour(0xFF404040));
+
     // Line below title (adjusted for reduced top bar)
     auto lineY = titleArea.getBottom() + 5;
     g.drawHorizontalLine(lineY, 20, getWidth() - 20);
@@ -367,7 +367,7 @@ void MainComponent::toggleSineWave()
     {
         sineWavePhase = 0.0;
         testToneButton.setButtonText("Stop tone");
-        testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colours::lightcoral);
+        testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFFE25A00));
     }
     else
     {

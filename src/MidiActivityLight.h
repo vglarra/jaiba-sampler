@@ -23,24 +23,24 @@ public:
         auto bounds = getLocalBounds().toFloat().reduced(2);
         
         // Draw outer circle (always visible)
-        g.setColour(juce::Colours::darkgrey);
+        g.setColour(juce::Colour(0xFF2D2D2D));
         g.fillEllipse(bounds);
         
         // Draw inner circle based on activity
         if (isActive)
         {
             // Bright yellow for note activity
-            g.setColour(juce::Colours::yellow);
+            g.setColour(juce::Colour(0xFF9DC95C));
             g.fillEllipse(bounds.reduced(2));
         }
         else
         {
             // Dark/black when off
-            g.setColour(juce::Colour(0xFF222222));
+            g.setColour(juce::Colour(0xFF1A1A1A));
             g.fillEllipse(bounds.reduced(2));
-            
+
             // Add a subtle outline to show the light is present but off
-            g.setColour(juce::Colours::darkgrey.brighter(0.3f));
+            g.setColour(juce::Colour(0xFF3A3A3A));
             g.drawEllipse(bounds.reduced(2), 0.5f);
         }
     }

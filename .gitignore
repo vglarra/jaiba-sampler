@@ -41,6 +41,9 @@ CTestTestfile.cmake
 CMakeUserPresets.json
 _deps/
 
+# AI assistant context
+CLAUDE.md
+
 # Temp files
 *.log
 *.tmp
