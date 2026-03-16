@@ -1002,30 +1002,33 @@ void MainComponent::updateSamplerSounds()
         class MemoryAudioReader : public juce::AudioFormatReader
         {
         public:
-            MemoryAudioReader(juce::AudioBuffer<float>* buffer, double sourceSampleRate, int sourceChannels)
+            MemoryAudioReader(juce::AudioBuffer<float>* buffer, double sourceSampleRate, int sourceChannels,
+                              juce::int64 startOffset = 0)
                 : juce::AudioFormatReader(nullptr, "Memory Reader"),
-                  cachedBuffer(buffer)
+                  cachedBuffer(buffer),
+                  sampleOffset(startOffset)
             {
                 sampleRate = sourceSampleRate;
                 numChannels = sourceChannels;
-                lengthInSamples = buffer->getNumSamples();
+                lengthInSamples = buffer->getNumSamples() - startOffset;
                 bitsPerSample = 32;
                 usesFloatingPointData = true;
             }
-            
+
             // Override readSamples method (required by JUCE AudioFormatReader)
             bool readSamples(int* const* destChannels, int numDestChannels,
                             int startOffsetInDestBuffer, juce::int64 startSampleInFile,
                             int numSamples) override
             {
+                juce::int64 actualStart = startSampleInFile + sampleOffset;
                 // Convert int* to float* for processing
                 for (int channel = 0; channel < numDestChannels; ++channel)
                 {
                     if (destChannels[channel] != nullptr && channel < cachedBuffer->getNumChannels())
                     {
                         float* dest = reinterpret_cast<float*>(destChannels[channel]);
-                        const float* src = cachedBuffer->getReadPointer(channel, (int)startSampleInFile);
-                        
+                        const float* src = cachedBuffer->getReadPointer(channel, (int)actualStart);
+
                         for (int i = 0; i < numSamples; ++i)
                         {
                             dest[startOffsetInDestBuffer + i] = src[i];
@@ -1034,15 +1037,26 @@ void MainComponent::updateSamplerSounds()
                 }
                 return true;
             }
-            
+
         private:
             juce::AudioBuffer<float>* cachedBuffer;
+            juce::int64 sampleOffset;
         };
         
+        // Compute start sample offset from startPointSeconds
+        juce::int64 startOffset = 0;
+        if (sample->startPointSeconds > 0.0 && sample->sampleRate > 0)
+        {
+            startOffset = (juce::int64)(sample->startPointSeconds * sample->sampleRate);
+            juce::int64 maxOffset = (juce::int64)sample->audioData->getNumSamples() - 1;
+            startOffset = juce::jlimit((juce::int64)0, maxOffset, startOffset);
+        }
+
         auto* reader = new MemoryAudioReader(
             sample->audioData.get(),
             sample->sampleRate,
-            sample->numChannels
+            sample->numChannels,
+            startOffset
         );
         
         // IMPORTANT FIX: Create note range that includes ALL notes that should trigger this sample
@@ -1184,7 +1198,7 @@ void MainComponent::navigateToFile(int index)
     }
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, int pitchOffsetToUse)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, int pitchOffsetToUse, double startPointSecondsToUse)
 {
     // Create reader on background thread
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -1256,7 +1270,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, i
     sample->audioData = std::move(buffer);
     
     // Update UI on message thread
-    juce::MessageManager::callAsync([this, sample, file, autoPlay]() {
+    juce::MessageManager::callAsync([this, sample, file, autoPlay, startPointSecondsToUse]() {
         // Stop any currently playing notes
         sampler.allNotesOff(1, false);
         
@@ -1278,7 +1292,14 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, i
         sample->rootNote = sampleCard.getMidiNote();
         sample->lowNote = sampleCard.getMidiNote();
         sample->highNote = sampleCard.getMidiNote();
-        
+
+        // Apply start point: restore saved value or reset to 0 for new files
+        sample->startPointSeconds = startPointSecondsToUse;
+        if (startPointSecondsToUse > 0.0)
+            sampleCard.setStartPoint(startPointSecondsToUse);
+        else
+            sampleCard.resetStartPoint();
+
         updateSamplerSounds();
         sampleCard.setMidiNote(sample->rootNote);
         sampleCard.setPitchOffset(sample->pitchOffset);
@@ -1426,6 +1447,21 @@ void MainComponent::volumeChanged(float volume)
         configManager->saveVolume(volume);
 }
 
+void MainComponent::startPointChanged(double startPointSeconds)
+{
+    {
+        juce::ScopedLock lock(sampleLock);
+        if (!samples.isEmpty())
+            samples[0]->startPointSeconds = startPointSeconds;
+    }
+    updateSamplerSounds();
+
+    if (configManager != nullptr)
+        configManager->saveStartPoint(startPointSeconds);
+
+    printf("Start point set to: %.3f s\n", startPointSeconds);
+}
+
 void MainComponent::handleMidiLearn(int noteNumber)
 {
     if (isLearningMode)
@@ -1514,6 +1550,9 @@ void MainComponent::loadLastSession()
         }
     }
     
+    // Load start point setting
+    double savedStartPoint = configManager->getStartPoint();
+
     // Load last sample if it exists
     juce::File lastSample = configManager->getLastSample();
     if (lastSample.existsAsFile())
@@ -1522,11 +1561,11 @@ void MainComponent::loadLastSession()
         if (formatManager.findFormatForFileExtension(lastSample.getFileExtension()) != nullptr)
         {
             printf("Loading last session sample: %s (NO AUTO-PLAY)\n", lastSample.getFileName().toRawUTF8());
-            
+
             // Set current folder to the sample's directory
             currentFolder = lastSample.getParentDirectory();
             scanCurrentFolderForAudioFiles();
-            
+
             // Find the index of this file in the folder
             for (int i = 0; i < folderAudioFiles.size(); ++i)
             {
@@ -1536,9 +1575,9 @@ void MainComponent::loadLastSession()
                     break;
                 }
             }
-            
-            // Load the sample but DON'T auto-play it, using the saved pitch offset
-            loadSampleFileAsync(lastSample, false, savedPitchOffset);
+
+            // Load the sample but DON'T auto-play it, using the saved pitch offset and start point
+            loadSampleFileAsync(lastSample, false, savedPitchOffset, savedStartPoint);
         }
     }
 }

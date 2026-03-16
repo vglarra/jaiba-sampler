@@ -49,7 +49,7 @@ public:
         // Set up the viewport
         waveformViewport.setViewedComponent(waveformContainer.get(), false);
         waveformViewport.setScrollBarsShown(true, false); // Show vertical scroll bar? false, show horizontal? true
-        waveformViewport.setScrollOnDragEnabled(true);
+        waveformViewport.setScrollOnDragEnabled(false); // Disabled so waveform can capture mouse for marker drag
         addAndMakeVisible(waveformViewport);
         
         // Set up fixed info labels
@@ -131,6 +131,36 @@ public:
         volumeLabel.setFont(juce::Font(10.0f));
         volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF7A7A7A));
         addAndMakeVisible(volumeLabel);
+
+        // Start point knob
+        startKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        startKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        startKnob.setRange(0.0, 1.0, 0.001);
+        startKnob.setValue(0.0, juce::dontSendNotification);
+        startKnob.setTooltip("Start point (drag to set sample start)");
+        startKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFFFAA00));
+        startKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF4A4A4A));
+        startKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
+        startKnob.onValueChange = [this] {
+            startPointNormalized = (float)startKnob.getValue();
+            if (waveformComponent != nullptr)
+                waveformComponent->setStartMarker(startPointNormalized);
+            notifyStartPointChanged();
+        };
+        addAndMakeVisible(startKnob);
+
+        startKnobLabel.setText("Start", juce::dontSendNotification);
+        startKnobLabel.setJustificationType(juce::Justification::centred);
+        startKnobLabel.setFont(juce::Font(10.0f));
+        startKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF7A7A7A));
+        addAndMakeVisible(startKnobLabel);
+
+        // Wire waveform marker drag → knob + listeners
+        waveformComponent->onMarkerDragged = [this](float newNorm) {
+            startPointNormalized = newNorm;
+            startKnob.setValue(newNorm, juce::dontSendNotification);
+            notifyStartPointChanged();
+        };
 
         // Update pitch button labels with tooltips
         updatePitchButtonLabels();
@@ -241,9 +271,13 @@ public:
         pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
 
-        // Volume knob on right side — full 50px height gives a proper circle
+        // Volume knob on far right — full 50px height gives a proper circle
         volumeLabel.setBounds(pitchRow.removeFromRight(28).removeFromBottom(20).reduced(2));
         volumeKnob.setBounds(pitchRow.removeFromRight(60).reduced(2));
+
+        // Start knob — to the left of volume knob
+        startKnobLabel.setBounds(pitchRow.removeFromRight(36).removeFromBottom(20).reduced(2));
+        startKnob.setBounds(pitchRow.removeFromRight(60).reduced(2));
         
         // Add margin before bottom info row
         area.removeFromTop(5);
@@ -292,6 +326,31 @@ public:
     void setVolume(float volume)
     {
         volumeKnob.setValue(juce::jlimit(0.0f, 1.0f, volume), juce::dontSendNotification);
+    }
+
+    // Start point — in seconds. Pass 0 to reset to the beginning.
+    double getStartPointSeconds() const
+    {
+        if (originalDuration <= 0.0) return 0.0;
+        return startPointNormalized * originalDuration;
+    }
+
+    void setStartPoint(double seconds)
+    {
+        if (originalDuration <= 0.0) return;
+        float norm = (float)juce::jlimit(0.0, 1.0, seconds / originalDuration);
+        startPointNormalized = norm;
+        startKnob.setValue(norm, juce::dontSendNotification);
+        if (waveformComponent != nullptr)
+            waveformComponent->setStartMarker(norm);
+    }
+
+    void resetStartPoint()
+    {
+        startPointNormalized = 0.0f;
+        startKnob.setValue(0.0, juce::dontSendNotification);
+        if (waveformComponent != nullptr)
+            waveformComponent->setStartMarker(0.0f);
     }
 
     void setPitchOffset(int offset)
@@ -457,7 +516,10 @@ public:
                 
                 // CRITICAL FIX #4: Update container size AFTER file is set
                 updateWaveformSize();
-                
+
+                // Reset start point to beginning when a new file is loaded
+                resetStartPoint();
+
                 printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n",
                     audioFile.getFileName().toRawUTF8(),
                     originalSampleRate / 1000.0,
@@ -508,6 +570,7 @@ public:
         virtual void learningModeChanged(bool isLearning) = 0;
         virtual void pitchOffsetChanged(int pitchOffset) = 0;
         virtual void volumeChanged(float volume) = 0;
+        virtual void startPointChanged(double startPointSeconds) = 0;
     };
     
     void addListener(Listener* listener)
@@ -606,8 +669,8 @@ public:
             {
                 auto bounds = getLocalBounds();
                 
-                // Fill background
-                g.setColour(juce::Colour(0xFF363636));
+                // Fill background — slightly lighter than card to contrast waveforms
+                g.setColour(juce::Colour(0xFF3A3A3A));
                 g.fillRect(bounds);
 
                 // Draw border
@@ -729,14 +792,19 @@ public:
                         // ===== CRITICAL FIX #3: Ensure at least 1 sample is read =====
                         double sampleRange = pixelEndSample - pixelStartSample;
                         int numSamples = juce::jmax(1, static_cast<int>(std::ceil(sampleRange)));
-                        
+
                         // Ensure we don't read past the end of the file
                         if (pixelStartSample + numSamples > totalLength)
                             numSamples = static_cast<int>(totalLength - pixelStartSample);
-                        
+
+                        // Cap to buffer size — at high pitch-up the compression factor
+                        // makes samplesPerPixel very large; capping is safe because we
+                        // only need a min/max representative sample for each pixel.
+                        numSamples = juce::jmin(numSamples, bufferSize);
+
                         if (numSamples <= 0)
                             continue;
-                        
+
                         // Read audio data
                         bool readSuccess = cachedReader->read(&tempBuffer, 0, numSamples,
                                                             static_cast<juce::int64>(pixelStartSample),
@@ -797,7 +865,7 @@ public:
                     g.setColour(juce::Colour(0xFFD4A017));
                     g.strokePath(rightPath, juce::PathStrokeType(1.5f));
                     
-                    g.setColour(juce::Colour(0xFF585858).withAlpha(0.5f));
+                    g.setColour(juce::Colour(0xFFFFFFFF).withAlpha(0.5f));
                     g.drawHorizontalLine(renderTop + halfHeight,
                                         waveformBounds.getX(), waveformBounds.getRight());
                     
@@ -829,6 +897,9 @@ public:
 
                         if (pixelStartSample + numSamples > totalLength)
                             numSamples = static_cast<int>(totalLength - pixelStartSample);
+
+                        // Cap to buffer size — prevents overflow at high pitch-up compression
+                        numSamples = juce::jmin(numSamples, bufferSize);
 
                         if (numSamples <= 0)
                             continue;
@@ -880,8 +951,22 @@ public:
                 }
                 
                 // Draw center line
-                g.setColour(juce::Colour(0xFF585858).withAlpha(0.3f));
+                g.setColour(juce::Colour(0xFFFFFFFF).withAlpha(0.25f));
                 g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
+
+                // Draw start point marker — constrained to the actual drawn waveform area
+                float actualWaveformWidth = getActualWaveformWidth(renderWidth);
+                float markerX = waveformBounds.getX() + startMarkerNormalized * actualWaveformWidth;
+                // Marker line
+                g.setColour(juce::Colour(0xFFFFAA00).withAlpha(0.9f));
+                g.drawLine(markerX, (float)waveformBounds.getY(),
+                           markerX, (float)waveformBounds.getBottom(), 2.0f);
+                // Small top handle triangle
+                juce::Path handle;
+                handle.addTriangle(markerX - 5, (float)waveformBounds.getY(),
+                                   markerX + 5, (float)waveformBounds.getY(),
+                                   markerX,     (float)waveformBounds.getY() + 8);
+                g.fillPath(handle);
             }
 
             void setPitchFactor(double factor, int semitones)
@@ -891,7 +976,63 @@ public:
                 repaint();
             }
 
+            // Set start marker position (0.0 = start, 1.0 = end)
+            void setStartMarker(float normalized)
+            {
+                startMarkerNormalized = juce::jlimit(0.0f, 1.0f, normalized);
+                repaint();
+            }
+
+            float getStartMarker() const { return startMarkerNormalized; }
+
+            // Called when user drags the marker
+            std::function<void(float)> onMarkerDragged;
+
+            void mouseDown(const juce::MouseEvent& event) override
+            {
+                isDraggingMarker = true;
+                updateMarkerFromMouse(event.x);
+            }
+
+            void mouseDrag(const juce::MouseEvent& event) override
+            {
+                if (isDraggingMarker)
+                    updateMarkerFromMouse(event.x);
+            }
+
+            void mouseUp(const juce::MouseEvent& event) override
+            {
+                isDraggingMarker = false;
+            }
+
         private:
+            // Returns the pixel width actually covered by waveform data.
+            // For pitch-up the waveform only fills the left portion of renderWidth;
+            // for pitch-down/normal the waveform fills the full renderWidth.
+            float getActualWaveformWidth(int renderWidth) const
+            {
+                if (pitchOffset > 0)
+                {
+                    double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
+                    compressionFactor = juce::jmin(compressionFactor, 16.0);
+                    return (float)(renderWidth / compressionFactor);
+                }
+                return (float)renderWidth;
+            }
+
+            void updateMarkerFromMouse(int mouseX)
+            {
+                auto bounds = getLocalBounds().reduced(2);
+                if (bounds.getWidth() <= 0) return;
+                float actualWidth = getActualWaveformWidth(bounds.getWidth());
+                float newNorm = juce::jlimit(0.0f, 1.0f,
+                    (mouseX - bounds.getX()) / actualWidth);
+                startMarkerNormalized = newNorm;
+                repaint();
+                if (onMarkerDragged)
+                    onMarkerDragged(newNorm);
+            }
+
             void timerCallback() override
             {
                 if (currentAudioFile != lastFile)
@@ -901,7 +1042,7 @@ public:
                     repaint();
                 }
             }
-            
+
             juce::AudioFormatManager& formatManager;
             juce::File& currentAudioFile;
             int& pitchOffset;
@@ -911,6 +1052,8 @@ public:
             std::unique_ptr<juce::AudioFormatReader> cachedReader;
             juce::int64 cachedTotalLength = 0;
             int cachedNumChannels = 0;
+            float startMarkerNormalized = 0.0f;
+            bool isDraggingMarker = false;
             
             JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
         };
@@ -1005,6 +1148,12 @@ public:
         }
     }
     
+    void notifyStartPointChanged()
+    {
+        double seconds = (originalDuration > 0.0) ? startPointNormalized * originalDuration : 0.0;
+        listeners.call([&](Listener& l) { l.startPointChanged(seconds); });
+    }
+
     // Helper method to update pitch button tooltips
     void updatePitchButtonLabels()
     {
@@ -1161,6 +1310,11 @@ void adjustPitchUp()
     // Volume knob
     juce::Slider volumeKnob;
     juce::Label volumeLabel;
+
+    // Start point knob
+    juce::Slider startKnob;
+    juce::Label startKnobLabel;
+    float startPointNormalized = 0.0f;
     
     // Pitch factor tracking for visual feedback
     double currentPitchFactor = 1.0;  // 1.0 = no pitch change

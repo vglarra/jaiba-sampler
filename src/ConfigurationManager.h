@@ -78,6 +78,17 @@ public:
         propertiesFile->setValue("volume", (double)volume);
         propertiesFile->saveIfNeeded();
     }
+
+    void saveStartPoint(double startPointSeconds)
+    {
+        propertiesFile->setValue("startPointSeconds", startPointSeconds);
+        propertiesFile->saveIfNeeded();
+    }
+
+    double getStartPoint()
+    {
+        return propertiesFile->getDoubleValue("startPointSeconds", 0.0);
+    }
     
     // NEW: Save audio device settings
     void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
