@@ -81,6 +81,10 @@ void AudioPreviewComponent::playPreview()
     ensureAudioInitialized();  // Lazy initialization
     stopPreview();  // Stop any currently playing preview
     
+    // Apply master volume before each play so it always reflects the current value
+    if (masterVolPtr != nullptr)
+        audioSourcePlayer.setGain(masterVolPtr->load());
+
     auto* reader = formatManager.createReaderFor(currentFile);
     if (reader)
     {

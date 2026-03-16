@@ -89,7 +89,30 @@ public:
     {
         return propertiesFile->getDoubleValue("startPointSeconds", 0.0);
     }
+
+    void saveEndPoint(double endPointSeconds)
+    {
+        propertiesFile->setValue("endPointSeconds", endPointSeconds);
+        propertiesFile->saveIfNeeded();
+    }
+
+    // Returns -1.0 if not saved (sentinel meaning "use full sample length")
+    double getEndPoint()
+    {
+        return propertiesFile->getDoubleValue("endPointSeconds", -1.0);
+    }
     
+    void saveMasterVolume(float volume)
+    {
+        propertiesFile->setValue("masterVolume", (double)volume);
+        propertiesFile->saveIfNeeded();
+    }
+
+    float getMasterVolume()
+    {
+        return (float)propertiesFile->getDoubleValue("masterVolume", 0.7); // Default 70%
+    }
+
     // NEW: Save audio device settings
     void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
     {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -18,7 +19,9 @@ public:
     ~AudioPreviewComponent() override = default;
     
     void selectedFileChanged(const juce::File& newFile) override;
-    
+
+    void setMasterVolumeRef(std::atomic<float>& ref) { masterVolPtr = &ref; }
+
 private:
     void playPreview();
     void stopPreview();
@@ -32,6 +35,7 @@ private:
     juce::AudioSourcePlayer audioSourcePlayer;
     juce::AudioTransportSource transportSource;
     bool audioInitialized = false;
+    std::atomic<float>* masterVolPtr = nullptr;
 };
 
 //==============================================================================

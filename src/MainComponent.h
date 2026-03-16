@@ -79,7 +79,7 @@ private:
     //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
-    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, int pitchOffsetToUse = 0, double startPointSecondsToUse = 0.0);
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, int pitchOffsetToUse = 0, double startPointSecondsToUse = 0.0, double endPointSecondsToUse = -1.0);
     void updateSamplerSounds();
     
     // Audio device management
@@ -118,6 +118,7 @@ private:
     void pitchOffsetChanged(int pitchOffset) override;
     void volumeChanged(float volume) override;
     void startPointChanged(double startPointSeconds) override;
+    void endPointChanged(double endPointSeconds) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -127,6 +128,8 @@ private:
     // UI Components
     juce::TextButton menuButton{ "Menu" };
     juce::TextButton testToneButton{ "Test tone" };
+    juce::Slider masterVolumeKnob;
+    juce::Label masterVolumeLabel;
     SampleCard sampleCard{formatManager};  // New card component with waveform support
     juce::Label audioDeviceInfoLabel;
     juce::Label midiDeviceInfoLabel;
@@ -161,6 +164,7 @@ private:
     //==============================================================================
     // Volume
     std::atomic<float> volumeGain { 1.0f };
+    std::atomic<float> masterVolumeGain { 0.7f };
 
     //==============================================================================
     // Sine wave generation
@@ -183,6 +187,7 @@ private:
         bool isSelected = false;
         int pitchOffset = 0;  // Add pitch offset per sample
         double startPointSeconds = 0.0;  // Sample start point offset
+        double endPointSeconds   = -1.0; // Sample end point offset (-1 = full length)
         
         // Cached audio data
         std::unique_ptr<juce::AudioBuffer<float>> audioData;

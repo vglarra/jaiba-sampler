@@ -46,12 +46,34 @@ MainComponent::MainComponent()
     menuButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
     addAndMakeVisible(menuButton);
     menuButton.addListener(this);
-    
+
       testToneButton.setButtonText("Test tone");
       testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
       testToneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
       addAndMakeVisible(testToneButton);
       testToneButton.addListener(this);
+
+    // Master volume knob
+    masterVolumeKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+    masterVolumeKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+    masterVolumeKnob.setRange(0.0, 1.0, 0.01);
+    masterVolumeKnob.setValue(0.7, juce::dontSendNotification);
+    masterVolumeKnob.setTooltip("Master Volume");
+    masterVolumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCECECE));
+    masterVolumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
+    masterVolumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
+    masterVolumeKnob.onValueChange = [this] {
+        masterVolumeGain.store((float)masterVolumeKnob.getValue());
+        if (configManager != nullptr)
+            configManager->saveMasterVolume((float)masterVolumeKnob.getValue());
+    };
+    addAndMakeVisible(masterVolumeKnob);
+
+    masterVolumeLabel.setText("Master Vol", juce::dontSendNotification);
+    masterVolumeLabel.setJustificationType(juce::Justification::centredRight);
+    masterVolumeLabel.setFont(juce::Font(11.0f));
+    masterVolumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9A9A9A));
+    addAndMakeVisible(masterVolumeLabel);
 
       // Add MIDI activity light to the title area
       addAndMakeVisible(midiActivityLight);
@@ -171,6 +193,11 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                 sineWavePhase -= juce::MathConstants<double>::twoPi;
         }
     }
+
+    // Apply master volume last so it scales the entire output
+    float masterGain = masterVolumeGain.load();
+    if (masterGain != 1.0f)
+        bufferToFill.buffer->applyGain(masterGain);
 }
 
 void MainComponent::releaseResources()
@@ -180,7 +207,7 @@ void MainComponent::releaseResources()
 //==============================================================================
 void MainComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xFF4A4A4A));
+    g.fillAll(juce::Colour(0xFF1E1E1E));
     
     // Draw title
     g.setColour(juce::Colour(0xFFCECECE));
@@ -200,6 +227,12 @@ void MainComponent::paint(juce::Graphics& g)
     // Line above footer - adjusted for reduced footer height (50px + 20px padding)
     auto footerY = getHeight() - 70;
     g.drawHorizontalLine(footerY, 20, getWidth() - 20);
+
+    // Draw dark outline around top-level buttons
+    g.setColour(juce::Colour(0xFF0A0A0A));
+    g.drawRect(menuButton.getBounds(), 1);
+    g.drawRect(testToneButton.getBounds(), 1);
+    g.drawRect(masterVolumeKnob.getBounds(), 1);
 }
 
 void MainComponent::resized()
@@ -222,17 +255,23 @@ void MainComponent::resized()
     auto titleArea = topBar;
     auto titleBounds = titleArea.withSizeKeepingCentre(300, 30);
     
-    // Right side: MIDI light button and Test tone button
-    auto rightSide = topBar.removeFromRight(60 + 5 + 30); // Test tone (60px) + margin (5px) + MIDI light (30px)
-    
+    // Right side: Master Vol label + knob | MIDI light | Test tone
+    // Total: label(65) + gap(3) + knob(30) + gap(10) + MIDI(30) + gap(5) + TestTone(60) = 203
+    auto rightSide = topBar.removeFromRight(65 + 3 + 30 + 10 + 30 + 5 + 60);
+
+    // Master Vol label (centred-right so text hugs the knob)
+    masterVolumeLabel.setBounds(rightSide.removeFromLeft(65).reduced(1));
+    rightSide.removeFromLeft(3);
+    // Master Vol knob
+    masterVolumeKnob.setBounds(rightSide.removeFromLeft(30).reduced(2));
+    rightSide.removeFromLeft(10);
+
     // MIDI light button (30px wide, same height as other buttons)
-    auto midiLightButtonArea = rightSide.removeFromLeft(30).reduced(2);
-    // Set the MIDI activity light to fill the entire button area
-    midiActivityLight.setBounds(midiLightButtonArea);
-    
+    midiActivityLight.setBounds(rightSide.removeFromLeft(30).reduced(2));
+
     // 5px margin between buttons
     rightSide.removeFromLeft(5);
-    
+
     // Test tone button on right (60px wide like Prev/Next buttons)
     testToneButton.setBounds(rightSide.removeFromLeft(60).reduced(2));
     
@@ -306,6 +345,7 @@ void MainComponent::buttonClicked(juce::Button* button)
     else if (button == &sampleCard.getAddButton())
     {
         auto* previewComp = new ::AudioPreviewComponent(formatManager);
+        previewComp->setMasterVolumeRef(masterVolumeGain);
         
         // Use last saved directory or default
         juce::File startingDirectory = configManager->getLastDirectory();
@@ -1003,14 +1043,16 @@ void MainComponent::updateSamplerSounds()
         {
         public:
             MemoryAudioReader(juce::AudioBuffer<float>* buffer, double sourceSampleRate, int sourceChannels,
-                              juce::int64 startOffset = 0)
+                              juce::int64 startOffset = 0, juce::int64 endOffset = -1)
                 : juce::AudioFormatReader(nullptr, "Memory Reader"),
                   cachedBuffer(buffer),
                   sampleOffset(startOffset)
             {
                 sampleRate = sourceSampleRate;
                 numChannels = sourceChannels;
-                lengthInSamples = buffer->getNumSamples() - startOffset;
+                juce::int64 bufLen = buffer->getNumSamples();
+                juce::int64 effectiveEnd = (endOffset > 0 && endOffset <= bufLen) ? endOffset : bufLen;
+                lengthInSamples = juce::jmax((juce::int64)0, effectiveEnd - startOffset);
                 bitsPerSample = 32;
                 usesFloatingPointData = true;
             }
@@ -1052,11 +1094,21 @@ void MainComponent::updateSamplerSounds()
             startOffset = juce::jlimit((juce::int64)0, maxOffset, startOffset);
         }
 
+        // Compute end sample offset from endPointSeconds (-1 means full length)
+        juce::int64 endOffset = -1;
+        if (sample->endPointSeconds > 0.0 && sample->sampleRate > 0)
+        {
+            endOffset = (juce::int64)(sample->endPointSeconds * sample->sampleRate);
+            juce::int64 bufLen = (juce::int64)sample->audioData->getNumSamples();
+            endOffset = juce::jlimit(startOffset + 1, bufLen, endOffset);
+        }
+
         auto* reader = new MemoryAudioReader(
             sample->audioData.get(),
             sample->sampleRate,
             sample->numChannels,
-            startOffset
+            startOffset,
+            endOffset
         );
         
         // IMPORTANT FIX: Create note range that includes ALL notes that should trigger this sample
@@ -1198,7 +1250,7 @@ void MainComponent::navigateToFile(int index)
     }
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, int pitchOffsetToUse, double startPointSecondsToUse)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, int pitchOffsetToUse, double startPointSecondsToUse, double endPointSecondsToUse)
 {
     // Create reader on background thread
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -1270,7 +1322,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, i
     sample->audioData = std::move(buffer);
     
     // Update UI on message thread
-    juce::MessageManager::callAsync([this, sample, file, autoPlay, startPointSecondsToUse]() {
+    juce::MessageManager::callAsync([this, sample, file, autoPlay, startPointSecondsToUse, endPointSecondsToUse]() {
         // Stop any currently playing notes
         sampler.allNotesOff(1, false);
         
@@ -1299,6 +1351,13 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, i
             sampleCard.setStartPoint(startPointSecondsToUse);
         else
             sampleCard.resetStartPoint();
+
+        // Apply end point: restore saved value or reset to full length for new files
+        sample->endPointSeconds = endPointSecondsToUse;
+        if (endPointSecondsToUse > 0.0)
+            sampleCard.setEndPoint(endPointSecondsToUse);
+        else
+            sampleCard.resetEndPoint();
 
         updateSamplerSounds();
         sampleCard.setMidiNote(sample->rootNote);
@@ -1462,6 +1521,21 @@ void MainComponent::startPointChanged(double startPointSeconds)
     printf("Start point set to: %.3f s\n", startPointSeconds);
 }
 
+void MainComponent::endPointChanged(double endPointSeconds)
+{
+    {
+        juce::ScopedLock lock(sampleLock);
+        if (!samples.isEmpty())
+            samples[0]->endPointSeconds = endPointSeconds;
+    }
+    updateSamplerSounds();
+
+    if (configManager != nullptr)
+        configManager->saveEndPoint(endPointSeconds);
+
+    printf("End point set to: %.3f s\n", endPointSeconds);
+}
+
 void MainComponent::handleMidiLearn(int noteNumber)
 {
     if (isLearningMode)
@@ -1511,10 +1585,15 @@ void MainComponent::loadLastSession()
     printf("Loading saved MIDI device: %s\n", savedDevice.toRawUTF8());
     printf("Loading saved pitch offset: %+d\n", savedPitchOffset);
     
-    // Restore volume
+    // Restore per-pad volume
     float savedVolume = configManager->getVolume();
     volumeGain.store(savedVolume);
     sampleCard.setVolume(savedVolume);
+
+    // Restore master volume
+    float savedMasterVolume = configManager->getMasterVolume();
+    masterVolumeGain.store(savedMasterVolume);
+    masterVolumeKnob.setValue(savedMasterVolume, juce::dontSendNotification);
 
     // Apply MIDI settings to the card
     sampleCard.setMidiNote(savedNote);
@@ -1550,8 +1629,9 @@ void MainComponent::loadLastSession()
         }
     }
     
-    // Load start point setting
+    // Load start/end point settings
     double savedStartPoint = configManager->getStartPoint();
+    double savedEndPoint   = configManager->getEndPoint();
 
     // Load last sample if it exists
     juce::File lastSample = configManager->getLastSample();
@@ -1576,8 +1656,8 @@ void MainComponent::loadLastSession()
                 }
             }
 
-            // Load the sample but DON'T auto-play it, using the saved pitch offset and start point
-            loadSampleFileAsync(lastSample, false, savedPitchOffset, savedStartPoint);
+            // Load the sample but DON'T auto-play it, restoring pitch, start, and end points
+            loadSampleFileAsync(lastSample, false, savedPitchOffset, savedStartPoint, savedEndPoint);
         }
     }
 }

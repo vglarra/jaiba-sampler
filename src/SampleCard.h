@@ -119,7 +119,7 @@ public:
         volumeKnob.setValue(1.0, juce::dontSendNotification);
         volumeKnob.setTooltip("Volume (drag up/down)");
         volumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFF9DC95C));
-        volumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF4A4A4A));
+        volumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
         volumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
         volumeKnob.onValueChange = [this] {
             listeners.call([this](Listener& l) { l.volumeChanged((float)volumeKnob.getValue()); });
@@ -128,8 +128,8 @@ public:
 
         volumeLabel.setText("Vol", juce::dontSendNotification);
         volumeLabel.setJustificationType(juce::Justification::centred);
-        volumeLabel.setFont(juce::Font(10.0f));
-        volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF7A7A7A));
+        volumeLabel.setFont(juce::Font(11.0f));
+        volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
         addAndMakeVisible(volumeLabel);
 
         // Start point knob
@@ -138,8 +138,8 @@ public:
         startKnob.setRange(0.0, 1.0, 0.001);
         startKnob.setValue(0.0, juce::dontSendNotification);
         startKnob.setTooltip("Start point (drag to set sample start)");
-        startKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFFFAA00));
-        startKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF4A4A4A));
+        startKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCC0000));
+        startKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
         startKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
         startKnob.onValueChange = [this] {
             startPointNormalized = (float)startKnob.getValue();
@@ -151,15 +151,45 @@ public:
 
         startKnobLabel.setText("Start", juce::dontSendNotification);
         startKnobLabel.setJustificationType(juce::Justification::centred);
-        startKnobLabel.setFont(juce::Font(10.0f));
-        startKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF7A7A7A));
+        startKnobLabel.setFont(juce::Font(11.0f));
+        startKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
         addAndMakeVisible(startKnobLabel);
 
-        // Wire waveform marker drag → knob + listeners
+        // Wire start marker drag → knob + listeners
         waveformComponent->onMarkerDragged = [this](float newNorm) {
             startPointNormalized = newNorm;
             startKnob.setValue(newNorm, juce::dontSendNotification);
             notifyStartPointChanged();
+        };
+
+        // End point knob
+        endKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        endKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        endKnob.setRange(0.0, 1.0, 0.001);
+        endKnob.setValue(1.0, juce::dontSendNotification);
+        endKnob.setTooltip("End point (drag to set sample end)");
+        endKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFF00AACC));
+        endKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
+        endKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
+        endKnob.onValueChange = [this] {
+            endPointNormalized = (float)endKnob.getValue();
+            if (waveformComponent != nullptr)
+                waveformComponent->setEndMarker(endPointNormalized);
+            notifyEndPointChanged();
+        };
+        addAndMakeVisible(endKnob);
+
+        endKnobLabel.setText("End", juce::dontSendNotification);
+        endKnobLabel.setJustificationType(juce::Justification::centred);
+        endKnobLabel.setFont(juce::Font(11.0f));
+        endKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
+        addAndMakeVisible(endKnobLabel);
+
+        // Wire end marker drag → knob + listeners
+        waveformComponent->onEndMarkerDragged = [this](float newNorm) {
+            endPointNormalized = newNorm;
+            endKnob.setValue(newNorm, juce::dontSendNotification);
+            notifyEndPointChanged();
         };
 
         // Update pitch button labels with tooltips
@@ -271,13 +301,23 @@ public:
         pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
 
-        // Volume knob on far right — full 50px height gives a proper circle
-        volumeLabel.setBounds(pitchRow.removeFromRight(28).removeFromBottom(20).reduced(2));
-        volumeKnob.setBounds(pitchRow.removeFromRight(60).reduced(2));
-
-        // Start knob — to the left of volume knob
-        startKnobLabel.setBounds(pitchRow.removeFromRight(36).removeFromBottom(20).reduced(2));
-        startKnob.setBounds(pitchRow.removeFromRight(60).reduced(2));
+        // Each knob column: 60px wide — knob fills top, label sits flush below (13px)
+        const int labelH = 13;
+        {
+            auto col = pitchRow.removeFromRight(60);
+            volumeLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            volumeKnob.setBounds(col.reduced(2));
+        }
+        {
+            auto col = pitchRow.removeFromRight(60);
+            endKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            endKnob.setBounds(col.reduced(2));
+        }
+        {
+            auto col = pitchRow.removeFromRight(60);
+            startKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            startKnob.setBounds(col.reduced(2));
+        }
         
         // Add margin before bottom info row
         area.removeFromTop(5);
@@ -305,12 +345,18 @@ public:
     void paint(juce::Graphics& g) override
     {
         // Draw card background
-        g.setColour(juce::Colour(0xFF2E2E2E));
+        g.setColour(juce::Colour(0xFF636363));
         g.fillRoundedRectangle(getLocalBounds().toFloat(), 8.0f);
 
         // Draw card border
         g.setColour(juce::Colour(0xFF5A5A5A));
         g.drawRoundedRectangle(getLocalBounds().toFloat(), 8.0f, 1.5f);
+
+        // Draw dark outline around every TextButton child
+        g.setColour(juce::Colour(0xFF0A0A0A));
+        for (auto* child : getChildren())
+            if (dynamic_cast<juce::TextButton*>(child) != nullptr)
+                g.drawRect(child->getBounds(), 1);
     }
     
     // Public methods
@@ -351,6 +397,31 @@ public:
         startKnob.setValue(0.0, juce::dontSendNotification);
         if (waveformComponent != nullptr)
             waveformComponent->setStartMarker(0.0f);
+    }
+
+    // End point — in seconds. Pass a value ≥ duration to snap to the very end.
+    double getEndPointSeconds() const
+    {
+        if (originalDuration <= 0.0) return 0.0;
+        return endPointNormalized * originalDuration;
+    }
+
+    void setEndPoint(double seconds)
+    {
+        if (originalDuration <= 0.0) return;
+        float norm = (float)juce::jlimit(0.0, 1.0, seconds / originalDuration);
+        endPointNormalized = norm;
+        endKnob.setValue(norm, juce::dontSendNotification);
+        if (waveformComponent != nullptr)
+            waveformComponent->setEndMarker(norm);
+    }
+
+    void resetEndPoint()
+    {
+        endPointNormalized = 1.0f;
+        endKnob.setValue(1.0, juce::dontSendNotification);
+        if (waveformComponent != nullptr)
+            waveformComponent->setEndMarker(1.0f);
     }
 
     void setPitchOffset(int offset)
@@ -517,8 +588,9 @@ public:
                 // CRITICAL FIX #4: Update container size AFTER file is set
                 updateWaveformSize();
 
-                // Reset start point to beginning when a new file is loaded
+                // Reset start/end points when a new file is loaded
                 resetStartPoint();
+                resetEndPoint();
 
                 printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n",
                     audioFile.getFileName().toRawUTF8(),
@@ -571,6 +643,7 @@ public:
         virtual void pitchOffsetChanged(int pitchOffset) = 0;
         virtual void volumeChanged(float volume) = 0;
         virtual void startPointChanged(double startPointSeconds) = 0;
+        virtual void endPointChanged(double endPointSeconds) = 0;
     };
     
     void addListener(Listener* listener)
@@ -669,17 +742,17 @@ public:
             {
                 auto bounds = getLocalBounds();
                 
-                // Fill background — slightly lighter than card to contrast waveforms
-                g.setColour(juce::Colour(0xFF3A3A3A));
+                // Fill background — light gray
+                g.setColour(juce::Colour(0xFFE0E0E0));
                 g.fillRect(bounds);
 
                 // Draw border
-                g.setColour(juce::Colour(0xFF505050));
+                g.setColour(juce::Colour(0xFFB0B0B0));
                 g.drawRect(bounds, 2);
-                
+
                 if (!currentAudioFile.existsAsFile())
                 {
-                    g.setColour(juce::Colour(0xFF585858));
+                    g.setColour(juce::Colour(0xFF888888));
                     g.setFont(juce::Font(14.0f, juce::Font::italic));
                     g.drawText("No waveform", bounds, juce::Justification::centred, true);
                     return;
@@ -708,16 +781,26 @@ public:
                 
                 if (cachedReader == nullptr || cachedTotalLength <= 0)
                 {
-                    g.setColour(juce::Colour(0xFF585858));
+                    g.setColour(juce::Colour(0xFF888888));
                     g.setFont(juce::Font(14.0f, juce::Font::italic));
                     g.drawText("Cannot read audio file", bounds, juce::Justification::centred, true);
                     return;
                 }
                 
-                auto waveformBounds = bounds.reduced(2);
-                if (waveformBounds.isEmpty())
+                // Split inner area: top strip = time ruler, remaining = waveform
+                const int rulerHeight = 16;
+                auto innerBounds = bounds.reduced(2);
+                if (innerBounds.isEmpty())
                     return;
-                
+
+                // Original duration for time ruler (use reader sample rate)
+                double originalDuration = 0.0;
+                if (cachedReader != nullptr && cachedReader->sampleRate > 0)
+                    originalDuration = (double)cachedTotalLength / cachedReader->sampleRate;
+
+                auto rulerBounds = innerBounds.removeFromTop(rulerHeight);
+                auto waveformBounds = innerBounds;  // remaining area below ruler
+
                 int renderWidth = waveformBounds.getWidth();
                 int renderHeight = waveformBounds.getHeight();
                 int renderTop = waveformBounds.getY();
@@ -730,7 +813,7 @@ public:
                 
                 if (totalLength <= 0 || numChannels <= 0)
                 {
-                    g.setColour(juce::Colour(0xFF585858));
+                    g.setColour(juce::Colour(0xFF888888));
                     g.setFont(juce::Font(14.0f, juce::Font::italic));
                     g.drawText("Invalid audio data", bounds, juce::Justification::centred, true);
                     return;
@@ -859,17 +942,30 @@ public:
                         rightPath.lineTo(xPos, rightYBottom);
                     }
                     
-                    g.setColour(juce::Colour(0xFF9DC95C));
-                    g.strokePath(leftPath, juce::PathStrokeType(1.5f));
+                    // Left channel — dark charcoal gradient, lighter at edges
+                    {
+                        juce::ColourGradient grad(juce::Colour(0xFF606060), 0.0f, (float)leftTop,
+                                                  juce::Colour(0xFF606060), 0.0f, (float)leftBottom, false);
+                        grad.addColour(0.5, juce::Colour(0xFF1A1A1A));
+                        g.setGradientFill(grad);
+                        g.strokePath(leftPath, juce::PathStrokeType(1.5f));
+                    }
 
-                    g.setColour(juce::Colour(0xFFD4A017));
-                    g.strokePath(rightPath, juce::PathStrokeType(1.5f));
-                    
-                    g.setColour(juce::Colour(0xFFFFFFFF).withAlpha(0.5f));
+                    // Right channel — same gradient in its vertical range
+                    {
+                        juce::ColourGradient grad(juce::Colour(0xFF606060), 0.0f, (float)rightTop,
+                                                  juce::Colour(0xFF606060), 0.0f, (float)rightBottom, false);
+                        grad.addColour(0.5, juce::Colour(0xFF1A1A1A));
+                        g.setGradientFill(grad);
+                        g.strokePath(rightPath, juce::PathStrokeType(1.5f));
+                    }
+
+                    // Channel divider
+                    g.setColour(juce::Colour(0xFF555555));
                     g.drawHorizontalLine(renderTop + halfHeight,
                                         waveformBounds.getX(), waveformBounds.getRight());
-                    
-                    g.setColour(juce::Colour(0xFF7A7A7A));
+
+                    g.setColour(juce::Colour(0xFF555555));
                     g.setFont(juce::Font(10.0f));
                     g.drawText("L", waveformBounds.getX() + 5, leftTop + 2, 20, 15,
                             juce::Justification::left);
@@ -939,34 +1035,109 @@ public:
                         waveformPath.lineTo(xPos, yBottom);
                     }
                     
-                    // Set color based on pitch
-                    if (pitchOffset > 0)
-                        g.setColour(juce::Colour(0xFFE25A00));
-                    else if (pitchOffset < 0)
-                        g.setColour(juce::Colour(0xFF5B9BD5));
-                    else
-                        g.setColour(juce::Colour(0xFF9DC95C));
-                    
-                    g.strokePath(waveformPath, juce::PathStrokeType(1.5f));
+                    // Dark charcoal gradient — lighter at top/bottom edges, darkest in center
+                    {
+                        juce::ColourGradient grad(juce::Colour(0xFF606060), 0.0f, (float)renderTop,
+                                                  juce::Colour(0xFF606060), 0.0f, (float)renderBottom, false);
+                        grad.addColour(0.5, juce::Colour(0xFF1A1A1A));
+                        g.setGradientFill(grad);
+                        g.strokePath(waveformPath, juce::PathStrokeType(1.5f));
+                    }
                 }
                 
                 // Draw center line
-                g.setColour(juce::Colour(0xFFFFFFFF).withAlpha(0.25f));
+                g.setColour(juce::Colour(0xFF555555).withAlpha(0.5f));
                 g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
 
-                // Draw start point marker — constrained to the actual drawn waveform area
+                // ===== TIME RULER AND GRID LINES =====
                 float actualWaveformWidth = getActualWaveformWidth(renderWidth);
+
+                if (originalDuration > 0.0 && actualWaveformWidth > 0.0f)
+                {
+                    float pixelsPerSecond = actualWaveformWidth / (float)originalDuration;
+                    double majorInterval, minorInterval;
+                    getTickIntervals(pixelsPerSecond, majorInterval, minorInterval);
+
+                    // --- Grid lines over waveform — dark on light background ---
+                    for (double t = minorInterval; t < originalDuration; t += minorInterval)
+                    {
+                        int n = (int)std::round(t / minorInterval);
+                        bool isMajor = (n % 2 == 0);
+                        float x = waveformBounds.getX() + (float)(t / originalDuration * actualWaveformWidth);
+                        if (x >= waveformBounds.getRight()) break;
+                        g.setColour(juce::Colour(0xFF000000).withAlpha(isMajor ? 0.15f : 0.08f));
+                        g.drawVerticalLine((int)(x + 0.5f), waveformBounds.getY(), waveformBounds.getBottom());
+                    }
+
+                    // --- Ruler background — slightly darker than waveform ---
+                    g.setColour(juce::Colour(0xFFC8C8C8));
+                    g.fillRect(rulerBounds);
+                    g.setColour(juce::Colour(0xFFAAAAAA));
+                    g.drawRect(rulerBounds, 1);
+
+                    g.setFont(juce::Font(9.0f));
+
+                    // "0" at origin
+                    g.setColour(juce::Colour(0xFF2A2A2A));
+                    g.drawVerticalLine(rulerBounds.getX(),
+                                       rulerBounds.getBottom() - 8, rulerBounds.getBottom() - 1);
+                    g.drawText("0", rulerBounds.getX() + 2, rulerBounds.getY(),
+                               20, rulerHeight - 2, juce::Justification::centredLeft, false);
+
+                    // Minor and major ticks + labels
+                    for (double t = minorInterval; t < originalDuration; t += minorInterval)
+                    {
+                        int n = (int)std::round(t / minorInterval);
+                        bool isMajor = (n % 2 == 0);
+                        float x = rulerBounds.getX() + (float)(t / originalDuration * actualWaveformWidth);
+                        if (x >= rulerBounds.getRight()) break;
+
+                        g.setColour(isMajor ? juce::Colour(0xFF2A2A2A) : juce::Colour(0xFF555555));
+                        int tickH = isMajor ? 8 : 4;
+                        g.drawVerticalLine((int)(x + 0.5f),
+                                           rulerBounds.getBottom() - tickH, rulerBounds.getBottom() - 1);
+
+                        if (isMajor)
+                        {
+                            double rounded = std::round(t * 1000.0) / 1000.0;
+                            juce::String label;
+                            if (rounded >= 10.0 || rounded == (double)(int)(rounded + 0.5))
+                                label = juce::String((int)(rounded + 0.5));
+                            else
+                                label = juce::String(rounded, majorInterval < 0.1 ? 2 : 1);
+
+                            g.setColour(juce::Colour(0xFF2A2A2A));
+                            g.drawText(label, (int)(x + 0.5f) - 15, rulerBounds.getY(),
+                                       30, rulerHeight - 4, juce::Justification::centred, false);
+                        }
+                    }
+                }
+
+                // Draw start point marker — deep red, triangle at ruler top (pointing down)
                 float markerX = waveformBounds.getX() + startMarkerNormalized * actualWaveformWidth;
-                // Marker line
-                g.setColour(juce::Colour(0xFFFFAA00).withAlpha(0.9f));
-                g.drawLine(markerX, (float)waveformBounds.getY(),
+                g.setColour(juce::Colour(0xFFCC0000).withAlpha(0.9f));
+                g.drawLine(markerX, (float)rulerBounds.getY(),
                            markerX, (float)waveformBounds.getBottom(), 2.0f);
-                // Small top handle triangle
-                juce::Path handle;
-                handle.addTriangle(markerX - 5, (float)waveformBounds.getY(),
-                                   markerX + 5, (float)waveformBounds.getY(),
-                                   markerX,     (float)waveformBounds.getY() + 8);
-                g.fillPath(handle);
+                {
+                    juce::Path handle;
+                    handle.addTriangle(markerX - 5, (float)rulerBounds.getY(),
+                                       markerX + 5, (float)rulerBounds.getY(),
+                                       markerX,     (float)rulerBounds.getY() + 8);
+                    g.fillPath(handle);
+                }
+
+                // Draw end point marker — cyan, triangle at waveform bottom (pointing up)
+                float endMarkerX = waveformBounds.getX() + endMarkerNormalized * actualWaveformWidth;
+                g.setColour(juce::Colour(0xFF00AACC).withAlpha(0.9f));
+                g.drawLine(endMarkerX, (float)rulerBounds.getY(),
+                           endMarkerX, (float)waveformBounds.getBottom(), 2.0f);
+                {
+                    juce::Path endHandle;
+                    endHandle.addTriangle(endMarkerX - 5, (float)waveformBounds.getBottom(),
+                                          endMarkerX + 5, (float)waveformBounds.getBottom(),
+                                          endMarkerX,     (float)waveformBounds.getBottom() - 8);
+                    g.fillPath(endHandle);
+                }
             }
 
             void setPitchFactor(double factor, int semitones)
@@ -979,33 +1150,68 @@ public:
             // Set start marker position (0.0 = start, 1.0 = end)
             void setStartMarker(float normalized)
             {
-                startMarkerNormalized = juce::jlimit(0.0f, 1.0f, normalized);
+                startMarkerNormalized = juce::jlimit(0.0f, endMarkerNormalized - 0.001f, normalized);
                 repaint();
             }
 
             float getStartMarker() const { return startMarkerNormalized; }
 
-            // Called when user drags the marker
+            // Set end marker position (0.0 = start, 1.0 = end)
+            void setEndMarker(float normalized)
+            {
+                endMarkerNormalized = juce::jlimit(startMarkerNormalized + 0.001f, 1.0f, normalized);
+                repaint();
+            }
+
+            float getEndMarker() const { return endMarkerNormalized; }
+
+            // Callbacks: invoked when user drags either marker
             std::function<void(float)> onMarkerDragged;
+            std::function<void(float)> onEndMarkerDragged;
 
             void mouseDown(const juce::MouseEvent& event) override
             {
-                isDraggingMarker = true;
+                // Pick the marker closest to the click position
+                auto bounds = getLocalBounds().reduced(2);
+                float actualWidth = getActualWaveformWidth(bounds.getWidth());
+                float startX = bounds.getX() + startMarkerNormalized * actualWidth;
+                float endX   = bounds.getX() + endMarkerNormalized   * actualWidth;
+                float dStart = std::abs((float)event.x - startX);
+                float dEnd   = std::abs((float)event.x - endX);
+                currentDragTarget = (dStart <= dEnd) ? DragTarget::Start : DragTarget::End;
                 updateMarkerFromMouse(event.x);
             }
 
             void mouseDrag(const juce::MouseEvent& event) override
             {
-                if (isDraggingMarker)
+                if (currentDragTarget != DragTarget::None)
                     updateMarkerFromMouse(event.x);
             }
 
             void mouseUp(const juce::MouseEvent& event) override
             {
-                isDraggingMarker = false;
+                currentDragTarget = DragTarget::None;
             }
 
         private:
+            // Choose "nice" tick intervals so major ticks are at least 40px apart.
+            static void getTickIntervals(float pixelsPerSecond, double& majorOut, double& minorOut)
+            {
+                static constexpr double niceVals[] = {
+                    0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0
+                };
+                majorOut = 300.0;
+                for (auto v : niceVals)
+                {
+                    if (pixelsPerSecond * (float)v >= 40.0f)
+                    {
+                        majorOut = v;
+                        break;
+                    }
+                }
+                minorOut = majorOut / 2.0;
+            }
+
             // Returns the pixel width actually covered by waveform data.
             // For pitch-up the waveform only fills the left portion of renderWidth;
             // for pitch-down/normal the waveform fills the full renderWidth.
@@ -1025,12 +1231,26 @@ public:
                 auto bounds = getLocalBounds().reduced(2);
                 if (bounds.getWidth() <= 0) return;
                 float actualWidth = getActualWaveformWidth(bounds.getWidth());
-                float newNorm = juce::jlimit(0.0f, 1.0f,
-                    (mouseX - bounds.getX()) / actualWidth);
-                startMarkerNormalized = newNorm;
-                repaint();
-                if (onMarkerDragged)
-                    onMarkerDragged(newNorm);
+                float rawNorm = (mouseX - bounds.getX()) / actualWidth;
+
+                const float minGap = 0.001f;
+
+                if (currentDragTarget == DragTarget::Start)
+                {
+                    float newNorm = juce::jlimit(0.0f, endMarkerNormalized - minGap, rawNorm);
+                    startMarkerNormalized = newNorm;
+                    repaint();
+                    if (onMarkerDragged)
+                        onMarkerDragged(newNorm);
+                }
+                else if (currentDragTarget == DragTarget::End)
+                {
+                    float newNorm = juce::jlimit(startMarkerNormalized + minGap, 1.0f, rawNorm);
+                    endMarkerNormalized = newNorm;
+                    repaint();
+                    if (onEndMarkerDragged)
+                        onEndMarkerDragged(newNorm);
+                }
             }
 
             void timerCallback() override
@@ -1053,8 +1273,11 @@ public:
             juce::int64 cachedTotalLength = 0;
             int cachedNumChannels = 0;
             float startMarkerNormalized = 0.0f;
-            bool isDraggingMarker = false;
-            
+            float endMarkerNormalized   = 1.0f;
+
+            enum class DragTarget { None, Start, End };
+            DragTarget currentDragTarget = DragTarget::None;
+
             JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
         };
     
@@ -1152,6 +1375,12 @@ public:
     {
         double seconds = (originalDuration > 0.0) ? startPointNormalized * originalDuration : 0.0;
         listeners.call([&](Listener& l) { l.startPointChanged(seconds); });
+    }
+
+    void notifyEndPointChanged()
+    {
+        double seconds = (originalDuration > 0.0) ? endPointNormalized * originalDuration : originalDuration;
+        listeners.call([&](Listener& l) { l.endPointChanged(seconds); });
     }
 
     // Helper method to update pitch button tooltips
@@ -1315,6 +1544,11 @@ void adjustPitchUp()
     juce::Slider startKnob;
     juce::Label startKnobLabel;
     float startPointNormalized = 0.0f;
+
+    // End point knob
+    juce::Slider endKnob;
+    juce::Label endKnobLabel;
+    float endPointNormalized = 1.0f;
     
     // Pitch factor tracking for visual feedback
     double currentPitchFactor = 1.0;  // 1.0 = no pitch change
