@@ -113,6 +113,17 @@ public:
         return (float)propertiesFile->getDoubleValue("masterVolume", 0.7); // Default 70%
     }
 
+    void saveLoopEnabled(bool loopEnabled)
+    {
+        propertiesFile->setValue("loopEnabled", loopEnabled);
+        propertiesFile->saveIfNeeded();
+    }
+
+    bool getLoopEnabled()
+    {
+        return propertiesFile->getBoolValue("loopEnabled", false);
+    }
+
     // NEW: Save audio device settings
     void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
     {

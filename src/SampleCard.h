@@ -4,7 +4,8 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_basics/juce_audio_basics.h>
-#include <cmath>  // ← ADD THIS for std::ceil
+#include <cmath>
+#include "KnobLookAndFeel.h"
 
 class SampleCard : public juce::Component
 {
@@ -112,15 +113,16 @@ public:
         pitchUpButton.setTooltip("Higher pitch (shorter duration)");
         addAndMakeVisible(pitchUpButton);
 
-        // Volume knob
+        // Volume knob — neutral gray, same compact style as Master Vol
+        volumeKnob.setLookAndFeel(&compactKnobLaf);
         volumeKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         volumeKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         volumeKnob.setRange(0.0, 1.0, 0.01);
         volumeKnob.setValue(1.0, juce::dontSendNotification);
         volumeKnob.setTooltip("Volume (drag up/down)");
-        volumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFF9DC95C));
+        volumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCECECE)); // neutral gray fill
         volumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
-        volumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
+        volumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFF1E1E1E)); // dark indicator on gray
         volumeKnob.onValueChange = [this] {
             listeners.call([this](Listener& l) { l.volumeChanged((float)volumeKnob.getValue()); });
         };
@@ -132,15 +134,16 @@ public:
         volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
         addAndMakeVisible(volumeLabel);
 
-        // Start point knob
+        // Start point knob — deep red matching the start marker (#CC0000), white indicator
+        startKnob.setLookAndFeel(&compactKnobLaf);
         startKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         startKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         startKnob.setRange(0.0, 1.0, 0.001);
         startKnob.setValue(0.0, juce::dontSendNotification);
         startKnob.setTooltip("Start point (drag to set sample start)");
-        startKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCC0000));
+        startKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCC0000)); // matches start marker
         startKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
-        startKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
+        startKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFFFFFFF)); // white indicator on red
         startKnob.onValueChange = [this] {
             startPointNormalized = (float)startKnob.getValue();
             if (waveformComponent != nullptr)
@@ -162,15 +165,16 @@ public:
             notifyStartPointChanged();
         };
 
-        // End point knob
+        // End point knob — cyan matching the end marker (#00AACC), white indicator
+        endKnob.setLookAndFeel(&compactKnobLaf);
         endKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
         endKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         endKnob.setRange(0.0, 1.0, 0.001);
         endKnob.setValue(1.0, juce::dontSendNotification);
         endKnob.setTooltip("End point (drag to set sample end)");
-        endKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFF00AACC));
+        endKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFF00AACC)); // matches end marker
         endKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
-        endKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
+        endKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFFFFFFF)); // white indicator on cyan
         endKnob.onValueChange = [this] {
             endPointNormalized = (float)endKnob.getValue();
             if (waveformComponent != nullptr)
@@ -192,6 +196,22 @@ public:
             notifyEndPointChanged();
         };
 
+        // Loop toggle button — left of Start knob in pitch row
+        loopButton.setButtonText("Loop");
+        loopButton.setClickingTogglesState(true);
+        loopButton.setToggleState(false, juce::dontSendNotification);
+        loopButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+        loopButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFF00FF88));
+        loopButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        loopButton.setColour(juce::TextButton::textColourOnId,  juce::Colour(0xFF111111));
+        loopButton.onClick = [this] {
+            bool isOn = loopButton.getToggleState();
+            if (waveformComponent != nullptr)
+                waveformComponent->setLoopHighlight(isOn);
+            listeners.call([isOn](Listener& l) { l.loopEnabledChanged(isOn); });
+        };
+        addAndMakeVisible(loopButton);
+
         // Update pitch button labels with tooltips
         updatePitchButtonLabels();
         
@@ -211,6 +231,9 @@ public:
     
     ~SampleCard() override
     {
+        volumeKnob.setLookAndFeel(nullptr);
+        startKnob.setLookAndFeel(nullptr);
+        endKnob.setLookAndFeel(nullptr);
     }
 
     void resetViewport()
@@ -291,9 +314,10 @@ public:
         area.removeFromTop(5);
         
         // ===== Pitch adjustment controls row (below waveform, left corner) =====
-        auto pitchRow = area.removeFromTop(50);
-        
-        // Position pitch buttons vertically centred (30px tall) within the 50px row
+        // 60px height → knob bounding box ≈ 47px → CompactKnobLookAndFeel circle ≈ 42px diameter
+        auto pitchRow = area.removeFromTop(60);
+
+        // Position pitch buttons vertically centred (30px tall) within the 60px row
         const int pitchControlWidth = 180;  // 60 + 60 + 60
         auto pitchControlArea = pitchRow.withWidth(pitchControlWidth)
                                         .withSizeKeepingCentre(pitchControlWidth, 30);
@@ -317,6 +341,11 @@ public:
             auto col = pitchRow.removeFromRight(60);
             startKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
             startKnob.setBounds(col.reduced(2));
+        }
+        {
+            // Loop toggle button — left of Start knob, vertically centered in pitch row
+            auto col = pitchRow.removeFromRight(60);
+            loopButton.setBounds(col.withSizeKeepingCentre(56, 40));
         }
         
         // Add margin before bottom info row
@@ -422,6 +451,15 @@ public:
         endKnob.setValue(1.0, juce::dontSendNotification);
         if (waveformComponent != nullptr)
             waveformComponent->setEndMarker(1.0f);
+    }
+
+    bool isLoopEnabled() const { return loopButton.getToggleState(); }
+
+    void setLoopEnabled(bool enabled)
+    {
+        loopButton.setToggleState(enabled, juce::dontSendNotification);
+        if (waveformComponent != nullptr)
+            waveformComponent->setLoopHighlight(enabled);
     }
 
     void setPitchOffset(int offset)
@@ -644,6 +682,7 @@ public:
         virtual void volumeChanged(float volume) = 0;
         virtual void startPointChanged(double startPointSeconds) = 0;
         virtual void endPointChanged(double endPointSeconds) = 0;
+        virtual void loopEnabledChanged(bool isLooping) = 0;
     };
     
     void addListener(Listener* listener)
@@ -1113,6 +1152,16 @@ public:
                     }
                 }
 
+                // Draw loop region highlight (semi-transparent overlay between start and end)
+                if (loopHighlightEnabled)
+                {
+                    float hlStartX = waveformBounds.getX() + startMarkerNormalized * actualWaveformWidth;
+                    float hlEndX   = waveformBounds.getX() + endMarkerNormalized   * actualWaveformWidth;
+                    g.setColour(juce::Colour(0xFFB4FF00).withAlpha(0.20f)); // rgba(180,255,0,0.20)
+                    g.fillRect(juce::Rectangle<float>(hlStartX, (float)waveformBounds.getY(),
+                                                      hlEndX - hlStartX, (float)waveformBounds.getHeight()));
+                }
+
                 // Draw start point marker — deep red, triangle at ruler top (pointing down)
                 float markerX = waveformBounds.getX() + startMarkerNormalized * actualWaveformWidth;
                 g.setColour(juce::Colour(0xFFCC0000).withAlpha(0.9f));
@@ -1164,6 +1213,12 @@ public:
             }
 
             float getEndMarker() const { return endMarkerNormalized; }
+
+            void setLoopHighlight(bool enabled)
+            {
+                loopHighlightEnabled = enabled;
+                repaint();
+            }
 
             // Callbacks: invoked when user drags either marker
             std::function<void(float)> onMarkerDragged;
@@ -1274,6 +1329,7 @@ public:
             int cachedNumChannels = 0;
             float startMarkerNormalized = 0.0f;
             float endMarkerNormalized   = 1.0f;
+            bool loopHighlightEnabled   = false;
 
             enum class DragTarget { None, Start, End };
             DragTarget currentDragTarget = DragTarget::None;
@@ -1535,6 +1591,12 @@ void adjustPitchUp()
     juce::Label pitchLabel;
     juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
     int pitchOffset = 0;  // Pitch offset in semitones
+
+    // Loop toggle button
+    juce::TextButton loopButton;
+
+    // Compact knob LookAndFeel shared by all three SamplerPad knobs
+    CompactKnobLookAndFeel compactKnobLaf;
 
     // Volume knob
     juce::Slider volumeKnob;

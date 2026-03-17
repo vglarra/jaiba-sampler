@@ -12,6 +12,7 @@
 #include "SampleCard.h"
 #include "ConfigurationManager.h"
 #include "MidiActivityLight.h"
+#include "LoopingSampler.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -119,12 +120,16 @@ private:
     void volumeChanged(float volume) override;
     void startPointChanged(double startPointSeconds) override;
     void endPointChanged(double endPointSeconds) override;
+    void loopEnabledChanged(bool isLooping) override;
 
     //==============================================================================
     // MIDI Learn handling
     void handleMidiLearn(int noteNumber);
 
     //==============================================================================
+    // Compact knob LookAndFeel — shared with SampleCard knobs (defined in KnobLookAndFeel.h)
+    CompactKnobLookAndFeel compactKnobLaf;
+
     // UI Components
     juce::TextButton menuButton{ "Menu" };
     juce::TextButton testToneButton{ "Test tone" };
@@ -165,6 +170,7 @@ private:
     // Volume
     std::atomic<float> volumeGain { 1.0f };
     std::atomic<float> masterVolumeGain { 0.7f };
+    std::atomic<bool>  loopEnabled { false };
 
     //==============================================================================
     // Sine wave generation
@@ -189,8 +195,8 @@ private:
         double startPointSeconds = 0.0;  // Sample start point offset
         double endPointSeconds   = -1.0; // Sample end point offset (-1 = full length)
         
-        // Cached audio data
-        std::unique_ptr<juce::AudioBuffer<float>> audioData;
+        // Cached audio data — shared_ptr so LoopingSamplerSound can safely outlive a reload
+        std::shared_ptr<juce::AudioBuffer<float>> audioData;
         double sampleRate = 0;
         int numChannels = 0;
         juce::int64 lengthInSamples = 0;

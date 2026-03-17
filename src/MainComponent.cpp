@@ -33,9 +33,9 @@ MainComponent::MainComponent()
     
     formatManager.registerBasicFormats();
     
-    // Add sampler voices with note stealing enabled
+    // Add looping sampler voices with note stealing enabled
     for (int i = 0; i < 16; ++i)
-        sampler.addVoice(new juce::SamplerVoice());
+        sampler.addVoice(new LoopingSamplerVoice());
     
     // Enable note stealing for better voice management
     sampler.setNoteStealingEnabled(true);
@@ -53,7 +53,8 @@ MainComponent::MainComponent()
       addAndMakeVisible(testToneButton);
       testToneButton.addListener(this);
 
-    // Master volume knob
+    // Master volume knob — use compact LookAndFeel so knob circle fills its bounding box
+    masterVolumeKnob.setLookAndFeel(&compactKnobLaf);
     masterVolumeKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
     masterVolumeKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     masterVolumeKnob.setRange(0.0, 1.0, 0.01);
@@ -61,7 +62,7 @@ MainComponent::MainComponent()
     masterVolumeKnob.setTooltip("Master Volume");
     masterVolumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCECECE));
     masterVolumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
-    masterVolumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFCECECE));
+    masterVolumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFF1E1E1E)); // dark indicator on light fill
     masterVolumeKnob.onValueChange = [this] {
         masterVolumeGain.store((float)masterVolumeKnob.getValue());
         if (configManager != nullptr)
@@ -71,8 +72,8 @@ MainComponent::MainComponent()
 
     masterVolumeLabel.setText("Master Vol", juce::dontSendNotification);
     masterVolumeLabel.setJustificationType(juce::Justification::centredRight);
-    masterVolumeLabel.setFont(juce::Font(11.0f));
-    masterVolumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9A9A9A));
+    masterVolumeLabel.setFont(juce::Font(12.0f));
+    masterVolumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
     addAndMakeVisible(masterVolumeLabel);
 
       // Add MIDI activity light to the title area
@@ -142,6 +143,7 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    masterVolumeKnob.setLookAndFeel(nullptr);
     cpuTimer.stopTimer();
     deviceManager.removeChangeListener(this);
     
@@ -209,22 +211,15 @@ void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xFF1E1E1E));
     
-    // Draw title
+    // Draw title centred in the 40px top bar, between Menu button (left) and right controls
+    // Left trim: 20px margin + 60px menu = 80; Right trim: 20px margin + 192px right group = 212
     g.setColour(juce::Colour(0xFFCECECE));
-    g.setFont(juce::Font(24.0f, juce::Font::bold));
-    
-    // Title area matches reduced top bar height (30px)
-    auto titleArea = getLocalBounds().reduced(20).removeFromTop(30);
+    g.setFont(juce::Font(18.0f, juce::Font::bold));
+    auto titleArea = getLocalBounds().withTrimmedLeft(80).withTrimmedRight(212).removeFromTop(40);
     g.drawText("Jaiva Sampler V001", titleArea, juce::Justification::centred, true);
-    
-    // Draw separator lines
-    g.setColour(juce::Colour(0xFF404040));
 
-    // Line below title (adjusted for reduced top bar)
-    auto lineY = titleArea.getBottom() + 5;
-    g.drawHorizontalLine(lineY, 20, getWidth() - 20);
-    
-    // Line above footer - adjusted for reduced footer height (50px + 20px padding)
+    // Line above footer
+    g.setColour(juce::Colour(0xFF404040));
     auto footerY = getHeight() - 70;
     g.drawHorizontalLine(footerY, 20, getWidth() - 20);
 
@@ -242,45 +237,37 @@ void MainComponent::resized()
     if (isResizing) return;
     isResizing = true;
     
-    auto area = getLocalBounds().reduced(20);
-    
-    // Top bar: Menu button on left, Title in center, MIDI light button and Test tone button on right
-    // Reduced top bar height by 40% (from 50px to 30px)
-    auto topBar = area.removeFromTop(30);
-    
-    // Menu button on left (60px wide like Prev/Next buttons in SampleCard)
-    menuButton.setBounds(topBar.removeFromLeft(60).reduced(2));
-    
-    // Title area (centered in remaining space)
-    auto titleArea = topBar;
-    auto titleBounds = titleArea.withSizeKeepingCentre(300, 30);
-    
-    // Right side: Master Vol label + knob | MIDI light | Test tone
-    // Total: label(65) + gap(3) + knob(30) + gap(10) + MIDI(30) + gap(5) + TestTone(60) = 203
-    auto rightSide = topBar.removeFromRight(65 + 3 + 30 + 10 + 30 + 5 + 60);
+    // No top margin — content starts flush at the top edge
+    auto area = getLocalBounds().withTrimmedLeft(20).withTrimmedRight(20).withTrimmedBottom(20);
 
-    // Master Vol label (centred-right so text hugs the knob)
-    masterVolumeLabel.setBounds(rightSide.removeFromLeft(65).reduced(1));
-    rightSide.removeFromLeft(3);
-    // Master Vol knob
-    masterVolumeKnob.setBounds(rightSide.removeFromLeft(30).reduced(2));
-    rightSide.removeFromLeft(10);
+    // Top bar: strict 40px — all elements on one horizontal line, nothing expands this
+    auto topBar = area.removeFromTop(40);
 
-    // MIDI light button (30px wide, same height as other buttons)
-    midiActivityLight.setBounds(rightSide.removeFromLeft(30).reduced(2));
+    // Menu button — vertically centred in 40px bar
+    menuButton.setBounds(topBar.removeFromLeft(60).withSizeKeepingCentre(56, 30));
 
-    // 5px margin between buttons
-    rightSide.removeFromLeft(5);
+    // Right side (left-to-right): label(62) + gap(4) + knob(28) + gap(8) + MIDI(22) + gap(6) + TestTone(62) = 192px
+    auto rightSide = topBar.removeFromRight(62 + 4 + 28 + 8 + 22 + 6 + 62);
 
-    // Test tone button on right (60px wide like Prev/Next buttons)
-    testToneButton.setBounds(rightSide.removeFromLeft(60).reduced(2));
+    // Master Vol: label on left, 28x28 knob on right — both vertically centred
+    masterVolumeLabel.setBounds(rightSide.removeFromLeft(62).withSizeKeepingCentre(62, 16));
+    rightSide.removeFromLeft(4);
+    masterVolumeKnob.setBounds(rightSide.removeFromLeft(28).withSizeKeepingCentre(28, 28));
+    rightSide.removeFromLeft(8);
+
+    // MIDI light — vertically centred
+    midiActivityLight.setBounds(rightSide.removeFromLeft(22).withSizeKeepingCentre(20, 20));
+    rightSide.removeFromLeft(6);
+
+    // Test tone button — vertically centred
+    testToneButton.setBounds(rightSide.removeFromLeft(62).withSizeKeepingCentre(58, 30));
     
     // Body area - this is where the card goes
     auto bodyArea = area.reduced(10, 5);
     
     // Make the card take most of the body width, but with max width to maintain proportions
     const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
-    const int cardHeight = 320;     // Fixed height
+    const int cardHeight = 330;     // Fixed height (extra 10px for taller pitch row with compact knobs)
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
     
@@ -616,14 +603,14 @@ void MainComponent::loadSampleFile(const juce::File& file)
         sample->numChannels = reader->numChannels;
         sample->lengthInSamples = reader->lengthInSamples;
         
-        auto buffer = std::make_unique<juce::AudioBuffer<float>>(
-            (int)reader->numChannels, 
+        auto buffer = std::make_shared<juce::AudioBuffer<float>>(
+            (int)reader->numChannels,
             (int)reader->lengthInSamples
         );
-        
+
         reader->read(buffer.get(), 0, (int)reader->lengthInSamples, 0, true, true);
         sample->audioData = std::move(buffer);
-        
+
         {
             juce::ScopedLock lock(sampleLock);
             samples.add(sample);
@@ -1038,116 +1025,77 @@ void MainComponent::updateSamplerSounds()
         if (sample == nullptr || sample->audioData == nullptr) 
             continue;
         
-        // Create a proper memory-based reader with correct overrides
-        class MemoryAudioReader : public juce::AudioFormatReader
+        // Tiny silent reader — only needed to satisfy SamplerSound's constructor.
+        // LoopingSamplerVoice reads from sound->fullAudioData (the full original buffer) instead.
+        class DummyAudioReader : public juce::AudioFormatReader
         {
         public:
-            MemoryAudioReader(juce::AudioBuffer<float>* buffer, double sourceSampleRate, int sourceChannels,
-                              juce::int64 startOffset = 0, juce::int64 endOffset = -1)
-                : juce::AudioFormatReader(nullptr, "Memory Reader"),
-                  cachedBuffer(buffer),
-                  sampleOffset(startOffset)
+            DummyAudioReader(double sr, unsigned int ch)
+                : juce::AudioFormatReader(nullptr, "Dummy")
             {
-                sampleRate = sourceSampleRate;
-                numChannels = sourceChannels;
-                juce::int64 bufLen = buffer->getNumSamples();
-                juce::int64 effectiveEnd = (endOffset > 0 && endOffset <= bufLen) ? endOffset : bufLen;
-                lengthInSamples = juce::jmax((juce::int64)0, effectiveEnd - startOffset);
-                bitsPerSample = 32;
+                sampleRate            = sr;
+                numChannels           = ch;
+                lengthInSamples       = 1;
+                bitsPerSample         = 32;
                 usesFloatingPointData = true;
             }
-
-            // Override readSamples method (required by JUCE AudioFormatReader)
-            bool readSamples(int* const* destChannels, int numDestChannels,
-                            int startOffsetInDestBuffer, juce::int64 startSampleInFile,
-                            int numSamples) override
+            bool readSamples(int* const* dest, int numDest, int startOff,
+                             juce::int64 /*startInFile*/, int num) override
             {
-                juce::int64 actualStart = startSampleInFile + sampleOffset;
-                // Convert int* to float* for processing
-                for (int channel = 0; channel < numDestChannels; ++channel)
-                {
-                    if (destChannels[channel] != nullptr && channel < cachedBuffer->getNumChannels())
-                    {
-                        float* dest = reinterpret_cast<float*>(destChannels[channel]);
-                        const float* src = cachedBuffer->getReadPointer(channel, (int)actualStart);
-
-                        for (int i = 0; i < numSamples; ++i)
-                        {
-                            dest[startOffsetInDestBuffer + i] = src[i];
-                        }
-                    }
-                }
+                for (int ch = 0; ch < numDest; ++ch)
+                    if (dest[ch] != nullptr)
+                        memset(reinterpret_cast<float*>(dest[ch]) + startOff, 0,
+                               (size_t)num * sizeof(float));
                 return true;
             }
-
-        private:
-            juce::AudioBuffer<float>* cachedBuffer;
-            juce::int64 sampleOffset;
         };
-        
-        // Compute start sample offset from startPointSeconds
-        juce::int64 startOffset = 0;
+        DummyAudioReader dummyReader(sample->sampleRate, (unsigned int)sample->numChannels);
+
+        // Compute start/end absolute sample positions for atomic real-time updates.
+        const juce::int64 bufTotal = (juce::int64)sample->audioData->getNumSamples();
+        juce::int64 startSample = 0;
+        juce::int64 endSample   = juce::jmax((juce::int64)1, bufTotal - 1); // leave 1 guard sample
+
         if (sample->startPointSeconds > 0.0 && sample->sampleRate > 0)
         {
-            startOffset = (juce::int64)(sample->startPointSeconds * sample->sampleRate);
-            juce::int64 maxOffset = (juce::int64)sample->audioData->getNumSamples() - 1;
-            startOffset = juce::jlimit((juce::int64)0, maxOffset, startOffset);
+            startSample = (juce::int64)(sample->startPointSeconds * sample->sampleRate);
+            startSample = juce::jlimit((juce::int64)0, endSample - 1, startSample);
         }
-
-        // Compute end sample offset from endPointSeconds (-1 means full length)
-        juce::int64 endOffset = -1;
         if (sample->endPointSeconds > 0.0 && sample->sampleRate > 0)
         {
-            endOffset = (juce::int64)(sample->endPointSeconds * sample->sampleRate);
-            juce::int64 bufLen = (juce::int64)sample->audioData->getNumSamples();
-            endOffset = juce::jlimit(startOffset + 1, bufLen, endOffset);
+            endSample = (juce::int64)(sample->endPointSeconds * sample->sampleRate);
+            endSample = juce::jlimit(startSample + 1, bufTotal - 1, endSample);
         }
 
-        auto* reader = new MemoryAudioReader(
-            sample->audioData.get(),
-            sample->sampleRate,
-            sample->numChannels,
-            startOffset,
-            endOffset
-        );
-        
-        // IMPORTANT FIX: Create note range that includes ALL notes that should trigger this sample
-        // For single-note mode with pitch offset, we want the sample to trigger on the ORIGINAL root note
-        // The pitch offset will be applied by the sampler automatically based on the difference
-        // between the played note and the root note
         juce::BigInteger noteRange;
-        noteRange.setRange(0, 128, false);  // Clear all notes first
-        
-        // Set ONLY the original root note as the trigger note
-        // This means the sample will ONLY play when we hit the original root note
-        // The pitch offset will be applied automatically by the sampler
+        noteRange.setRange(0, 128, false);
         noteRange.setBit(sample->rootNote);
-        
-        printf("Creating sound: %s -> triggers on note %d (root: %d) with pitch offset %+d\n", 
+
+        printf("Creating sound: %s -> triggers on note %d (root: %d) with pitch offset %+d\n",
                sample->name.toRawUTF8(), sample->rootNote, sample->rootNote, sample->pitchOffset);
-        
-        // Create the sound with adjusted root note
-        // Based on testing, the correct formula appears to be subtraction.
+
         // JUCE calculates: pitch shift = playedNote - midiNoteForNormalPitch
-        // We want: pitch shift = pitchOffset (positive for pitch UP)
-        // So: sample->rootNote - midiNoteForNormalPitch = pitchOffset
-        // Therefore: midiNoteForNormalPitch = sample->rootNote - pitchOffset
-        auto* sound = new juce::SamplerSound(
+        // We want: pitch shift = pitchOffset  →  midiNoteForNormalPitch = rootNote - pitchOffset
+        auto* sound = new LoopingSamplerSound(
             sample->name,
-            *reader,
+            dummyReader,
             noteRange,
-            sample->rootNote - sample->pitchOffset,  // Subtraction is correct
+            sample->rootNote - sample->pitchOffset,
             sample->attack,
             sample->release,
             10.0
         );
-        
+        sound->fullAudioData = sample->audioData;    // shared_ptr copy — keeps buffer alive
+        sound->startSampleAtomic.store(startSample);
+        sound->endSampleAtomic.store(endSample);
+        sound->loopEnabled.store(loopEnabled.load());
+
         sampler.addSound(sound);
-        
+
         printf("Added sound from cache: %s -> triggers on note %d (adjusted root: %d) with pitch offset %+d\n",
                sample->name.toRawUTF8(),
                sample->rootNote,
-               sample->rootNote - sample->pitchOffset,  // Correct: subtraction matches actual calculation
+               sample->rootNote - sample->pitchOffset,
                sample->pitchOffset);
     }
     
@@ -1293,8 +1241,8 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, i
     printf("Setting pitch offset to: %+d\n", sample->pitchOffset);
     
     // Load audio data on background thread
-    auto buffer = std::make_unique<juce::AudioBuffer<float>>(
-        (int)reader->numChannels, 
+    auto buffer = std::make_shared<juce::AudioBuffer<float>>(
+        (int)reader->numChannels,
         (int)reader->lengthInSamples
     );
     
@@ -1508,12 +1456,30 @@ void MainComponent::volumeChanged(float volume)
 
 void MainComponent::startPointChanged(double startPointSeconds)
 {
+    double sampleRate = 0.0;
     {
         juce::ScopedLock lock(sampleLock);
         if (!samples.isEmpty())
+        {
             samples[0]->startPointSeconds = startPointSeconds;
+            sampleRate = samples[0]->sampleRate;
+        }
     }
-    updateSamplerSounds();
+
+    // Push new start position to all live sounds atomically — no rebuild, no note cutoff.
+    if (sampleRate > 0.0)
+    {
+        const juce::int64 newStart = (juce::int64)(startPointSeconds * sampleRate);
+        for (int i = 0; i < sampler.getNumSounds(); ++i)
+        {
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            {
+                // Keep start below end — clamp to endSampleAtomic - 1
+                const juce::int64 curEnd = sound->endSampleAtomic.load();
+                sound->startSampleAtomic.store(juce::jmin(newStart, curEnd - 1));
+            }
+        }
+    }
 
     if (configManager != nullptr)
         configManager->saveStartPoint(startPointSeconds);
@@ -1523,17 +1489,59 @@ void MainComponent::startPointChanged(double startPointSeconds)
 
 void MainComponent::endPointChanged(double endPointSeconds)
 {
+    double sampleRate     = 0.0;
+    juce::int64 bufLen    = 0;
     {
         juce::ScopedLock lock(sampleLock);
         if (!samples.isEmpty())
+        {
             samples[0]->endPointSeconds = endPointSeconds;
+            sampleRate = samples[0]->sampleRate;
+            if (samples[0]->audioData != nullptr)
+                bufLen = samples[0]->audioData->getNumSamples();
+        }
     }
-    updateSamplerSounds();
+
+    // Push new end position to all live sounds atomically — no rebuild, no note cutoff.
+    if (sampleRate > 0.0 && bufLen > 0)
+    {
+        juce::int64 newEnd = (endPointSeconds > 0.0)
+                                 ? (juce::int64)(endPointSeconds * sampleRate)
+                                 : bufLen;
+        newEnd = juce::jmin(newEnd, bufLen);
+
+        for (int i = 0; i < sampler.getNumSounds(); ++i)
+        {
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            {
+                // Keep end above start — clamp to startSampleAtomic + 1
+                const juce::int64 curStart = sound->startSampleAtomic.load();
+                sound->endSampleAtomic.store(juce::jmax(newEnd, curStart + 1));
+            }
+        }
+    }
 
     if (configManager != nullptr)
         configManager->saveEndPoint(endPointSeconds);
 
     printf("End point set to: %.3f s\n", endPointSeconds);
+}
+
+void MainComponent::loopEnabledChanged(bool isLooping)
+{
+    loopEnabled.store(isLooping);
+
+    // Update the flag on all currently loaded sounds — no rebuild needed
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+    {
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            sound->loopEnabled.store(isLooping);
+    }
+
+    if (configManager != nullptr)
+        configManager->saveLoopEnabled(isLooping);
+
+    printf("Loop %s\n", isLooping ? "ON" : "OFF");
 }
 
 void MainComponent::handleMidiLearn(int noteNumber)
@@ -1655,6 +1663,11 @@ void MainComponent::loadLastSession()
                     break;
                 }
             }
+
+            // Restore loop state before loading so updateSamplerSounds() picks it up
+            bool savedLoopEnabled = configManager->getLoopEnabled();
+            loopEnabled.store(savedLoopEnabled);
+            sampleCard.setLoopEnabled(savedLoopEnabled);
 
             // Load the sample but DON'T auto-play it, restoring pitch, start, and end points
             loadSampleFileAsync(lastSample, false, savedPitchOffset, savedStartPoint, savedEndPoint);
