@@ -80,7 +80,7 @@ private:
     //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
-    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, int pitchOffsetToUse = 0, double startPointSecondsToUse = 0.0, double endPointSecondsToUse = -1.0);
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true);
     void updateSamplerSounds();
     
     // Audio device management
@@ -121,6 +121,7 @@ private:
     void startPointChanged(double startPointSeconds) override;
     void endPointChanged(double endPointSeconds) override;
     void loopEnabledChanged(bool isLooping) override;
+    void freezeChanged(bool isFrozen) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -171,6 +172,9 @@ private:
     std::atomic<float> volumeGain { 1.0f };
     std::atomic<float> masterVolumeGain { 0.7f };
     std::atomic<bool>  loopEnabled { false };
+    // Set true during sample-change to silence the audio thread immediately.
+    // Audio thread checks this at the top of getNextAudioBlock and returns a zeroed buffer.
+    std::atomic<bool>  muteOutput { false };
 
     //==============================================================================
     // Sine wave generation
@@ -314,6 +318,8 @@ private:
 
     //==============================================================================
     // Session persistence
+    void saveOutgoingSampleState();  // Save current sample's state BEFORE loading a new one
+    void saveCurrentSampleState();   // Save current sample's state (called on every change)
     std::unique_ptr<ConfigurationManager> configManager;
     MidiActivityLight midiActivityLight;
     

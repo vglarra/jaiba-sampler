@@ -24,6 +24,7 @@ MainComponent::MainComponent()
     
     // Create configuration manager for session persistence
     configManager = std::make_unique<ConfigurationManager>();
+    printf("Settings file: %s\n", configManager->getSettingsFilePath().toRawUTF8());
     
     // Create the model
     sampleListModel = std::make_unique<SampleListModel>(*this);
@@ -146,7 +147,34 @@ MainComponent::~MainComponent()
     masterVolumeKnob.setLookAndFeel(nullptr);
     cpuTimer.stopTimer();
     deviceManager.removeChangeListener(this);
-    
+
+    // Kill any active freeze/loop voices before audio shutdown
+    muteOutput.store(true);
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+        {
+            s->freezeActive.store(false);
+            s->loopEnabled.store(false);
+        }
+    for (int i = 0; i < sampler.getNumVoices(); ++i)
+        if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
+            v->forceStop();
+    sampler.clearSounds();
+    sampler.allNotesOff(0, false);
+
+    // Shutdown save — flush current state to disk before the app closes.
+    // This is a safety net: all individual saves already write immediately
+    // (millisecondsBeforeSaving=0), but this guarantees nothing is lost.
+    if (configManager != nullptr)
+    {
+        configManager->savePitchOffset(sampleCard.getPitchOffset());
+        configManager->saveMasterVolume(masterVolumeGain.load());
+        saveCurrentSampleState();
+        configManager->saveNow();
+        printf("[PITCH] Shutdown save: pitch=%+d\n", sampleCard.getPitchOffset());
+        fflush(stdout);
+    }
+
     shutdownAudio();
 }
 
@@ -159,6 +187,15 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
 {
+    // muteOutput is set true by the message thread during sample-change to guarantee a
+    // silent, zeroed buffer while the sampler is being rebuilt.  Checked atomically so
+    // the audio thread sees it within one block (~6 ms) with no locks required.
+    if (muteOutput.load())
+    {
+        bufferToFill.clearActiveBufferRegion();
+        return;
+    }
+
     bufferToFill.clearActiveBufferRegion();
     
     juce::MidiBuffer midiMessages;
@@ -216,7 +253,7 @@ void MainComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xFFCECECE));
     g.setFont(juce::Font(18.0f, juce::Font::bold));
     auto titleArea = getLocalBounds().withTrimmedLeft(80).withTrimmedRight(212).removeFromTop(40);
-    g.drawText("Jaiva Sampler V001", titleArea, juce::Justification::centred, true);
+    g.drawText("JAIVA-SAMPLER||1.0", titleArea, juce::Justification::centred, true);
 
     // Line above footer
     g.setColour(juce::Colour(0xFF404040));
@@ -369,13 +406,24 @@ void MainComponent::buttonClicked(juce::Button* button)
                         }
                     }
                     
-                    // Use the async loading method instead of synchronous loadSampleFile
-                    // This ensures proper UI updates and session saving
-                    // New sample from Add button - reset pitch to 0
-                    loadSampleFileAsync(file, true, 0); // true for auto-play, 0 for pitch offset
-                    
-                    // DON'T call saveCurrentSession() here - it will be called 
-                    // from within loadSampleFileAsync after the sample is fully loaded
+                    // Step 1 — save outgoing state before loading new file
+                    saveOutgoingSampleState();
+
+                    // + button = intentional new load: pitch always resets to 0.
+                    printf("[PITCH] + button load: resetting pitch to 0\n");
+                    sampleCard.setPitchOffset(0);
+                    {
+                        juce::ScopedLock lock(sampleLock);
+                        if (!samples.isEmpty())
+                            samples[0]->pitchOffset = 0;
+                    }
+                    for (int i = 0; i < sampler.getNumSounds(); ++i)
+                        if (auto* snd = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+                            snd->pitchOffsetAtomic.store(0);
+                    if (configManager != nullptr)
+                        configManager->savePitchOffset(0);
+
+                    loadSampleFileAsync(file, true);
                 }
             },
             previewComp
@@ -1071,32 +1119,30 @@ void MainComponent::updateSamplerSounds()
         noteRange.setRange(0, 128, false);
         noteRange.setBit(sample->rootNote);
 
-        printf("Creating sound: %s -> triggers on note %d (root: %d) with pitch offset %+d\n",
-               sample->name.toRawUTF8(), sample->rootNote, sample->rootNote, sample->pitchOffset);
+        printf("Creating sound: %s -> triggers on note %d, pitch offset %+d\n",
+               sample->name.toRawUTF8(), sample->rootNote, sample->pitchOffset);
 
-        // JUCE calculates: pitch shift = playedNote - midiNoteForNormalPitch
-        // We want: pitch shift = pitchOffset  →  midiNoteForNormalPitch = rootNote - pitchOffset
+        // midiRootNote = rootNote (no offset baked in).
+        // The voice applies pitchOffsetAtomic per block so it can update in real-time.
         auto* sound = new LoopingSamplerSound(
             sample->name,
             dummyReader,
             noteRange,
-            sample->rootNote - sample->pitchOffset,
+            sample->rootNote,
             sample->attack,
             sample->release,
             10.0
         );
-        sound->fullAudioData = sample->audioData;    // shared_ptr copy — keeps buffer alive
+        sound->fullAudioData = sample->audioData;       // shared_ptr copy — keeps buffer alive
         sound->startSampleAtomic.store(startSample);
         sound->endSampleAtomic.store(endSample);
         sound->loopEnabled.store(loopEnabled.load());
+        sound->pitchOffsetAtomic.store(sample->pitchOffset);
 
         sampler.addSound(sound);
 
-        printf("Added sound from cache: %s -> triggers on note %d (adjusted root: %d) with pitch offset %+d\n",
-               sample->name.toRawUTF8(),
-               sample->rootNote,
-               sample->rootNote - sample->pitchOffset,
-               sample->pitchOffset);
+        printf("Added sound: %s -> note %d, pitchOffset %+d\n",
+               sample->name.toRawUTF8(), sample->rootNote, sample->pitchOffset);
     }
     
     printf("Sampler updated with %d sounds (each mapped to single note)\n", samples.size());
@@ -1170,165 +1216,193 @@ void MainComponent::scanCurrentFolderForAudioFiles()
 
 void MainComponent::navigateToFile(int index)
 {
-    if (folderAudioFiles.isEmpty())
+    if (folderAudioFiles.isEmpty() || index < 0 || index >= folderAudioFiles.size())
         return;
-    
-    if (index >= 0 && index < folderAudioFiles.size())
-    {
-        currentFileIndex = index;
-        auto file = folderAudioFiles[currentFileIndex];
-        
-        // Stop all currently playing notes before loading new sample
-        sampler.allNotesOff(1, false);
-        
-        // CRITICAL: Reset the viewport position on the UI thread
-        juce::MessageManager::callAsync([this]() {
-            sampleCard.resetViewport();  // You'll need to add this method
-        });
-        
-        // Clear the sampler sounds immediately on the message thread
-        juce::MessageManager::callAsync([this]() {
-            sampler.clearSounds();
-        });
-        
-        // Load sample on background thread
-        backgroundThreads.addJob([this, file]() {
-            loadSampleFileAsync(file, true, sampleCard.getPitchOffset());
-        });
-    }
+
+    // Step 1 — Save current sample state to disk BEFORE anything changes.
+    // Must be synchronous here so the card still holds the true values.
+    saveOutgoingSampleState();
+
+    currentFileIndex = index;
+    auto file = folderAudioFiles[index];
+
+    // Step 2 — Reset waveform viewport on the message thread (cosmetic).
+    sampleCard.resetViewport();
+
+    // Pitch is NOT touched during Next/Prev — it stays exactly as the user left it.
+    printf("[PITCH] Next/Prev: pitch stays at %+d (not changed)\n", sampleCard.getPitchOffset());
+
+    // Steps 3-7 happen inside loadSampleFileAsync:
+    //   stop audio → reset → load → restore per-sample state (or defaults) → save.
+    backgroundThreads.addJob([this, file]() {
+        loadSampleFileAsync(file, true);
+    });
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, int pitchOffsetToUse, double startPointSecondsToUse, double endPointSecondsToUse)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
 {
-    // Create reader on background thread
+    // ── Background thread: read audio data ────────────────────────────────────────
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-    
+
     if (reader == nullptr)
     {
-        printf("Failed to load: %s\n", file.getFileName().toRawUTF8());
+        printf("[PERSIST] ERROR: Cannot read file: %s\n", file.getFileName().toRawUTF8());
         fflush(stdout);
         return;
     }
-    
-    printf("Loading sample: %s (%lld samples, %d ch, %.1f kHz) - Auto-play: %s - Pitch offset: %+d\n", 
+
+    printf("[PERSIST] Reading audio: %s  (%lld samples, %d ch, %.1f kHz)\n",
            file.getFileName().toRawUTF8(),
-           reader->lengthInSamples,
-           reader->numChannels,
-           reader->sampleRate / 1000.0,
-           autoPlay ? "YES" : "NO",
-           pitchOffsetToUse);
-    
-    // Create sample on background thread
+           reader->lengthInSamples, reader->numChannels, reader->sampleRate / 1000.0);
+
     auto* sample = new MappedSample();
-    sample->file = file;
-    sample->name = file.getFileName();
-    
-    // IMPORTANT: Get the current MIDI note from the card
-    // We need to capture the note value before going to background thread
-    int currentNote = sampleCard.getMidiNote();  // This is safe here
-    
-    sample->rootNote = currentNote;  // Use card's current note
-    sample->lowNote = currentNote;   // Same for low note
-    sample->highNote = currentNote;  // Same for high note
-    sample->sampleRate = reader->sampleRate;
-    sample->numChannels = reader->numChannels;
+    sample->file   = file;
+    sample->name   = file.getFileName();
+    int currentNote = sampleCard.getMidiNote();   // safe to read here (atomic-backed)
+    sample->rootNote = currentNote;
+    sample->lowNote  = currentNote;
+    sample->highNote = currentNote;
+    sample->sampleRate      = reader->sampleRate;
+    sample->numChannels     = reader->numChannels;
     sample->lengthInSamples = reader->lengthInSamples;
-    sample->attack = 0.01;  // Fast attack for preview
-    sample->release = 0.1;   // Short release
-    
-    // Use the provided pitch offset instead of determining from autoPlay
-    sample->pitchOffset = pitchOffsetToUse;
-    printf("Setting pitch offset to: %+d\n", sample->pitchOffset);
-    
-    // Load audio data on background thread
+    sample->attack  = 0.01;
+    sample->release = 0.1;
+
     auto buffer = std::make_shared<juce::AudioBuffer<float>>(
-        (int)reader->numChannels,
-        (int)reader->lengthInSamples
-    );
-    
-    bool readSuccess = reader->read(buffer.get(), 0, (int)reader->lengthInSamples, 0, true, true);
-    
-    if (!readSuccess)
+        (int)reader->numChannels, (int)reader->lengthInSamples);
+
+    if (!reader->read(buffer.get(), 0, (int)reader->lengthInSamples, 0, true, true))
     {
-        printf("Failed to read audio data: %s\n", file.getFileName().toRawUTF8());
+        printf("[PERSIST] ERROR: Failed to decode audio: %s\n", file.getFileName().toRawUTF8());
         delete sample;
         return;
     }
-    
-    // Debug: check sample peak level
-    float maxSample = 0.0f;
-    for (int ch = 0; ch < buffer->getNumChannels(); ++ch)
-    {
-        for (int s = 0; s < buffer->getNumSamples(); ++s)
-        {
-            float val = std::abs(buffer->getSample(ch, s));
-            if (val > maxSample) maxSample = val;
-        }
-    }
-    printf("Sample peak level: %.4f\n", maxSample);
-    
     sample->audioData = std::move(buffer);
-    
-    // Update UI on message thread
-    juce::MessageManager::callAsync([this, sample, file, autoPlay, startPointSecondsToUse, endPointSecondsToUse]() {
-        // Stop any currently playing notes
-        sampler.allNotesOff(1, false);
-        
-        // Clear existing samples on UI thread with lock
+
+    // ── Message thread: stop audio, restore state, rebuild sampler ────────────────
+    juce::MessageManager::callAsync([this, sample, file, autoPlay]() {
+
+        // ── Step 2: Stop all audio completely ─────────────────────────────────────
+        muteOutput.store(true);   // audio thread bails immediately
+
+        // Clear freeze/loop flags so stopNote() fires correctly
+        for (int i = 0; i < sampler.getNumSounds(); ++i)
+            if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            {
+                s->freezeActive.store(false);
+                s->loopEnabled.store(false);
+            }
+        // Force-stop every voice: releases currentlyPlayingSound ref-count directly
+        for (int i = 0; i < sampler.getNumVoices(); ++i)
+            if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
+                v->forceStop();
+        sampler.clearSounds();
+        sampler.allNotesOff(0, false);
+
+        // ── Step 3: Reset card to neutral state ───────────────────────────────────
+        sampleCard.resetStartPoint();
+        sampleCard.resetEndPoint();
+        sampleCard.setLoopEnabled(false);
+        sampleCard.resetFreeze();
+
+        // ── Step 4: Install new sample ────────────────────────────────────────────
         {
             juce::ScopedLock lock(sampleLock);
             samples.clear();
             selectedSampleIndex = 0;
             samples.add(sample);
         }
-        
-        // ALL UI UPDATES MUST BE ON MESSAGE THREAD
+
         sampleCard.setSampleName(file.getFileName());
         sampleCard.setWaveform(file);
-        
-        double durationInSeconds = sample->lengthInSamples / sample->sampleRate;
-        sampleCard.setDuration(durationInSeconds);
-        
+        sampleCard.setDuration(sample->lengthInSamples / sample->sampleRate);
+
         sample->rootNote = sampleCard.getMidiNote();
-        sample->lowNote = sampleCard.getMidiNote();
-        sample->highNote = sampleCard.getMidiNote();
+        sample->lowNote  = sample->rootNote;
+        sample->highNote = sample->rootNote;
 
-        // Apply start point: restore saved value or reset to 0 for new files
-        sample->startPointSeconds = startPointSecondsToUse;
-        if (startPointSecondsToUse > 0.0)
-            sampleCard.setStartPoint(startPointSecondsToUse);
-        else
-            sampleCard.resetStartPoint();
+        // ── Steps 5-7: Restore per-sample state (start/end/vol/loop only) ───────────
+        // Pitch is NOT per-sample — it is never read or written here.
+        // Pitch is left exactly as it currently is on the card (global session value).
+        double effectiveStart = 0.0;
+        double effectiveEnd   = -1.0;   // -1 = full sample length
+        float  effectiveVol   = 1.0f;
+        bool   effectiveLoop  = false;
 
-        // Apply end point: restore saved value or reset to full length for new files
-        sample->endPointSeconds = endPointSecondsToUse;
-        if (endPointSecondsToUse > 0.0)
-            sampleCard.setEndPoint(endPointSecondsToUse);
-        else
-            sampleCard.resetEndPoint();
+        printf("[PERSIST] --- Loading: %s ---\n", file.getFileName().toRawUTF8());
 
+        if (configManager != nullptr)
+        {
+            auto state = configManager->getSampleState(file);
+            if (state.exists)
+            {
+                // Saved settings found — restore start/end/vol/loop for this file
+                effectiveStart = state.startPoint;
+                effectiveEnd   = state.endPoint;
+                effectiveVol   = state.volume;
+                effectiveLoop  = state.loopEnabled;
+                printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s\n",
+                       effectiveStart, effectiveEnd, effectiveVol,
+                       effectiveLoop ? "ON" : "OFF");
+            }
+            else
+            {
+                printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF\n");
+            }
+        }
+
+        // Pitch: read current value from the card so updateSamplerSounds() picks it up.
+        // This is the global pitch — unchanged by sample navigation.
+        sample->pitchOffset = sampleCard.getPitchOffset();
+        printf("[PITCH] Sample loaded with current global pitch: %+d\n", sample->pitchOffset);
+
+        sample->startPointSeconds = effectiveStart;
+        sample->endPointSeconds   = effectiveEnd;
+
+        // Apply start marker
+        if (effectiveStart > 0.0)
+            sampleCard.setStartPoint(effectiveStart);
+        // else already reset above
+
+        // Apply end marker
+        if (effectiveEnd > 0.0)
+            sampleCard.setEndPoint(effectiveEnd);
+        // else already reset above (full length)
+
+        // Apply volume
+        volumeGain.store(effectiveVol);
+        sampleCard.setVolume(effectiveVol);
+
+        // Apply loop
+        loopEnabled.store(effectiveLoop);
+        sampleCard.setLoopEnabled(effectiveLoop);
+
+        // Freeze is ALWAYS off — never persisted, reset already done above
+
+        // ── Build sampler sounds with fully resolved state ─────────────────────────
         updateSamplerSounds();
+        muteOutput.store(false);
+
         sampleCard.setMidiNote(sample->rootNote);
-        sampleCard.setPitchOffset(sample->pitchOffset);
-        
-        // Save the session now that the sample is fully loaded
+        // Do NOT call setPitchOffset here — pitch display was not changed during load
+
+        // Save the fully-resolved state so it's on disk as the authoritative record
+        saveCurrentSampleState();
         saveCurrentSession();
-        
+
+        printf("[PERSIST] --- Load complete: %s ---\n", file.getFileName().toRawUTF8());
+        fflush(stdout);
+
+        // Optional preview note
         if (autoPlay)
         {
-            // Use MessageManager for timer callbacks too
             juce::MessageManager::callAsync([this, sample]() {
                 sampler.noteOn(1, sample->rootNote, 0.8f);
-                
                 juce::Timer::callAfterDelay(800, [this, sample]() {
                     sampler.noteOff(1, sample->rootNote, 0.0f, true);
                 });
             });
         }
-        
-        printf("Async load complete: %s (selected index: %d) with root note %d\n", 
-               file.getFileName().toRawUTF8(), selectedSampleIndex, sample->rootNote);
-        fflush(stdout);
     });
 }
 
@@ -1418,33 +1492,26 @@ void MainComponent::learningModeChanged(bool isLearning)
 
 void MainComponent::pitchOffsetChanged(int pitchOffset)
 {
-    printf("Pitch offset changed to: %+d semitones\n", pitchOffset);
-    
-    // Apply pitch offset to currently loaded sample
-    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    // Update the in-memory sample struct
     {
-        auto* sample = samples[selectedSampleIndex];
-        sample->pitchOffset = pitchOffset;
-        
-        printf("Before update - Sample root: %d, pitch offset: %d, adjusted root: %d\n", 
-               sample->rootNote, sample->pitchOffset, sample->rootNote - sample->pitchOffset);
-        
-        // Update sampler with new pitch offset
-        updateSamplerSounds();
-        
-        printf("After update - Sample should now play at adjusted root: %d\n", 
-               sample->rootNote - sample->pitchOffset);
-        printf("Applied pitch offset %+d to sample: %s\n", pitchOffset, sample->name.toRawUTF8());
+        juce::ScopedLock lock(sampleLock);
+        if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+            samples[selectedSampleIndex]->pitchOffset = pitchOffset;
     }
-    
-    // Save pitch offset to configuration
+
+    // Push to all live sounds atomically — no rebuild, no note cutoff
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            sound->pitchOffsetAtomic.store(pitchOffset);
+
+    // Save as a single global value — NOT per-sample
     if (configManager != nullptr)
     {
         configManager->savePitchOffset(pitchOffset);
+        printf("[PITCH] Saved pitch=%+d  →  %s\n",
+               pitchOffset, configManager->getSettingsFilePath().toRawUTF8());
     }
-    
-    // Save session to persist the change
-    saveCurrentSession();
+    fflush(stdout);
 }
 
 void MainComponent::volumeChanged(float volume)
@@ -1452,6 +1519,7 @@ void MainComponent::volumeChanged(float volume)
     volumeGain.store(volume);
     if (configManager != nullptr)
         configManager->saveVolume(volume);
+    saveCurrentSampleState();
 }
 
 void MainComponent::startPointChanged(double startPointSeconds)
@@ -1484,6 +1552,7 @@ void MainComponent::startPointChanged(double startPointSeconds)
     if (configManager != nullptr)
         configManager->saveStartPoint(startPointSeconds);
 
+    saveCurrentSampleState();
     printf("Start point set to: %.3f s\n", startPointSeconds);
 }
 
@@ -1524,6 +1593,7 @@ void MainComponent::endPointChanged(double endPointSeconds)
     if (configManager != nullptr)
         configManager->saveEndPoint(endPointSeconds);
 
+    saveCurrentSampleState();
     printf("End point set to: %.3f s\n", endPointSeconds);
 }
 
@@ -1541,7 +1611,81 @@ void MainComponent::loopEnabledChanged(bool isLooping)
     if (configManager != nullptr)
         configManager->saveLoopEnabled(isLooping);
 
+    saveCurrentSampleState();
     printf("Loop %s\n", isLooping ? "ON" : "OFF");
+}
+
+void MainComponent::freezeChanged(bool isFrozen)
+{
+    printf("Freeze %s\n", isFrozen ? "ON" : "OFF");
+
+    if (isFrozen)
+    {
+        // 1. Mark all sounds as frozen + ensure loop is active
+        for (int i = 0; i < sampler.getNumSounds(); ++i)
+        {
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            {
+                sound->freezeActive.store(true);
+                sound->loopEnabled.store(true);  // freeze always loops
+            }
+        }
+
+        // 2. If no voice is currently playing, inject a phantom note to start the loop.
+        //    With freeze active, stopNote is a no-op so the phantom loop runs forever.
+        bool anyActive = false;
+        for (int i = 0; i < sampler.getNumVoices(); ++i)
+            if (sampler.getVoice(i)->isVoiceActive()) { anyActive = true; break; }
+
+        if (!anyActive && !samples.isEmpty() && samples[0]->isValid())
+            sampler.noteOn(1, samples[0]->rootNote, 0.8f);
+    }
+    else
+    {
+        // Full aggressive kill to eliminate ghost freeze voices.
+        // allNotesOff(tail-off) is not enough — the frozen voice keeps looping through
+        // the ADSR release tail.  We need the same forceStop+clearSounds+rebuild
+        // sequence used during sample navigation.
+
+        // Step 1: Silence audio thread immediately
+        muteOutput.store(true);
+
+        // Step 2: Clear freeze/loop flags so no re-entry into freeze guard
+        for (int i = 0; i < sampler.getNumSounds(); ++i)
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            {
+                sound->freezeActive.store(false);
+                sound->loopEnabled.store(false);
+            }
+
+        // Step 3: Force-stop all voices — releases currentlyPlayingSound refcount directly
+        for (int i = 0; i < sampler.getNumVoices(); ++i)
+            if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
+                v->forceStop();
+
+        // Step 4: Remove all sounds from synthesiser
+        sampler.clearSounds();
+
+        // Step 5: Belt-and-suspenders note reset
+        sampler.allNotesOff(0, false);
+
+        // Step 6: Stop each voice directly via its own stopNote
+        for (int i = 0; i < sampler.getNumVoices(); ++i)
+            sampler.getVoice(i)->stopNote(0.0f, false);
+
+        // Step 7: Rebuild from current sample — fresh sounds, no ghost state
+        updateSamplerSounds();
+
+        // Step 8: Apply correct loop state on the new sounds
+        const bool loopOn = sampleCard.isLoopEnabled();
+        loopEnabled.store(loopOn);
+        for (int i = 0; i < sampler.getNumSounds(); ++i)
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+                sound->loopEnabled.store(loopOn);
+
+        // Step 9: Resume audio output — buffer was zeroed while muteOutput=true
+        muteOutput.store(false);
+    }
 }
 
 void MainComponent::handleMidiLearn(int noteNumber)
@@ -1581,46 +1725,38 @@ void MainComponent::handleMidiLearn(int noteNumber)
 // Session persistence methods
 void MainComponent::loadLastSession()
 {
-    // Load MIDI settings
-    int savedNote = configManager->getMidiNote();
+    printf("[PERSIST] ===== App startup: restoring session =====\n");
+
+    // ── Global settings (not per-sample) ──────────────────────────────────────────
+    int savedNote    = configManager->getMidiNote();
     int savedChannel = configManager->getMidiChannel();
     juce::String savedDevice = configManager->getMidiDevice();
-    int savedPitchOffset = configManager->getPitchOffset();
-    
-    // Debug output for saved settings
-    printf("Loading saved MIDI note: %d\n", savedNote);
-    printf("Loading saved MIDI channel: %d\n", savedChannel);
-    printf("Loading saved MIDI device: %s\n", savedDevice.toRawUTF8());
-    printf("Loading saved pitch offset: %+d\n", savedPitchOffset);
-    
-    // Restore per-pad volume
-    float savedVolume = configManager->getVolume();
-    volumeGain.store(savedVolume);
-    sampleCard.setVolume(savedVolume);
 
-    // Restore master volume
+    printf("[PERSIST] Global: midi_note=%d  midi_channel=%d  device=%s\n",
+           savedNote, savedChannel, savedDevice.toRawUTF8());
+
+    // ── Restore global pitch FIRST — before any callbacks that call saveCurrentSession ──
+    // setMidiNote/setMidiChannel fire listeners → saveCurrentSession → savePitchOffset.
+    // If pitch is still 0 at that point it overwrites the saved value on disk.
+    // Setting pitch first ensures every subsequent saveCurrentSession writes the correct value.
+    int savedPitch = configManager->getPitchOffset();
+    printf("[PITCH] Startup: reading pitch from %s  →  pitch=%+d\n",
+           configManager->getSettingsFilePath().toRawUTF8(), savedPitch);
+    sampleCard.setPitchOffset(savedPitch);
+
+    sampleCard.setMidiNote(savedNote);
+    if (savedChannel >= 0 && savedChannel <= 16)
+        sampleCard.setMidiChannel(savedChannel);
+
     float savedMasterVolume = configManager->getMasterVolume();
     masterVolumeGain.store(savedMasterVolume);
     masterVolumeKnob.setValue(savedMasterVolume, juce::dontSendNotification);
+    printf("[PERSIST] Global: master_vol=%.2f\n", savedMasterVolume);
 
-    // Apply MIDI settings to the card
-    sampleCard.setMidiNote(savedNote);
-    sampleCard.setPitchOffset(savedPitchOffset);
-    
-    // Handle channel with wrap-around logic
-    if (savedChannel >= 0 && savedChannel <= 16)
-    {
-        // Use the new public setMidiChannel method
-        sampleCard.setMidiChannel(savedChannel);
-    }
-    
-    // Try to restore MIDI device if it's still available
+    // ── Restore MIDI device ────────────────────────────────────────────────────────
     if (savedDevice.isNotEmpty() && isValidMidiDevice(savedDevice))
     {
-        // This will be handled by the MIDI selector when it initializes
         currentMidiDeviceName = savedDevice;
-        
-        // Start the MIDI input
         auto devices = juce::MidiInput::getAvailableDevices();
         for (auto& device : devices)
         {
@@ -1630,71 +1766,125 @@ void MainComponent::loadLastSession()
                 if (midiInput != nullptr)
                 {
                     midiInput->start();
-                    printf("Restored MIDI device: %s\n", savedDevice.toRawUTF8());
+                    printf("[PERSIST] Restored MIDI device: %s\n", savedDevice.toRawUTF8());
                 }
                 break;
             }
         }
     }
-    
-    // Load start/end point settings
-    double savedStartPoint = configManager->getStartPoint();
-    double savedEndPoint   = configManager->getEndPoint();
 
-    // Load last sample if it exists
+    // ── Load last sample ──────────────────────────────────────────────────────────
+    // Per-sample state (start, end, vol, loop) is looked up inside loadSampleFileAsync.
+    // Pitch is NOT restored here — it was already restored above as a global value.
     juce::File lastSample = configManager->getLastSample();
-    if (lastSample.existsAsFile())
+    if (lastSample.existsAsFile() &&
+        formatManager.findFormatForFileExtension(lastSample.getFileExtension()) != nullptr)
     {
-        // Check if the file is in a valid audio format
-        if (formatManager.findFormatForFileExtension(lastSample.getFileExtension()) != nullptr)
+        printf("[PERSIST] Startup: loading last sample: %s\n", lastSample.getFileName().toRawUTF8());
+
+        currentFolder = lastSample.getParentDirectory();
+        scanCurrentFolderForAudioFiles();
+
+        for (int i = 0; i < folderAudioFiles.size(); ++i)
         {
-            printf("Loading last session sample: %s (NO AUTO-PLAY)\n", lastSample.getFileName().toRawUTF8());
-
-            // Set current folder to the sample's directory
-            currentFolder = lastSample.getParentDirectory();
-            scanCurrentFolderForAudioFiles();
-
-            // Find the index of this file in the folder
-            for (int i = 0; i < folderAudioFiles.size(); ++i)
+            if (folderAudioFiles[i] == lastSample)
             {
-                if (folderAudioFiles[i] == lastSample)
-                {
-                    currentFileIndex = i;
-                    break;
-                }
+                currentFileIndex = i;
+                break;
             }
-
-            // Restore loop state before loading so updateSamplerSounds() picks it up
-            bool savedLoopEnabled = configManager->getLoopEnabled();
-            loopEnabled.store(savedLoopEnabled);
-            sampleCard.setLoopEnabled(savedLoopEnabled);
-
-            // Load the sample but DON'T auto-play it, restoring pitch, start, and end points
-            loadSampleFileAsync(lastSample, false, savedPitchOffset, savedStartPoint, savedEndPoint);
         }
+
+        // autoPlay=false → no preview note played on startup
+        backgroundThreads.addJob([this, lastSample]() {
+            loadSampleFileAsync(lastSample, false);
+        });
     }
+    else
+    {
+        printf("[PERSIST] No last sample to restore.\n");
+    }
+
+    printf("[PERSIST] ===== Session restore initiated =====\n");
+    fflush(stdout);
+}
+
+void MainComponent::saveOutgoingSampleState()
+{
+    if (configManager == nullptr) return;
+    juce::ScopedLock lock(sampleLock);
+    if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size()) return;
+
+    auto* sample = samples[selectedSampleIndex];
+    ConfigurationManager::SampleState s;
+    s.startPoint  = sample->startPointSeconds;
+    s.endPoint    = sample->endPointSeconds;
+    s.volume      = sampleCard.getVolume();
+    s.loopEnabled = sampleCard.isLoopEnabled();
+    // Pitch is NOT saved here — it is a global value saved separately via savePitchOffset()
+
+    configManager->saveSampleState(sample->file, s);
+    printf("[PERSIST] SAVED (outgoing): %s  start=%.3f  end=%.3f  vol=%.2f  loop=%s\n",
+           sample->file.getFileName().toRawUTF8(),
+           s.startPoint, s.endPoint, s.volume,
+           s.loopEnabled ? "ON" : "OFF");
+    fflush(stdout);
+}
+
+void MainComponent::saveCurrentSampleState()
+{
+    if (configManager == nullptr) return;
+    juce::ScopedLock lock(sampleLock);
+    if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size()) return;
+
+    auto* sample = samples[selectedSampleIndex];
+    ConfigurationManager::SampleState s;
+    s.startPoint  = sample->startPointSeconds;
+    s.endPoint    = sample->endPointSeconds;
+    s.volume      = sampleCard.getVolume();
+    s.loopEnabled = sampleCard.isLoopEnabled();
+    // Pitch is NOT saved here — it is a global value saved separately via savePitchOffset()
+
+    configManager->saveSampleState(sample->file, s);
+    printf("[PERSIST] SAVED: %s  start=%.3f  end=%.3f  vol=%.2f  loop=%s\n",
+           sample->file.getFileName().toRawUTF8(),
+           s.startPoint, s.endPoint, s.volume,
+           s.loopEnabled ? "ON" : "OFF");
+    fflush(stdout);
 }
 
 void MainComponent::saveCurrentSession()
 {
-    // Always save the current MIDI settings, regardless of whether a sample is loaded
+    // Always save MIDI settings
     configManager->saveMidiSettings(
         sampleCard.getMidiNote(),
         sampleCard.getMidiChannel(),
         currentMidiDeviceName
     );
-    
-    // Save pitch offset
+
+    // Always save pitch, volume, and loop state (valid even without a loaded sample)
     configManager->savePitchOffset(sampleCard.getPitchOffset());
-    
+    configManager->saveVolume(sampleCard.getVolume());
+    configManager->saveLoopEnabled(sampleCard.isLoopEnabled());
+
     // Save audio settings
     saveAudioSettings();
-    
-    // Only save the sample path if a sample is actually loaded
+
+    // Save sample-specific values only when a sample is loaded
     if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
     {
         auto* sample = samples[selectedSampleIndex];
         configManager->saveLastSample(sample->file);
+
+        // Flat-key saves (legacy fallback for startup restore when no per-sample key exists)
+        configManager->saveStartPoint(sample->startPointSeconds);
+        configManager->saveEndPoint(sample->endPointSeconds);
+
+        // Per-sample keyed save — authoritative source for this file's state
+        saveCurrentSampleState();
+    }
+    else
+    {
+        printf("Session saved (no sample) → %s\n", configManager->getSettingsFilePath().toRawUTF8());
     }
 }
 

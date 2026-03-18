@@ -212,6 +212,44 @@ public:
         };
         addAndMakeVisible(loopButton);
 
+        // Freeze button — left of Loop button in pitch row
+        // Manual toggle state (setClickingTogglesState false) — we manage isFreezeActive ourselves
+        // so the double-tap can override the toggle without any JUCE state fighting us.
+        freezeButton.setButtonText("Freeze");
+        freezeButton.setClickingTogglesState(false);
+        applyFreezeButtonStyle(false);
+        freezeButton.onClick = [this]
+        {
+            const juce::int64 now = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
+            if (lastFreezeTapMs != 0 && (now - lastFreezeTapMs) < 400)
+            {
+                // Double tap — panic reset: turn off both freeze and loop
+                lastFreezeTapMs = 0;
+                const bool wasFreeze = isFreezeActive;
+                isFreezeActive = false;
+                loopWasOnBeforeFreeze = false;
+
+                // Flash white, then restore OFF style after 200 ms
+                freezeButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFFFFFFFF));
+                freezeButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF000000));
+                juce::Timer::callAfterDelay(200, [this] { applyFreezeButtonStyle(false); });
+
+                // Turn loop off
+                setLoopEnabled(false);
+                listeners.call([](Listener& l) { l.loopEnabledChanged(false); });
+
+                // Notify freeze off (only if it was actually on — avoids redundant allNotesOff)
+                if (wasFreeze)
+                    listeners.call([](Listener& l) { l.freezeChanged(false); });
+            }
+            else
+            {
+                lastFreezeTapMs = now;
+                toggleFreeze();
+            }
+        };
+        addAndMakeVisible(freezeButton);
+
         // Update pitch button labels with tooltips
         updatePitchButtonLabels();
         
@@ -343,9 +381,14 @@ public:
             startKnob.setBounds(col.reduced(2));
         }
         {
-            // Loop toggle button — left of Start knob, vertically centered in pitch row
+            // Loop toggle button
             auto col = pitchRow.removeFromRight(60);
             loopButton.setBounds(col.withSizeKeepingCentre(56, 40));
+        }
+        {
+            // Freeze button — left of Loop button
+            auto col = pitchRow.removeFromRight(60);
+            freezeButton.setBounds(col.withSizeKeepingCentre(56, 40));
         }
         
         // Add margin before bottom info row
@@ -460,6 +503,22 @@ public:
         loopButton.setToggleState(enabled, juce::dontSendNotification);
         if (waveformComponent != nullptr)
             waveformComponent->setLoopHighlight(enabled);
+    }
+
+    bool isFreezeEnabled() const { return isFreezeActive; }
+
+    // Called by MainComponent when a new sample is loaded.
+    // Always resets freeze (it never persists). Fires freezeChanged(false) only if was active.
+    void resetFreeze()
+    {
+        lastFreezeTapMs = 0;
+        loopWasOnBeforeFreeze = false;
+        if (isFreezeActive)
+        {
+            isFreezeActive = false;
+            applyFreezeButtonStyle(false);
+            listeners.call([](Listener& l) { l.freezeChanged(false); });
+        }
     }
 
     void setPitchOffset(int offset)
@@ -683,6 +742,7 @@ public:
         virtual void startPointChanged(double startPointSeconds) = 0;
         virtual void endPointChanged(double endPointSeconds) = 0;
         virtual void loopEnabledChanged(bool isLooping) = 0;
+        virtual void freezeChanged(bool isFrozen) = 0;
     };
     
     void addListener(Listener* listener)
@@ -1592,8 +1652,14 @@ void adjustPitchUp()
     juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
     int pitchOffset = 0;  // Pitch offset in semitones
 
-    // Loop toggle button
+    // Loop / Freeze buttons
     juce::TextButton loopButton;
+    juce::TextButton freezeButton { "Freeze" };
+
+    // Freeze state — never persisted, always starts false
+    bool isFreezeActive          = false;
+    bool loopWasOnBeforeFreeze   = false;   // true if loop was ON when freeze was pressed
+    juce::int64 lastFreezeTapMs  = 0;       // timestamp of last freeze tap for double-tap detection
 
     // Compact knob LookAndFeel shared by all three SamplerPad knobs
     CompactKnobLookAndFeel compactKnobLaf;
@@ -1630,4 +1696,56 @@ void adjustPitchUp()
     // Listener list
     juce::ListenerList<Listener> listeners;
     int fixedViewportWidth = 700;  // Will be updated in resized()
+
+    //==============================================================================
+    // Freeze helpers
+
+    void applyFreezeButtonStyle(bool on)
+    {
+        if (on)
+        {
+            freezeButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF00CFFF)); // ice blue
+            freezeButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF111111)); // dark text
+        }
+        else
+        {
+            freezeButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A)); // dark inactive
+            freezeButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE)); // off-white text
+        }
+    }
+
+    void toggleFreeze()
+    {
+        if (!isFreezeActive)
+        {
+            // Turning freeze ON
+            loopWasOnBeforeFreeze = loopButton.getToggleState();
+            isFreezeActive = true;
+            applyFreezeButtonStyle(true);
+
+            if (!loopWasOnBeforeFreeze)
+            {
+                // Loop was off — turn it on silently then notify
+                setLoopEnabled(true);
+                listeners.call([](Listener& l) { l.loopEnabledChanged(true); });
+            }
+            listeners.call([](Listener& l) { l.freezeChanged(true); });
+        }
+        else
+        {
+            // Turning freeze OFF
+            isFreezeActive = false;
+            applyFreezeButtonStyle(false);
+
+            if (!loopWasOnBeforeFreeze)
+            {
+                // Loop was off before freeze — restore that state
+                setLoopEnabled(false);
+                listeners.call([](Listener& l) { l.loopEnabledChanged(false); });
+            }
+            // else: loop was already on — leave it on
+
+            listeners.call([](Listener& l) { l.freezeChanged(false); });
+        }
+    }
 };

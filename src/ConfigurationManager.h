@@ -14,7 +14,10 @@ public:
         options.filenameSuffix = ".settings";
         options.folderName = "JaivaSampler";
         options.osxLibrarySubFolder = "Application Support";
-        
+        // Default is 3000ms — means saveIfNeeded() skips the write if called within 3s
+        // of the last save.  Set to 0 so every saveIfNeeded() call writes to disk immediately.
+        options.millisecondsBeforeSaving = 0;
+
         propertiesFile = std::make_unique<juce::PropertiesFile>(options);
     }
     
@@ -70,7 +73,13 @@ public:
     void savePitchOffset(int pitchOffset)
     {
         propertiesFile->setValue("pitchOffset", pitchOffset);
-        propertiesFile->saveIfNeeded();
+        propertiesFile->saveIfNeeded();  // writes immediately because millisecondsBeforeSaving=0
+    }
+
+    // Force a full flush to disk — call from destructor and any critical save points.
+    void saveNow()
+    {
+        propertiesFile->save();
     }
 
     void saveVolume(float volume)
@@ -180,7 +189,55 @@ public:
         return propertiesFile->getValue("audioOutputDevice");
     }
     
+    juce::String getSettingsFilePath() const
+    {
+        return propertiesFile->getFile().getFullPathName();
+    }
+
+    //==============================================================================
+    // Per-sample state — each sample file has its own independently saved values.
+    // Key is a hex hash of the absolute file path (safe for use as XML attribute name).
+    // Per-sample state — start/end points, volume, loop only.
+    // Pitch is NOT per-sample — it is a single global session value (see savePitchOffset/getPitchOffset).
+    struct SampleState
+    {
+        double startPoint  = 0.0;
+        double endPoint    = -1.0;  // sentinel: -1.0 = full length
+        float  volume      = 1.0f;
+        bool   loopEnabled = false;
+        bool   exists      = false; // false = no saved state found for this file
+    };
+
+    void saveSampleState(const juce::File& file, const SampleState& s)
+    {
+        auto k = sampleKey(file);
+        propertiesFile->setValue(k + "_start", s.startPoint);
+        propertiesFile->setValue(k + "_end",   s.endPoint);
+        propertiesFile->setValue(k + "_vol",   (double)s.volume);
+        propertiesFile->setValue(k + "_loop",  s.loopEnabled);
+        propertiesFile->saveIfNeeded();
+    }
+
+    SampleState getSampleState(const juce::File& file) const
+    {
+        auto k = sampleKey(file);
+        SampleState s;
+        s.exists     = propertiesFile->containsKey(k + "_start");
+        s.startPoint = propertiesFile->getDoubleValue(k + "_start", 0.0);
+        s.endPoint   = propertiesFile->getDoubleValue(k + "_end",   -1.0);
+        s.volume     = (float)propertiesFile->getDoubleValue(k + "_vol",  1.0);
+        s.loopEnabled = propertiesFile->getBoolValue (k + "_loop",  false);
+        return s;
+    }
+
 private:
+    // Encode file path as a safe XML attribute key by hashing the full path.
+    // Prefix "p" ensures it never starts with a digit (XML attribute requirement).
+    juce::String sampleKey(const juce::File& file) const
+    {
+        return "p" + juce::String::toHexString(file.getFullPathName().hashCode64());
+    }
+
     std::unique_ptr<juce::PropertiesFile> propertiesFile;
 };
 
