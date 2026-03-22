@@ -104,8 +104,27 @@ public:
         pitchLabel.setJustificationType(juce::Justification::centred);
         pitchLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF8CBCDC));
         pitchLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
+        pitchLabel.setTooltip("Drag up/down to change pitch (5px = 1 semitone)");
         updatePitchDisplay(pitchOffset);
         addAndMakeVisible(pitchLabel);
+
+        // Wire drag callbacks — run the same logic as adjustPitchUp/Down
+        pitchLabel.getCurrentPitch = [this] { return pitchOffset; };
+        pitchLabel.onPitchDragged  = [this](int newPitch)
+        {
+            if (newPitch != pitchOffset)
+            {
+                pitchOffset = newPitch;
+                updatePitchDisplay(pitchOffset);
+                listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
+            }
+        };
+        pitchLabel.onDragFinished  = [this]
+        {
+            // pitchOffsetChanged already triggers saveCurrentSampleState in MainComponent,
+            // but fire it once more on release to ensure the final value is saved.
+            listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
+        };
         
         pitchUpButton.setButtonText("Up");
         pitchUpButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
@@ -930,8 +949,37 @@ public:
         else
             topInfoLabel.setText("", juce::dontSendNotification);
 
-        // Only update bottomInfoLabel when no tune detection result is displayed
-        if (detectedNoteName.isEmpty())
+        // Update bottomInfoLabel — shift detected note name when tune result is active
+        if (detectedNoteName.isNotEmpty())
+        {
+            // nearestMidi = the MIDI note of the detected pitch (at user pitchOffset == 0).
+            // basePitchOffset = tuneRootMidiNote - nearestMidi  →  nearestMidi = tuneRootMidiNote - basePitchOffset
+            const int nearestMidi  = tuneRootMidiNote - basePitchOffset;
+            const int shiftedMidi  = juce::jlimit(0, 127, nearestMidi + semitones);
+            static const char* noteNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+            const juce::String shiftedName = juce::String(noteNames[shiftedMidi % 12])
+                                           + juce::String(shiftedMidi / 12 - 1);
+            if (semitones == 0)
+            {
+                // At the in-tune position show the full info (name + Hz) as Tune left it
+                const int freqInt = detectedFreqHz > 0.0 ? (int)std::round(detectedFreqHz) : 0;
+                juce::String info = detectedNoteName;
+                if (freqInt > 0)
+                    info += " \xc2\xb7 " + juce::String(freqInt) + " Hz";
+                bottomInfoLabel.setText(info, juce::dontSendNotification);
+            }
+            else
+            {
+                // Show shifted note + shifted frequency estimate
+                const double shiftedFreq = detectedFreqHz * std::pow(2.0, semitones / 12.0);
+                const int shiftedFreqInt = shiftedFreq > 0.0 ? (int)std::round(shiftedFreq) : 0;
+                juce::String info = shiftedName;
+                if (shiftedFreqInt > 0)
+                    info += " \xc2\xb7 " + juce::String(shiftedFreqInt) + " Hz";
+                bottomInfoLabel.setText(info, juce::dontSendNotification);
+            }
+        }
+        else
         {
             if (semitones > 0)
                 bottomInfoLabel.setText("PITCH UP: +" + juce::String(semitones), juce::dontSendNotification);
@@ -1136,6 +1184,81 @@ public:
         private:
             SampleCard& owner;
             JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TuneAnalyzerThread)
+        };
+
+        // Draggable pitch label — click+drag up/down to change semitone offset.
+        // 5px of vertical movement = 1 semitone; drag-up = pitch up.
+        class DraggablePitchLabel : public juce::Label
+        {
+        public:
+            // Called during drag AND on release with the new absolute pitch value.
+            std::function<void(int newPitch)> onPitchDragged;
+            // Called once on mouse-up to persist the final value.
+            std::function<void()>             onDragFinished;
+            // Provide the current pitch at drag-start.
+            std::function<int()>              getCurrentPitch;
+
+            void mouseEnter(const juce::MouseEvent&) override
+            {
+                isHovered = true;
+                setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
+                repaint();
+            }
+
+            void mouseExit(const juce::MouseEvent&) override
+            {
+                isHovered = false;
+                setMouseCursor(juce::MouseCursor::NormalCursor);
+                repaint();
+            }
+
+            void mouseDown(const juce::MouseEvent& e) override
+            {
+                dragStartY       = e.getScreenPosition().y;
+                pitchAtDragStart = getCurrentPitch ? getCurrentPitch() : 0;
+                isDragging       = true;
+                repaint();
+            }
+
+            void mouseDrag(const juce::MouseEvent& e) override
+            {
+                // drag UP (negative delta-Y on screen) → pitch up
+                int deltaY    = dragStartY - e.getScreenPosition().y;
+                int newPitch  = juce::jlimit(-48, 48, pitchAtDragStart + deltaY / 5);
+                if (onPitchDragged)
+                    onPitchDragged(newPitch);
+            }
+
+            void mouseUp(const juce::MouseEvent& e) override
+            {
+                // Compute the same final value as mouseDrag so it is consistent
+                int deltaY   = dragStartY - e.getScreenPosition().y;
+                int newPitch = juce::jlimit(-48, 48, pitchAtDragStart + deltaY / 5);
+                if (onPitchDragged)
+                    onPitchDragged(newPitch);
+                if (onDragFinished)
+                    onDragFinished();
+                isDragging = false;
+                repaint();
+            }
+
+            // Override paint to add hover/drag highlight glow
+            void paint(juce::Graphics& g) override
+            {
+                juce::Label::paint(g);
+                if (isHovered || isDragging)
+                {
+                    // Subtle white outline glow to signal interactivity
+                    g.setColour(juce::Colour(0x44FFFFFF));
+                    g.drawRect(getLocalBounds().reduced(1), 1);
+                }
+            }
+
+        private:
+            int  dragStartY       = 0;
+            int  pitchAtDragStart = 0;
+            bool isHovered        = false;
+            bool isDragging       = false;
         };
 
         // Scrollbar height constant (Windows default ~14px, macOS ~15px)
@@ -2308,7 +2431,7 @@ void adjustPitchUp()
     
     // Pitch adjustment controls
     juce::TextButton pitchDownButton{"Down"};  // Lower pitch = negative semitones = longer duration
-    juce::Label pitchLabel;
+    DraggablePitchLabel pitchLabel;
     juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
     int pitchOffset = 0;  // Pitch offset in semitones
 
