@@ -132,7 +132,7 @@ public:
         volumeLabel.setText("Vol", juce::dontSendNotification);
         volumeLabel.setJustificationType(juce::Justification::centred);
         volumeLabel.setFont(juce::Font(11.0f));
-        volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
+        volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(volumeLabel);
 
         // Start point knob — deep red matching the start marker (#CC0000), white indicator
@@ -156,7 +156,7 @@ public:
         startKnobLabel.setText("Start", juce::dontSendNotification);
         startKnobLabel.setJustificationType(juce::Justification::centred);
         startKnobLabel.setFont(juce::Font(11.0f));
-        startKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
+        startKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(startKnobLabel);
 
         // Wire start marker drag → knob + listeners
@@ -187,7 +187,7 @@ public:
         endKnobLabel.setText("End", juce::dontSendNotification);
         endKnobLabel.setJustificationType(juce::Justification::centred);
         endKnobLabel.setFont(juce::Font(11.0f));
-        endKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
+        endKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(endKnobLabel);
 
         // Wire end marker drag → knob + listeners
@@ -251,28 +251,47 @@ public:
         };
         addAndMakeVisible(freezeButton);
 
-        // Transient snap buttons — snap start marker to nearest transient
-        prevTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        prevTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        // Transient detection toggle — enables/disables the whole transient subsystem
+        detectionToggleButton.setClickingTogglesState(true);
+        detectionToggleButton.setToggleState(true, juce::dontSendNotification);
+        detectionToggleButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF8B2500)); // dark red = active
+        detectionToggleButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFF8B2500));
+        detectionToggleButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFFFFFFF));
+        detectionToggleButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFFFFFFFF));
+        detectionToggleButton.setTooltip("Enable / disable transient detection");
+        detectionToggleButton.onClick = [this]
+        {
+            transientDetectionEnabled = detectionToggleButton.getToggleState();
+            detectionToggleButton.setColour(juce::TextButton::buttonColourId,
+                transientDetectionEnabled ? juce::Colour(0xFF8B2500) : juce::Colour(0xFF4A4A4A));
+            detectionToggleButton.setColour(juce::TextButton::textColourOffId,
+                transientDetectionEnabled ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF7A7A7A));
+            updateTransientControlsState();
+        };
+        addAndMakeVisible(detectionToggleButton);
+
+        // Transient snap buttons — snap start marker to nearest transient (orange-red)
+        prevTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFFE84A1A));
+        prevTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
         prevTransientButton.setTooltip("Snap start to previous transient");
         prevTransientButton.onClick = [this] { snapToPrevTransient(); };
         addAndMakeVisible(prevTransientButton);
 
-        nextTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        nextTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        nextTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFFE84A1A));
+        nextTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
         nextTransientButton.setTooltip("Snap start to next transient");
         nextTransientButton.onClick = [this] { snapToNextTransient(); };
         addAndMakeVisible(nextTransientButton);
 
-        // End marker transient snap buttons
-        prevEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        prevEndTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        // End marker transient snap buttons (cyan-blue)
+        prevEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF00B4D8));
+        prevEndTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
         prevEndTransientButton.setTooltip("Snap end to previous transient");
         prevEndTransientButton.onClick = [this] { snapEndToPrevTransient(); };
         addAndMakeVisible(prevEndTransientButton);
 
-        nextEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        nextEndTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        nextEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF00B4D8));
+        nextEndTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
         nextEndTransientButton.setTooltip("Snap end to next transient");
         nextEndTransientButton.onClick = [this] { snapEndToNextTransient(); };
         addAndMakeVisible(nextEndTransientButton);
@@ -284,7 +303,7 @@ public:
         sensKnob.setRange(1.5, 10.0, 0.1);
         sensKnob.setValue(4.0, juce::dontSendNotification);
         sensKnob.setTooltip("Transient sensitivity: low=many transients, high=only strong hits");
-        sensKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFE25A00)); // orange
+        sensKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFF8B2500)); // dark red matching CRA
         sensKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
         sensKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFFFFFFF));
         sensKnob.onValueChange = [this] {
@@ -297,13 +316,13 @@ public:
         sensLabel.setText("Sens", juce::dontSendNotification);
         sensLabel.setJustificationType(juce::Justification::centred);
         sensLabel.setFont(juce::Font(11.0f));
-        sensLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
+        sensLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(sensLabel);
 
         transientCountLabel.setText("T: 0", juce::dontSendNotification);
         transientCountLabel.setJustificationType(juce::Justification::centred);
         transientCountLabel.setFont(juce::Font(10.0f));
-        transientCountLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C)); // green accent
+        transientCountLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(transientCountLabel);
 
         // Update pitch button labels with tooltips
@@ -424,12 +443,12 @@ public:
         {
             // Freeze button
             auto col = row1.removeFromLeft(62);
-            freezeButton.setBounds(col.withSizeKeepingCentre(58, 38));
+            freezeButton.setBounds(col.withSizeKeepingCentre(58, 30));
         }
         {
             // Loop button
             auto col = row1.removeFromLeft(62);
-            loopButton.setBounds(col.withSizeKeepingCentre(58, 38));
+            loopButton.setBounds(col.withSizeKeepingCentre(58, 30));
         }
 
         // 5px gap between rows
@@ -440,14 +459,19 @@ public:
         const int labelH = 13;
 
         {
+            // "CRA" — transient detection toggle
+            auto col = row2.removeFromLeft(44);
+            detectionToggleButton.setBounds(col.withSizeKeepingCentre(42, 30));
+        }
+        {
             // "< T" — snap start to PREV transient
             auto col = row2.removeFromLeft(38);
-            prevTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+            prevTransientButton.setBounds(col.withSizeKeepingCentre(36, 30));
         }
         {
             // "T >" — snap start to NEXT transient
             auto col = row2.removeFromLeft(38);
-            nextTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+            nextTransientButton.setBounds(col.withSizeKeepingCentre(36, 30));
         }
         {
             // Start knob
@@ -464,12 +488,12 @@ public:
         {
             // "< T" — snap end to PREV transient
             auto col = row2.removeFromLeft(38);
-            prevEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+            prevEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 30));
         }
         {
             // "T >" — snap end to NEXT transient
             auto col = row2.removeFromLeft(38);
-            nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+            nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 30));
         }
         {
             // Sens knob — two label rows: count (T:N) above "Sens"
@@ -1319,10 +1343,10 @@ public:
                     }
                 }
 
-                // Draw transient positions as small orange tick marks at waveform top
+                // Draw transient positions as small tick marks at waveform top
                 if (!transientPositionsNormalized.empty())
                 {
-                    g.setColour(juce::Colour(0xFFFF8800).withAlpha(0.75f));
+                    g.setColour(juce::Colour(0xFFE84A1A).withAlpha(0.75f));
                     for (float tn : transientPositionsNormalized)
                     {
                         float tx = waveformBounds.getX() + tn * actualWaveformWidth;
@@ -1353,7 +1377,7 @@ public:
                 // Flash alternates bright/dim each 100ms tick for a pulse effect
                 bool flashOn = (markerFlashCountdown > 0) && (markerFlashCountdown % 2 != 0);
                 juce::Colour startMarkerColour = flashOn
-                    ? juce::Colour(0xFFFF8800)  // bright orange flash
+                    ? juce::Colour(0xFFE84A1A)  // orange-red flash matching start snap buttons
                     : juce::Colour(0xFFCC0000); // normal deep red
                 float markerX = waveformBounds.getX() + startMarkerNormalized * actualWaveformWidth;
                 g.setColour(startMarkerColour.withAlpha(0.9f));
@@ -1370,7 +1394,7 @@ public:
                 // Draw end point marker — cyan normally, flash orange on transient snap
                 bool endFlashOn = (endMarkerFlashCountdown > 0) && (endMarkerFlashCountdown % 2 != 0);
                 juce::Colour endMarkerColour = endFlashOn
-                    ? juce::Colour(0xFFFF8800)  // orange flash
+                    ? juce::Colour(0xFF00B4D8)  // cyan flash matching end snap buttons
                     : juce::Colour(0xFF00AACC); // normal cyan
                 float endMarkerX = waveformBounds.getX() + endMarkerNormalized * actualWaveformWidth;
                 g.setColour(endMarkerColour.withAlpha(0.9f));
@@ -1837,7 +1861,7 @@ void adjustPitchUp()
             prevEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF884400));
             juce::Timer::callAfterDelay(300, [this]
             {
-                prevEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+                prevEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF00B4D8));
             });
         }
     }
@@ -1871,7 +1895,7 @@ void adjustPitchUp()
             nextEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF884400));
             juce::Timer::callAfterDelay(300, [this]
             {
-                nextEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+                nextEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF00B4D8));
             });
         }
     }
@@ -1903,7 +1927,7 @@ void adjustPitchUp()
             prevTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF884400));
             juce::Timer::callAfterDelay(300, [this]
             {
-                prevTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+                prevTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFFE84A1A));
             });
         }
     }
@@ -1939,7 +1963,7 @@ void adjustPitchUp()
             nextTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF884400));
             juce::Timer::callAfterDelay(300, [this]
             {
-                nextTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+                nextTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFFE84A1A));
             });
         }
     }
@@ -2053,6 +2077,10 @@ void adjustPitchUp()
     juce::TextButton loopButton;
     juce::TextButton freezeButton { "Freeze" };
 
+    // Transient detection toggle
+    juce::TextButton detectionToggleButton { "Tra" };
+    bool transientDetectionEnabled = true;
+
     // Transient snap buttons — Start marker (left of Start knob)
     juce::TextButton prevTransientButton { "< T" };
     juce::TextButton nextTransientButton { "T >" };
@@ -2110,6 +2138,49 @@ void adjustPitchUp()
     // Listener list
     juce::ListenerList<Listener> listeners;
     int fixedViewportWidth = 700;  // Will be updated in resized()
+
+    //==============================================================================
+    // Transient detection enable/disable
+
+    void updateTransientControlsState()
+    {
+        const bool on = transientDetectionEnabled;
+        const auto grayBg   = juce::Colour(0xFF555555);
+        const auto grayText = juce::Colour(0xFF555555);
+
+        // Start snap buttons: orange-red when enabled; gray when disabled
+        for (auto* btn : { &prevTransientButton, &nextTransientButton })
+        {
+            btn->setEnabled(on);
+            btn->setColour(juce::TextButton::buttonColourId,
+                           on ? juce::Colour(0xFFE84A1A) : grayBg);
+            btn->setColour(juce::TextButton::textColourOffId,
+                           on ? juce::Colour(0xFFFFFFFF) : grayText);
+        }
+
+        // End snap buttons: cyan-blue when enabled; gray when disabled
+        for (auto* btn : { &prevEndTransientButton, &nextEndTransientButton })
+        {
+            btn->setEnabled(on);
+            btn->setColour(juce::TextButton::buttonColourId,
+                           on ? juce::Colour(0xFF00B4D8) : grayBg);
+            btn->setColour(juce::TextButton::textColourOffId,
+                           on ? juce::Colour(0xFFFFFFFF) : grayText);
+        }
+
+        // Sens knob: dark red fill when enabled; gray when disabled
+        sensKnob.setEnabled(on);
+        sensKnob.setColour(juce::Slider::rotarySliderFillColourId,
+                           on ? juce::Colour(0xFF8B2500) : juce::Colour(0xFF555555));
+        sensKnob.setColour(juce::Slider::thumbColourId,
+                           on ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF777777));
+
+        // Count label: white when enabled; gray when disabled
+        transientCountLabel.setColour(juce::Label::textColourId,
+                                      on ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF555555));
+
+        repaint();
+    }
 
     //==============================================================================
     // Freeze helpers
