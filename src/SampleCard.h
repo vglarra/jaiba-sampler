@@ -146,9 +146,14 @@ public:
         startKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
         startKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFFFFFFF)); // white indicator on red
         startKnob.onValueChange = [this] {
-            startPointNormalized = (float)startKnob.getValue();
+            double seconds = startKnob.getValue() * originalDuration;
+            seconds = applyGridSnap(seconds, true);
+            float norm = (float)juce::jlimit(0.0, 1.0,
+                originalDuration > 0.0 ? seconds / originalDuration : startKnob.getValue());
+            startPointNormalized = norm;
+            startKnob.setValue(norm, juce::dontSendNotification);
             if (waveformComponent != nullptr)
-                waveformComponent->setStartMarker(startPointNormalized);
+                waveformComponent->setStartMarker(norm);
             notifyStartPointChanged();
         };
         addAndMakeVisible(startKnob);
@@ -161,6 +166,12 @@ public:
 
         // Wire start marker drag → knob + listeners
         waveformComponent->onMarkerDragged = [this](float newNorm) {
+            if (gridSnapEnabled && originalDuration > 0.0)
+            {
+                double seconds = newNorm * originalDuration;
+                seconds = applyGridSnap(seconds, true);
+                newNorm = (float)juce::jlimit(0.0, 1.0, seconds / originalDuration);
+            }
             startPointNormalized = newNorm;
             startKnob.setValue(newNorm, juce::dontSendNotification);
             notifyStartPointChanged();
@@ -177,9 +188,14 @@ public:
         endKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
         endKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFFFFFFF)); // white indicator on cyan
         endKnob.onValueChange = [this] {
-            endPointNormalized = (float)endKnob.getValue();
+            double seconds = endKnob.getValue() * originalDuration;
+            seconds = applyGridSnap(seconds, false);
+            float norm = (float)juce::jlimit(0.0, 1.0,
+                originalDuration > 0.0 ? seconds / originalDuration : endKnob.getValue());
+            endPointNormalized = norm;
+            endKnob.setValue(norm, juce::dontSendNotification);
             if (waveformComponent != nullptr)
-                waveformComponent->setEndMarker(endPointNormalized);
+                waveformComponent->setEndMarker(norm);
             notifyEndPointChanged();
         };
         addAndMakeVisible(endKnob);
@@ -192,6 +208,12 @@ public:
 
         // Wire end marker drag → knob + listeners
         waveformComponent->onEndMarkerDragged = [this](float newNorm) {
+            if (gridSnapEnabled && originalDuration > 0.0)
+            {
+                double seconds = newNorm * originalDuration;
+                seconds = applyGridSnap(seconds, false);
+                newNorm = (float)juce::jlimit(0.0, 1.0, seconds / originalDuration);
+            }
             endPointNormalized = newNorm;
             endKnob.setValue(newNorm, juce::dontSendNotification);
             notifyEndPointChanged();
@@ -250,6 +272,37 @@ public:
             }
         };
         addAndMakeVisible(freezeButton);
+
+        // Grid snap toggle — snaps markers to nearest grid division
+        gridSnapButton.setClickingTogglesState(true);
+        gridSnapButton.setToggleState(false, juce::dontSendNotification);
+        gridSnapButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+        gridSnapButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFAAFF00));
+        gridSnapButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+        gridSnapButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+        gridSnapButton.setTooltip("Snap markers to grid time divisions");
+        gridSnapButton.onClick = [this]
+        {
+            gridSnapEnabled = gridSnapButton.getToggleState();
+            updateGridResolutionButtonState();
+            if (waveformComponent != nullptr)
+                waveformComponent->setGridResolution(gridSnapEnabled, getGridInterval());
+            listeners.call([this](Listener& l) { l.gridSnapChanged(gridSnapEnabled); });
+        };
+        addAndMakeVisible(gridSnapButton);
+
+        // Grid resolution cycling button — to the right of Grid button
+        updateGridResolutionButton();  // sets text + colors based on initial state
+        gridResolutionButton.setTooltip("Grid resolution — click to cycle: 1ms \xe2\x86\x92 10ms \xe2\x86\x92 50ms \xe2\x86\x92 100ms \xe2\x86\x92 500ms \xe2\x86\x92 1s");
+        gridResolutionButton.onClick = [this]
+        {
+            gridResolutionIndex = (gridResolutionIndex + 1) % numGridResolutions;
+            updateGridResolutionButton();
+            if (waveformComponent != nullptr)
+                waveformComponent->setGridResolution(gridSnapEnabled, getGridInterval());
+            listeners.call([this](Listener& l) { l.gridResolutionChanged(gridResolutionIndex); });
+        };
+        addAndMakeVisible(gridResolutionButton);
 
         // Transient detection toggle — enables/disables the whole transient subsystem
         detectionToggleButton.setClickingTogglesState(true);
@@ -450,6 +503,16 @@ public:
             auto col = row1.removeFromLeft(62);
             loopButton.setBounds(col.withSizeKeepingCentre(58, 30));
         }
+        {
+            // Grid snap button
+            auto col = row1.removeFromLeft(62);
+            gridSnapButton.setBounds(col.withSizeKeepingCentre(58, 30));
+        }
+        {
+            // Grid resolution cycling button (compact, right of Grid)
+            auto col = row1.removeFromLeft(52);
+            gridResolutionButton.setBounds(col.withSizeKeepingCentre(50, 30));
+        }
 
         // 5px gap between rows
         area.removeFromTop(5);
@@ -622,6 +685,27 @@ public:
         sensKnob.setValue(transientThreshold, juce::dontSendNotification);
         if (currentAudioFile.existsAsFile())
             detectTransients(currentAudioFile);
+    }
+
+    bool isGridSnapEnabled() const { return gridSnapEnabled; }
+
+    int getGridResolutionIndex() const { return gridResolutionIndex; }
+
+    void setGridResolutionIndex(int index)
+    {
+        gridResolutionIndex = juce::jlimit(0, numGridResolutions - 1, index);
+        updateGridResolutionButton();
+        if (waveformComponent != nullptr)
+            waveformComponent->setGridResolution(gridSnapEnabled, getGridInterval());
+    }
+
+    void setGridSnapEnabled(bool enabled)
+    {
+        gridSnapEnabled = enabled;
+        gridSnapButton.setToggleState(enabled, juce::dontSendNotification);
+        updateGridResolutionButtonState();
+        if (waveformComponent != nullptr)
+            waveformComponent->setGridResolution(enabled, getGridInterval());
     }
 
     bool isLoopEnabled() const { return loopButton.getToggleState(); }
@@ -820,6 +904,15 @@ public:
                 // Run transient detection on the new file
                 detectTransients(audioFile);
 
+                // Auto-select grid resolution based on the new sample's duration
+                {
+                    double sampleDur = (originalSampleRate > 0.0 && originalLengthInSamples > 0)
+                                       ? (double)originalLengthInSamples / originalSampleRate
+                                       : 0.0;
+                    if (sampleDur > 0.0)
+                        autoSelectGridResolution(sampleDur);
+                }
+
                 printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n",
                     audioFile.getFileName().toRawUTF8(),
                     originalSampleRate / 1000.0,
@@ -874,6 +967,8 @@ public:
         virtual void endPointChanged(double endPointSeconds) = 0;
         virtual void loopEnabledChanged(bool isLooping) = 0;
         virtual void freezeChanged(bool isFrozen) = 0;
+        virtual void gridSnapChanged(bool isEnabled) = 0;
+        virtual void gridResolutionChanged(int index) = 0;
     };
     
     void addListener(Listener* listener)
@@ -1288,15 +1383,36 @@ public:
                     double majorInterval, minorInterval;
                     getTickIntervals(pixelsPerSecond, majorInterval, minorInterval);
 
-                    // --- Grid lines over waveform — dark on light background ---
-                    for (double t = minorInterval; t < originalDuration; t += minorInterval)
+                    // --- Grid lines over waveform — use selected resolution when snap is ON ---
+                    double gridMajor, gridMinor;
+                    if (gridSnapActive && gridResolutionSeconds > 0.0)
                     {
-                        int n = (int)std::round(t / minorInterval);
-                        bool isMajor = (n % 2 == 0);
-                        float x = waveformBounds.getX() + (float)(t / originalDuration * actualWaveformWidth);
-                        if (x >= waveformBounds.getRight()) break;
-                        g.setColour(juce::Colour(0xFF000000).withAlpha(isMajor ? 0.15f : 0.08f));
-                        g.drawVerticalLine((int)(x + 0.5f), waveformBounds.getY(), waveformBounds.getBottom());
+                        gridMajor = gridResolutionSeconds;
+                        gridMinor = gridResolutionSeconds / 2.0;
+                    }
+                    else
+                    {
+                        gridMajor = majorInterval;
+                        gridMinor = minorInterval;
+                    }
+
+                    float majorPx = (gridMajor > 0.0 && originalDuration > 0.0)
+                                    ? (float)(gridMajor / originalDuration) * actualWaveformWidth
+                                    : 0.0f;
+                    float minorPx = majorPx * 0.5f;
+
+                    if (majorPx >= 2.0f)
+                    {
+                        for (double t = gridMinor; t < originalDuration; t += gridMinor)
+                        {
+                            int n = (int)std::round(t / gridMinor);
+                            bool isMajor = (n % 2 == 0);
+                            if (minorPx < 2.0f && !isMajor) continue; // skip minor when too dense
+                            float x = waveformBounds.getX() + (float)(t / originalDuration * actualWaveformWidth);
+                            if (x >= waveformBounds.getRight()) break;
+                            g.setColour(juce::Colour(0xFF000000).withAlpha(isMajor ? 0.15f : 0.08f));
+                            g.drawVerticalLine((int)(x + 0.5f), waveformBounds.getY(), waveformBounds.getBottom());
+                        }
                     }
 
                     // --- Ruler background — slightly darker than waveform ---
@@ -1437,6 +1553,14 @@ public:
             void setLoopHighlight(bool enabled)
             {
                 loopHighlightEnabled = enabled;
+                repaint();
+            }
+
+            // Push snap-grid state so paint() draws lines at the chosen resolution.
+            void setGridResolution(bool snapActive, double resolutionSec)
+            {
+                gridSnapActive       = snapActive;
+                gridResolutionSeconds = resolutionSec;
                 repaint();
             }
 
@@ -1581,6 +1705,10 @@ public:
             float startMarkerNormalized = 0.0f;
             float endMarkerNormalized   = 1.0f;
             bool loopHighlightEnabled   = false;
+
+            // Grid snap display state
+            bool   gridSnapActive        = false;
+            double gridResolutionSeconds = 1.0;
 
             // Transient detection display
             std::vector<float> transientPositionsNormalized;
@@ -2073,9 +2201,14 @@ void adjustPitchUp()
     juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
     int pitchOffset = 0;  // Pitch offset in semitones
 
-    // Loop / Freeze buttons
+    // Loop / Freeze / Grid buttons
     juce::TextButton loopButton;
     juce::TextButton freezeButton { "Freeze" };
+    juce::TextButton gridSnapButton { "Grid" };
+    juce::TextButton gridResolutionButton { "1s" };
+    bool gridSnapEnabled = false;
+    int  gridResolutionIndex = 5;   // default = 1s (index into the 6-step table)
+    static constexpr int numGridResolutions = 6;
 
     // Transient detection toggle
     juce::TextButton detectionToggleButton { "Tra" };
@@ -2180,6 +2313,105 @@ void adjustPitchUp()
                                       on ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF555555));
 
         repaint();
+    }
+
+    //==============================================================================
+    // Grid snap helpers
+
+    // Grid interval in seconds — returns the user-selected resolution.
+    double getGridInterval() const
+    {
+        static const double vals[] = { 0.001, 0.01, 0.05, 0.1, 0.5, 1.0 };
+        return vals[juce::jlimit(0, numGridResolutions - 1, gridResolutionIndex)];
+    }
+
+    // Pixel width actually covered by waveform data (mirrors WaveformComponent::getActualWaveformWidth).
+    float computeActualWaveformWidth() const
+    {
+        if (waveformComponent == nullptr) return 0.0f;
+        int rw = waveformComponent->getWidth();
+        if (pitchOffset > 0)
+        {
+            double cf = juce::jmin(std::pow(2.0, pitchOffset / 12.0), 16.0);
+            return (float)(rw / cf);
+        }
+        return (float)rw;
+    }
+
+    // Resolution label string for a given index (0-5).
+    static juce::String gridResolutionLabel(int index)
+    {
+        static const char* labels[] = { "1ms", "10ms", "50ms", "100ms", "500ms", "1s" };
+        return (index >= 0 && index < numGridResolutions) ? labels[index] : "?";
+    }
+
+    // Refresh the resolution button text and colors to match current state.
+    void updateGridResolutionButton()
+    {
+        gridResolutionButton.setButtonText(gridResolutionLabel(gridResolutionIndex));
+        updateGridResolutionButtonState();
+    }
+
+    // Enable/disable + color the resolution button based on gridSnapEnabled.
+    void updateGridResolutionButtonState()
+    {
+        gridResolutionButton.setEnabled(gridSnapEnabled);
+        gridResolutionButton.setColour(juce::TextButton::buttonColourId,
+            gridSnapEnabled ? juce::Colour(0xFFAAFF00) : juce::Colour(0xFF3A3A3A));
+        gridResolutionButton.setColour(juce::TextButton::textColourOffId,
+            gridSnapEnabled ? juce::Colour(0xFF111111) : juce::Colour(0xFF7A7A7A));
+    }
+
+    // Choose the best default resolution for a given sample duration and apply it.
+    // Called on every sample load; fires the listener so the choice is persisted.
+    void autoSelectGridResolution(double durationSeconds)
+    {
+        int newIndex;
+        if      (durationSeconds < 0.5)  newIndex = 1; // 10ms
+        else if (durationSeconds < 2.0)  newIndex = 2; // 50ms
+        else if (durationSeconds < 5.0)  newIndex = 3; // 100ms
+        else if (durationSeconds < 15.0) newIndex = 4; // 500ms
+        else                             newIndex = 5; // 1s
+
+        gridResolutionIndex = newIndex;
+        updateGridResolutionButton();
+        if (waveformComponent != nullptr)
+            waveformComponent->setGridResolution(gridSnapEnabled, getGridInterval());
+        listeners.call([this](Listener& l) { l.gridResolutionChanged(gridResolutionIndex); });
+    }
+
+    // Snap `seconds` to the nearest grid line if within 10 pixels (requirement 8).
+    // Flashes the corresponding marker when a snap occurs (requirement 9).
+    // isStart: true = start marker, false = end marker.
+    double applyGridSnap(double seconds, bool isStart)
+    {
+        if (!gridSnapEnabled || originalDuration <= 0.0)
+            return seconds;
+
+        double interval = getGridInterval();
+        float actualWidth = computeActualWaveformWidth();
+        if (actualWidth <= 1.0f)
+            return seconds;
+
+        double pixelsPerSecond = actualWidth / originalDuration;
+        double thresholdSeconds = 10.0 / pixelsPerSecond;
+
+        // Find nearest grid line
+        double nearest = std::round(seconds / interval) * interval;
+        nearest = juce::jlimit(0.0, originalDuration, nearest);
+
+        if (std::abs(seconds - nearest) <= thresholdSeconds)
+        {
+            if (std::abs(seconds - nearest) > 1e-9 && waveformComponent != nullptr)
+            {
+                if (isStart)
+                    waveformComponent->flashStartMarker();
+                else
+                    waveformComponent->flashEndMarker();
+            }
+            return nearest;
+        }
+        return seconds;
     }
 
     //==============================================================================

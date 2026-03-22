@@ -133,6 +133,28 @@ public:
         return propertiesFile->getBoolValue("loopEnabled", false);
     }
 
+    void saveGridSnapEnabled(bool enabled)
+    {
+        propertiesFile->setValue("gridSnapEnabled", enabled);
+        propertiesFile->saveIfNeeded();
+    }
+
+    bool getGridSnapEnabled()
+    {
+        return propertiesFile->getBoolValue("gridSnapEnabled", false);
+    }
+
+    void saveGridResolutionIndex(int index)
+    {
+        propertiesFile->setValue("gridResolutionIndex", index);
+        propertiesFile->saveIfNeeded();
+    }
+
+    int getGridResolutionIndex()
+    {
+        return propertiesFile->getIntValue("gridResolutionIndex", 5); // default 1s
+    }
+
     // NEW: Save audio device settings
     void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
     {

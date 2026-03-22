@@ -122,6 +122,8 @@ private:
     void endPointChanged(double endPointSeconds) override;
     void loopEnabledChanged(bool isLooping) override;
     void freezeChanged(bool isFrozen) override;
+    void gridSnapChanged(bool isEnabled) override;
+    void gridResolutionChanged(int index) override;
 
     //==============================================================================
     // MIDI Learn handling

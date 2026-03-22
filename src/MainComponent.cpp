@@ -1620,6 +1620,20 @@ void MainComponent::loopEnabledChanged(bool isLooping)
     printf("Loop %s\n", isLooping ? "ON" : "OFF");
 }
 
+void MainComponent::gridSnapChanged(bool isEnabled)
+{
+    if (configManager != nullptr)
+        configManager->saveGridSnapEnabled(isEnabled);
+    printf("Grid snap %s\n", isEnabled ? "ON" : "OFF");
+}
+
+void MainComponent::gridResolutionChanged(int index)
+{
+    if (configManager != nullptr)
+        configManager->saveGridResolutionIndex(index);
+    printf("Grid resolution index: %d\n", index);
+}
+
 void MainComponent::freezeChanged(bool isFrozen)
 {
     printf("Freeze %s\n", isFrozen ? "ON" : "OFF");
@@ -1757,6 +1771,14 @@ void MainComponent::loadLastSession()
     masterVolumeGain.store(savedMasterVolume);
     masterVolumeKnob.setValue(savedMasterVolume, juce::dontSendNotification);
     printf("[PERSIST] Global: master_vol=%.2f\n", savedMasterVolume);
+
+    bool savedGridSnap = configManager->getGridSnapEnabled();
+    sampleCard.setGridSnapEnabled(savedGridSnap);
+    printf("[PERSIST] Global: grid_snap=%s\n", savedGridSnap ? "ON" : "OFF");
+
+    int savedGridResolution = configManager->getGridResolutionIndex();
+    sampleCard.setGridResolutionIndex(savedGridResolution);
+    printf("[PERSIST] Global: grid_resolution_index=%d\n", savedGridResolution);
 
     // ── Restore MIDI device ────────────────────────────────────────────────────────
     if (savedDevice.isNotEmpty() && isValidMidiDevice(savedDevice))
