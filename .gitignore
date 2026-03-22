@@ -43,6 +43,7 @@ _deps/
 
 # AI assistant context
 CLAUDE.md
+.claude/settings.local.json
 
 # Temp files
 *.log

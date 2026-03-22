@@ -5,6 +5,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <cmath>
+#include <vector>
 #include "KnobLookAndFeel.h"
 
 class SampleCard : public juce::Component
@@ -250,6 +251,32 @@ public:
         };
         addAndMakeVisible(freezeButton);
 
+        // Transient snap buttons — snap start marker to nearest transient
+        prevTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        prevTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        prevTransientButton.setTooltip("Snap start to previous transient");
+        prevTransientButton.onClick = [this] { snapToPrevTransient(); };
+        addAndMakeVisible(prevTransientButton);
+
+        nextTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        nextTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        nextTransientButton.setTooltip("Snap start to next transient");
+        nextTransientButton.onClick = [this] { snapToNextTransient(); };
+        addAndMakeVisible(nextTransientButton);
+
+        // End marker transient snap buttons
+        prevEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        prevEndTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        prevEndTransientButton.setTooltip("Snap end to previous transient");
+        prevEndTransientButton.onClick = [this] { snapEndToPrevTransient(); };
+        addAndMakeVisible(prevEndTransientButton);
+
+        nextEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+        nextEndTransientButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        nextEndTransientButton.setTooltip("Snap end to next transient");
+        nextEndTransientButton.onClick = [this] { snapEndToNextTransient(); };
+        addAndMakeVisible(nextEndTransientButton);
+
         // Update pitch button labels with tooltips
         updatePitchButtonLabels();
         
@@ -371,6 +398,16 @@ public:
             volumeKnob.setBounds(col.reduced(2));
         }
         {
+            // "T >" end — snap end to NEXT transient (rightmost of End group, left of Vol)
+            auto col = pitchRow.removeFromRight(38);
+            nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+        }
+        {
+            // "< T" end — snap end to PREV transient
+            auto col = pitchRow.removeFromRight(38);
+            prevEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+        }
+        {
             auto col = pitchRow.removeFromRight(60);
             endKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
             endKnob.setBounds(col.reduced(2));
@@ -379,6 +416,16 @@ public:
             auto col = pitchRow.removeFromRight(60);
             startKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
             startKnob.setBounds(col.reduced(2));
+        }
+        {
+            // "T >" — snap to NEXT transient (right of "< T", immediately left of Start knob)
+            auto col = pitchRow.removeFromRight(38);
+            nextTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+        }
+        {
+            // "< T" — snap to PREV transient
+            auto col = pitchRow.removeFromRight(38);
+            prevTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
         }
         {
             // Loop toggle button
@@ -688,6 +735,9 @@ public:
                 // Reset start/end points when a new file is loaded
                 resetStartPoint();
                 resetEndPoint();
+
+                // Run transient detection on the new file
+                detectTransients(audioFile);
 
                 printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n",
                     audioFile.getFileName().toRawUTF8(),
@@ -1212,6 +1262,26 @@ public:
                     }
                 }
 
+                // Draw transient positions as small orange tick marks at waveform top
+                if (!transientPositionsNormalized.empty())
+                {
+                    g.setColour(juce::Colour(0xFFFF8800).withAlpha(0.75f));
+                    for (float tn : transientPositionsNormalized)
+                    {
+                        float tx = waveformBounds.getX() + tn * actualWaveformWidth;
+                        if (tx >= waveformBounds.getRight()) break;
+                        g.drawVerticalLine((int)(tx + 0.5f),
+                                           waveformBounds.getY(),
+                                           waveformBounds.getY() + 6);
+                        // Small downward triangle cap
+                        juce::Path tick;
+                        tick.addTriangle(tx - 2.5f, (float)waveformBounds.getY(),
+                                         tx + 2.5f, (float)waveformBounds.getY(),
+                                         tx,         (float)waveformBounds.getY() + 5.0f);
+                        g.fillPath(tick);
+                    }
+                }
+
                 // Draw loop region highlight (semi-transparent overlay between start and end)
                 if (loopHighlightEnabled)
                 {
@@ -1222,9 +1292,14 @@ public:
                                                       hlEndX - hlStartX, (float)waveformBounds.getHeight()));
                 }
 
-                // Draw start point marker — deep red, triangle at ruler top (pointing down)
+                // Draw start point marker — deep red normally, flash orange on transient snap
+                // Flash alternates bright/dim each 100ms tick for a pulse effect
+                bool flashOn = (markerFlashCountdown > 0) && (markerFlashCountdown % 2 != 0);
+                juce::Colour startMarkerColour = flashOn
+                    ? juce::Colour(0xFFFF8800)  // bright orange flash
+                    : juce::Colour(0xFFCC0000); // normal deep red
                 float markerX = waveformBounds.getX() + startMarkerNormalized * actualWaveformWidth;
-                g.setColour(juce::Colour(0xFFCC0000).withAlpha(0.9f));
+                g.setColour(startMarkerColour.withAlpha(0.9f));
                 g.drawLine(markerX, (float)rulerBounds.getY(),
                            markerX, (float)waveformBounds.getBottom(), 2.0f);
                 {
@@ -1235,9 +1310,13 @@ public:
                     g.fillPath(handle);
                 }
 
-                // Draw end point marker — cyan, triangle at waveform bottom (pointing up)
+                // Draw end point marker — cyan normally, flash orange on transient snap
+                bool endFlashOn = (endMarkerFlashCountdown > 0) && (endMarkerFlashCountdown % 2 != 0);
+                juce::Colour endMarkerColour = endFlashOn
+                    ? juce::Colour(0xFFFF8800)  // orange flash
+                    : juce::Colour(0xFF00AACC); // normal cyan
                 float endMarkerX = waveformBounds.getX() + endMarkerNormalized * actualWaveformWidth;
-                g.setColour(juce::Colour(0xFF00AACC).withAlpha(0.9f));
+                g.setColour(endMarkerColour.withAlpha(0.9f));
                 g.drawLine(endMarkerX, (float)rulerBounds.getY(),
                            endMarkerX, (float)waveformBounds.getBottom(), 2.0f);
                 {
@@ -1277,6 +1356,27 @@ public:
             void setLoopHighlight(bool enabled)
             {
                 loopHighlightEnabled = enabled;
+                repaint();
+            }
+
+            // Transient markers — normalized positions [0,1]
+            void setTransients(const std::vector<float>& positions)
+            {
+                transientPositionsNormalized = positions;
+                repaint();
+            }
+
+            // Briefly flash the start marker orange to show a transient snap occurred
+            void flashStartMarker()
+            {
+                markerFlashCountdown = 6; // ~600ms at 100ms timer intervals
+                repaint();
+            }
+
+            // Briefly flash the end marker orange to show a transient snap occurred
+            void flashEndMarker()
+            {
+                endMarkerFlashCountdown = 6;
                 repaint();
             }
 
@@ -1376,6 +1476,16 @@ public:
                     lastFile = currentAudioFile;
                     repaint();
                 }
+                if (markerFlashCountdown > 0)
+                {
+                    --markerFlashCountdown;
+                    repaint();
+                }
+                if (endMarkerFlashCountdown > 0)
+                {
+                    --endMarkerFlashCountdown;
+                    repaint();
+                }
             }
 
             juce::AudioFormatManager& formatManager;
@@ -1390,6 +1500,11 @@ public:
             float startMarkerNormalized = 0.0f;
             float endMarkerNormalized   = 1.0f;
             bool loopHighlightEnabled   = false;
+
+            // Transient detection display
+            std::vector<float> transientPositionsNormalized;
+            int markerFlashCountdown    = 0; // start marker flash countdown (100ms ticks)
+            int endMarkerFlashCountdown = 0; // end marker flash countdown
 
             enum class DragTarget { None, Start, End };
             DragTarget currentDragTarget = DragTarget::None;
@@ -1547,6 +1662,227 @@ void adjustPitchUp()
 }
     
     
+    // =========================================================================
+    // Transient detection and snapping
+
+    // Analyse the audio file and build the transientPositionsSeconds list.
+    // Uses a 512-sample sliding window; marks onset when RMS jumps > 4× previous window.
+    // NOTE: duration is computed from the reader — does NOT depend on originalDuration so
+    // this is safe to call from setWaveform() before setDuration() has been called.
+    void detectTransients(const juce::File& audioFile)
+    {
+        transientPositionsSeconds.clear();
+        if (waveformComponent != nullptr)
+            waveformComponent->setTransients({});
+
+        if (!audioFile.existsAsFile())
+            return;
+
+        std::unique_ptr<juce::AudioFormatReader> reader(
+            formatManager.createReaderFor(audioFile));
+        if (reader == nullptr)
+            return;
+
+        const double sr           = reader->sampleRate;
+        const juce::int64 totalSamples = reader->lengthInSamples;
+
+        // Compute duration directly from the reader — independent of originalDuration
+        const double duration = (sr > 0.0 && totalSamples > 0)
+                                    ? (double)totalSamples / sr
+                                    : 0.0;
+        if (duration <= 0.0)
+            return;
+
+        const int    windowSize    = 512;
+        const double threshold     = 4.0;   // RMS must rise > 4× to count as transient
+        const double minGapSeconds = 0.02;  // ignore transients closer than 20 ms
+
+        const int numCh = juce::jmin((int)reader->numChannels, 2);
+
+        juce::AudioBuffer<float> buf(numCh, windowSize);
+        double prevRMS        = 0.0;
+        double lastTransientT = -1.0;
+
+        for (juce::int64 pos = 0; pos + windowSize <= totalSamples; pos += windowSize)
+        {
+            reader->read(&buf, 0, windowSize, pos, true, true);
+
+            double sumSq = 0.0;
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                const float* data = buf.getReadPointer(ch);
+                for (int i = 0; i < windowSize; ++i)
+                    sumSq += (double)data[i] * data[i];
+            }
+            double rms = std::sqrt(sumSq / (windowSize * numCh));
+
+            if (prevRMS > 0.001 && rms > prevRMS * threshold)
+            {
+                double t = (double)pos / sr;
+                if (t - lastTransientT >= minGapSeconds)
+                {
+                    transientPositionsSeconds.push_back(t);
+                    lastTransientT = t;
+                }
+            }
+            prevRMS = rms;
+        }
+
+        printf("[TRANSIENT] Startup/load complete — %d transients detected in '%s' (%.2fs)\n",
+               (int)transientPositionsSeconds.size(),
+               audioFile.getFileName().toRawUTF8(),
+               duration);
+
+        // Normalise against the reader-derived duration (not originalDuration)
+        if (waveformComponent != nullptr)
+        {
+            std::vector<float> normalised;
+            normalised.reserve(transientPositionsSeconds.size());
+            for (double t : transientPositionsSeconds)
+                normalised.push_back((float)(t / duration));
+            waveformComponent->setTransients(normalised);
+        }
+    }
+
+    // Move end marker to the nearest transient BEFORE current end (but after start marker).
+    void snapEndToPrevTransient()
+    {
+        if (transientPositionsSeconds.empty() || originalDuration <= 0.0)
+            return;
+
+        double currentEnd   = endPointNormalized   * originalDuration;
+        double currentStart = startPointNormalized  * originalDuration;
+        const double epsilon = 0.005;
+
+        double best = -1.0;
+        for (double t : transientPositionsSeconds)
+        {
+            // Must be before current end AND strictly after start marker
+            if (t < currentEnd - epsilon && t > currentStart + epsilon)
+                if (t > best) best = t;
+        }
+
+        if (best >= 0.0)
+        {
+            setEndPoint(best);
+            notifyEndPointChanged();
+            if (waveformComponent != nullptr)
+                waveformComponent->flashEndMarker();
+            printf("[TRANSIENT] End snap prev → %.3fs\n", best);
+        }
+        else
+        {
+            // Nothing valid — flash button briefly to indicate no target
+            prevEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF884400));
+            juce::Timer::callAfterDelay(300, [this]
+            {
+                prevEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+            });
+        }
+    }
+
+    // Move end marker to the nearest transient AFTER current end.
+    void snapEndToNextTransient()
+    {
+        if (transientPositionsSeconds.empty() || originalDuration <= 0.0)
+            return;
+
+        double currentEnd = endPointNormalized * originalDuration;
+        const double epsilon = 0.005;
+
+        double best = -1.0;
+        for (double t : transientPositionsSeconds)
+        {
+            if (t > currentEnd + epsilon && (best < 0.0 || t < best))
+                best = t;
+        }
+
+        if (best >= 0.0 && best < originalDuration)
+        {
+            setEndPoint(best);
+            notifyEndPointChanged();
+            if (waveformComponent != nullptr)
+                waveformComponent->flashEndMarker();
+            printf("[TRANSIENT] End snap next → %.3fs\n", best);
+        }
+        else
+        {
+            nextEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF884400));
+            juce::Timer::callAfterDelay(300, [this]
+            {
+                nextEndTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+            });
+        }
+    }
+
+    // Move start marker to the nearest transient BEFORE current start.
+    void snapToPrevTransient()
+    {
+        if (transientPositionsSeconds.empty() || originalDuration <= 0.0)
+            return;
+
+        double currentStart = startPointNormalized * originalDuration;
+        const double epsilon = 0.005;
+
+        double best = -1.0;
+        for (double t : transientPositionsSeconds)
+            if (t < currentStart - epsilon && t > best)
+                best = t;
+
+        if (best >= 0.0)
+        {
+            setStartPoint(best);
+            notifyStartPointChanged();
+            if (waveformComponent != nullptr)
+                waveformComponent->flashStartMarker();
+            printf("[TRANSIENT] Start snap prev → %.3fs\n", best);
+        }
+        else
+        {
+            prevTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF884400));
+            juce::Timer::callAfterDelay(300, [this]
+            {
+                prevTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+            });
+        }
+    }
+
+    // Move start marker to the nearest transient AFTER current start (but before end marker).
+    void snapToNextTransient()
+    {
+        if (transientPositionsSeconds.empty() || originalDuration <= 0.0)
+            return;
+
+        double currentStart = startPointNormalized * originalDuration;
+        double currentEnd   = endPointNormalized   * originalDuration;
+        const double epsilon = 0.005;
+
+        double best = -1.0;
+        for (double t : transientPositionsSeconds)
+        {
+            // Must be after current start AND strictly before end marker
+            if (t > currentStart + epsilon && t < currentEnd - epsilon)
+                if (best < 0.0 || t < best) best = t;
+        }
+
+        if (best >= 0.0)
+        {
+            setStartPoint(best);
+            notifyStartPointChanged();
+            if (waveformComponent != nullptr)
+                waveformComponent->flashStartMarker();
+            printf("[TRANSIENT] Start snap next → %.3fs\n", best);
+        }
+        else
+        {
+            nextTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF884400));
+            juce::Timer::callAfterDelay(300, [this]
+            {
+                nextTransientButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
+            });
+        }
+    }
+
 /*     void updateWaveformSize()
     {
         if (waveformComponent == nullptr || waveformContainer == nullptr)
@@ -1655,6 +1991,17 @@ void adjustPitchUp()
     // Loop / Freeze buttons
     juce::TextButton loopButton;
     juce::TextButton freezeButton { "Freeze" };
+
+    // Transient snap buttons — Start marker (left of Start knob)
+    juce::TextButton prevTransientButton { "< T" };
+    juce::TextButton nextTransientButton { "T >" };
+
+    // Transient snap buttons — End marker (right of End knob)
+    juce::TextButton prevEndTransientButton { "< T" };
+    juce::TextButton nextEndTransientButton { "T >" };
+
+    // Detected transient positions in seconds (populated on each sample load)
+    std::vector<double> transientPositionsSeconds;
 
     // Freeze state — never persisted, always starts false
     bool isFreezeActive          = false;
