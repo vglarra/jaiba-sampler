@@ -304,7 +304,7 @@ void MainComponent::resized()
     
     // Make the card take most of the body width, but with max width to maintain proportions
     const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
-    const int cardHeight = 330;     // Fixed height (extra 10px for taller pitch row with compact knobs)
+    const int cardHeight = 385;     // Two control rows (44px + 5px gap + 60px) below waveform
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
     
@@ -1336,18 +1336,23 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
             auto state = configManager->getSampleState(file);
             if (state.exists)
             {
-                // Saved settings found — restore start/end/vol/loop for this file
+                // Saved settings found — restore start/end/vol/loop/thresh for this file
                 effectiveStart = state.startPoint;
                 effectiveEnd   = state.endPoint;
                 effectiveVol   = state.volume;
                 effectiveLoop  = state.loopEnabled;
-                printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s\n",
+                // Restore transient threshold (re-runs detection with saved sensitivity)
+                sampleCard.setTransientThreshold(state.transientThreshold);
+                printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f\n",
                        effectiveStart, effectiveEnd, effectiveVol,
-                       effectiveLoop ? "ON" : "OFF");
+                       effectiveLoop ? "ON" : "OFF",
+                       state.transientThreshold);
             }
             else
             {
-                printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF\n");
+                // New file — reset sensitivity to default
+                sampleCard.setTransientThreshold(4.0);
+                printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF  thresh=4.0\n");
             }
         }
 
@@ -1816,10 +1821,11 @@ void MainComponent::saveOutgoingSampleState()
 
     auto* sample = samples[selectedSampleIndex];
     ConfigurationManager::SampleState s;
-    s.startPoint  = sample->startPointSeconds;
-    s.endPoint    = sample->endPointSeconds;
-    s.volume      = sampleCard.getVolume();
-    s.loopEnabled = sampleCard.isLoopEnabled();
+    s.startPoint          = sample->startPointSeconds;
+    s.endPoint            = sample->endPointSeconds;
+    s.volume              = sampleCard.getVolume();
+    s.loopEnabled         = sampleCard.isLoopEnabled();
+    s.transientThreshold  = sampleCard.getTransientThreshold();
     // Pitch is NOT saved here — it is a global value saved separately via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
@@ -1838,10 +1844,11 @@ void MainComponent::saveCurrentSampleState()
 
     auto* sample = samples[selectedSampleIndex];
     ConfigurationManager::SampleState s;
-    s.startPoint  = sample->startPointSeconds;
-    s.endPoint    = sample->endPointSeconds;
-    s.volume      = sampleCard.getVolume();
-    s.loopEnabled = sampleCard.isLoopEnabled();
+    s.startPoint          = sample->startPointSeconds;
+    s.endPoint            = sample->endPointSeconds;
+    s.volume              = sampleCard.getVolume();
+    s.loopEnabled         = sampleCard.isLoopEnabled();
+    s.transientThreshold  = sampleCard.getTransientThreshold();
     // Pitch is NOT saved here — it is a global value saved separately via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);

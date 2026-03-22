@@ -277,6 +277,35 @@ public:
         nextEndTransientButton.onClick = [this] { snapEndToNextTransient(); };
         addAndMakeVisible(nextEndTransientButton);
 
+        // Sensitivity knob — orange accent, controls transient detection threshold
+        sensKnob.setLookAndFeel(&compactKnobLaf);
+        sensKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        sensKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        sensKnob.setRange(1.5, 10.0, 0.1);
+        sensKnob.setValue(4.0, juce::dontSendNotification);
+        sensKnob.setTooltip("Transient sensitivity: low=many transients, high=only strong hits");
+        sensKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFE25A00)); // orange
+        sensKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
+        sensKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFFFFFFF));
+        sensKnob.onValueChange = [this] {
+            transientThreshold = sensKnob.getValue();
+            if (currentAudioFile.existsAsFile())
+                detectTransients(currentAudioFile);
+        };
+        addAndMakeVisible(sensKnob);
+
+        sensLabel.setText("Sens", juce::dontSendNotification);
+        sensLabel.setJustificationType(juce::Justification::centred);
+        sensLabel.setFont(juce::Font(11.0f));
+        sensLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF1A1A1A));
+        addAndMakeVisible(sensLabel);
+
+        transientCountLabel.setText("T: 0", juce::dontSendNotification);
+        transientCountLabel.setJustificationType(juce::Justification::centred);
+        transientCountLabel.setFont(juce::Font(10.0f));
+        transientCountLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C)); // green accent
+        addAndMakeVisible(transientCountLabel);
+
         // Update pitch button labels with tooltips
         updatePitchButtonLabels();
         
@@ -299,6 +328,7 @@ public:
         volumeKnob.setLookAndFeel(nullptr);
         startKnob.setLookAndFeel(nullptr);
         endKnob.setLookAndFeel(nullptr);
+        sensKnob.setLookAndFeel(nullptr);
     }
 
     void resetViewport()
@@ -339,9 +369,9 @@ public:
         // Space before Prev/Next buttons
         topRow.removeFromLeft(10);
         
-        // Prev/Next buttons on right (total 120px: 60 + 60)
-        prevButton.setBounds(topRow.removeFromRight(60).reduced(2));
+        // Prev/Next buttons on right: Next rightmost, Prev to its left (L→R: Prev | Next)
         nextButton.setBounds(topRow.removeFromRight(60).reduced(2));
+        prevButton.setBounds(topRow.removeFromRight(60).reduced(2));
         
         // Add 5px margin between top row and waveform
         area.removeFromTop(5);
@@ -375,69 +405,86 @@ public:
             waveformViewport.setViewPosition(0, 0);  // Reset scroll position
         }
         
-        // Add 5px margin between waveform and pitch controls
+        // Add 5px margin between waveform and controls
         area.removeFromTop(5);
-        
-        // ===== Pitch adjustment controls row (below waveform, left corner) =====
-        // 60px height → knob bounding box ≈ 47px → CompactKnobLookAndFeel circle ≈ 42px diameter
-        auto pitchRow = area.removeFromTop(60);
 
-        // Position pitch buttons vertically centred (30px tall) within the 60px row
-        const int pitchControlWidth = 180;  // 60 + 60 + 60
-        auto pitchControlArea = pitchRow.withWidth(pitchControlWidth)
-                                        .withSizeKeepingCentre(pitchControlWidth, 30);
-        pitchDownButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
-        pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
-        pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
+        // ===== ROW 1: Playback controls (44px) — Down | Pitch | Up | Freeze | Loop =====
+        auto row1 = area.removeFromTop(44);
 
-        // Each knob column: 60px wide — knob fills top, label sits flush below (13px)
+        {
+            // Pitch controls: Down | Pitch display | Up  (180px, 30px tall, vertically centred)
+            const int pitchCtrlW = 180;
+            auto pitchArea = row1.removeFromLeft(pitchCtrlW);
+            auto pitchControlArea = pitchArea.withSizeKeepingCentre(pitchCtrlW, 30);
+            pitchDownButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
+            pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
+            pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
+        }
+        row1.removeFromLeft(8); // gap between pitch and toggle buttons
+        {
+            // Freeze button
+            auto col = row1.removeFromLeft(62);
+            freezeButton.setBounds(col.withSizeKeepingCentre(58, 38));
+        }
+        {
+            // Loop button
+            auto col = row1.removeFromLeft(62);
+            loopButton.setBounds(col.withSizeKeepingCentre(58, 38));
+        }
+
+        // 5px gap between rows
+        area.removeFromTop(5);
+
+        // ===== ROW 2: Marker controls (60px) — <T | T> | Start | End | <T | T> | Sens | Vol =====
+        auto row2 = area.removeFromTop(60);
         const int labelH = 13;
+
         {
-            auto col = pitchRow.removeFromRight(60);
-            volumeLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            volumeKnob.setBounds(col.reduced(2));
+            // "< T" — snap start to PREV transient
+            auto col = row2.removeFromLeft(38);
+            prevTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
         }
         {
-            // "T >" end — snap end to NEXT transient (rightmost of End group, left of Vol)
-            auto col = pitchRow.removeFromRight(38);
-            nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+            // "T >" — snap start to NEXT transient
+            auto col = row2.removeFromLeft(38);
+            nextTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
         }
         {
-            // "< T" end — snap end to PREV transient
-            auto col = pitchRow.removeFromRight(38);
-            prevEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
-        }
-        {
-            auto col = pitchRow.removeFromRight(60);
-            endKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            endKnob.setBounds(col.reduced(2));
-        }
-        {
-            auto col = pitchRow.removeFromRight(60);
+            // Start knob
+            auto col = row2.removeFromLeft(60);
             startKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
             startKnob.setBounds(col.reduced(2));
         }
         {
-            // "T >" — snap to NEXT transient (right of "< T", immediately left of Start knob)
-            auto col = pitchRow.removeFromRight(38);
-            nextTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+            // End knob
+            auto col = row2.removeFromLeft(60);
+            endKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            endKnob.setBounds(col.reduced(2));
         }
         {
-            // "< T" — snap to PREV transient
-            auto col = pitchRow.removeFromRight(38);
-            prevTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
+            // "< T" — snap end to PREV transient
+            auto col = row2.removeFromLeft(38);
+            prevEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
         }
         {
-            // Loop toggle button
-            auto col = pitchRow.removeFromRight(60);
-            loopButton.setBounds(col.withSizeKeepingCentre(56, 40));
+            // "T >" — snap end to NEXT transient
+            auto col = row2.removeFromLeft(38);
+            nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 28));
         }
         {
-            // Freeze button — left of Loop button
-            auto col = pitchRow.removeFromRight(60);
-            freezeButton.setBounds(col.withSizeKeepingCentre(56, 40));
+            // Sens knob — two label rows: count (T:N) above "Sens"
+            auto col = row2.removeFromLeft(60);
+            sensLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            transientCountLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            sensKnob.setBounds(col.reduced(2));
         }
-        
+        {
+            // Vol knob
+            auto col = row2.removeFromLeft(60);
+            volumeLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            volumeKnob.setBounds(col.reduced(2));
+        }
+
         // Add margin before bottom info row
         area.removeFromTop(5);
 
@@ -541,6 +588,16 @@ public:
         endKnob.setValue(1.0, juce::dontSendNotification);
         if (waveformComponent != nullptr)
             waveformComponent->setEndMarker(1.0f);
+    }
+
+    double getTransientThreshold() const { return transientThreshold; }
+
+    void setTransientThreshold(double threshold)
+    {
+        transientThreshold = juce::jlimit(1.5, 10.0, threshold);
+        sensKnob.setValue(transientThreshold, juce::dontSendNotification);
+        if (currentAudioFile.existsAsFile())
+            detectTransients(currentAudioFile);
     }
 
     bool isLoopEnabled() const { return loopButton.getToggleState(); }
@@ -1694,7 +1751,7 @@ void adjustPitchUp()
             return;
 
         const int    windowSize    = 512;
-        const double threshold     = 4.0;   // RMS must rise > 4× to count as transient
+        const double threshold     = transientThreshold;  // controlled by Sens knob
         const double minGapSeconds = 0.02;  // ignore transients closer than 20 ms
 
         const int numCh = juce::jmin((int)reader->numChannels, 2);
@@ -1728,10 +1785,14 @@ void adjustPitchUp()
             prevRMS = rms;
         }
 
-        printf("[TRANSIENT] Startup/load complete — %d transients detected in '%s' (%.2fs)\n",
-               (int)transientPositionsSeconds.size(),
+        const int transientCount = (int)transientPositionsSeconds.size();
+        printf("[TRANSIENT] Startup/load complete — %d transients detected in '%s' (%.2fs, thresh=%.1fx)\n",
+               transientCount,
                audioFile.getFileName().toRawUTF8(),
-               duration);
+               duration,
+               threshold);
+
+        transientCountLabel.setText("T: " + juce::String(transientCount), juce::dontSendNotification);
 
         // Normalise against the reader-derived duration (not originalDuration)
         if (waveformComponent != nullptr)
@@ -2002,6 +2063,12 @@ void adjustPitchUp()
 
     // Detected transient positions in seconds (populated on each sample load)
     std::vector<double> transientPositionsSeconds;
+    double transientThreshold = 4.0;  // RMS multiplier for detection (1.5–10)
+
+    // Sensitivity knob + labels
+    juce::Slider sensKnob;
+    juce::Label  sensLabel;
+    juce::Label  transientCountLabel;
 
     // Freeze state — never persisted, always starts false
     bool isFreezeActive          = false;

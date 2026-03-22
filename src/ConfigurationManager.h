@@ -201,20 +201,22 @@ public:
     // Pitch is NOT per-sample — it is a single global session value (see savePitchOffset/getPitchOffset).
     struct SampleState
     {
-        double startPoint  = 0.0;
-        double endPoint    = -1.0;  // sentinel: -1.0 = full length
-        float  volume      = 1.0f;
-        bool   loopEnabled = false;
-        bool   exists      = false; // false = no saved state found for this file
+        double startPoint       = 0.0;
+        double endPoint         = -1.0;  // sentinel: -1.0 = full length
+        float  volume           = 1.0f;
+        bool   loopEnabled      = false;
+        double transientThreshold = 4.0; // RMS multiplier for transient detection
+        bool   exists           = false; // false = no saved state found for this file
     };
 
     void saveSampleState(const juce::File& file, const SampleState& s)
     {
         auto k = sampleKey(file);
-        propertiesFile->setValue(k + "_start", s.startPoint);
-        propertiesFile->setValue(k + "_end",   s.endPoint);
-        propertiesFile->setValue(k + "_vol",   (double)s.volume);
-        propertiesFile->setValue(k + "_loop",  s.loopEnabled);
+        propertiesFile->setValue(k + "_start",  s.startPoint);
+        propertiesFile->setValue(k + "_end",    s.endPoint);
+        propertiesFile->setValue(k + "_vol",    (double)s.volume);
+        propertiesFile->setValue(k + "_loop",   s.loopEnabled);
+        propertiesFile->setValue(k + "_thresh", s.transientThreshold);
         propertiesFile->saveIfNeeded();
     }
 
@@ -222,11 +224,12 @@ public:
     {
         auto k = sampleKey(file);
         SampleState s;
-        s.exists     = propertiesFile->containsKey(k + "_start");
-        s.startPoint = propertiesFile->getDoubleValue(k + "_start", 0.0);
-        s.endPoint   = propertiesFile->getDoubleValue(k + "_end",   -1.0);
-        s.volume     = (float)propertiesFile->getDoubleValue(k + "_vol",  1.0);
-        s.loopEnabled = propertiesFile->getBoolValue (k + "_loop",  false);
+        s.exists              = propertiesFile->containsKey(k + "_start");
+        s.startPoint          = propertiesFile->getDoubleValue(k + "_start",  0.0);
+        s.endPoint            = propertiesFile->getDoubleValue(k + "_end",    -1.0);
+        s.volume              = (float)propertiesFile->getDoubleValue(k + "_vol",   1.0);
+        s.loopEnabled         = propertiesFile->getBoolValue  (k + "_loop",   false);
+        s.transientThreshold  = propertiesFile->getDoubleValue(k + "_thresh", 4.0);
         return s;
     }
 
