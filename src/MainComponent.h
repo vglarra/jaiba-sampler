@@ -124,6 +124,8 @@ private:
     void freezeChanged(bool isFrozen) override;
     void gridSnapChanged(bool isEnabled) override;
     void gridResolutionChanged(int index) override;
+    void detectedNoteChanged(const juce::String& noteName, double freqHz) override;
+    void transientDetectionEnabledChanged(bool enabled) override;
 
     //==============================================================================
     // MIDI Learn handling

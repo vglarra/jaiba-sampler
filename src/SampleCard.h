@@ -304,6 +304,14 @@ public:
         };
         addAndMakeVisible(gridResolutionButton);
 
+        // Tune button — auto pitch detection
+        tuneButton.setButtonText("Tune");
+        tuneButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+        tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        tuneButton.setTooltip("Detect fundamental pitch and auto-tune (analyzes Start-End region)");
+        tuneButton.onClick = [this] { startTuneAnalysis(); };
+        addAndMakeVisible(tuneButton);
+
         // Transient detection toggle — enables/disables the whole transient subsystem
         detectionToggleButton.setClickingTogglesState(true);
         detectionToggleButton.setToggleState(true, juce::dontSendNotification);
@@ -320,6 +328,8 @@ public:
             detectionToggleButton.setColour(juce::TextButton::textColourOffId,
                 transientDetectionEnabled ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF7A7A7A));
             updateTransientControlsState();
+            // FIX 3: notify MainComponent so it can save to disk
+            listeners.call([this](Listener& l) { l.transientDetectionEnabledChanged(transientDetectionEnabled); });
         };
         addAndMakeVisible(detectionToggleButton);
 
@@ -397,6 +407,12 @@ public:
     
     ~SampleCard() override
     {
+        // Stop background tune analysis before destruction
+        if (tuneThread != nullptr)
+        {
+            tuneThread->stopThread(2000);
+            tuneThread = nullptr;
+        }
         volumeKnob.setLookAndFeel(nullptr);
         startKnob.setLookAndFeel(nullptr);
         endKnob.setLookAndFeel(nullptr);
@@ -493,6 +509,11 @@ public:
             pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         }
         row1.removeFromLeft(8); // gap between pitch and toggle buttons
+        {
+            // Tune button — pitch detection (right of pitch controls)
+            auto col = row1.removeFromLeft(62);
+            tuneButton.setBounds(col.withSizeKeepingCentre(58, 30));
+        }
         {
             // Freeze button
             auto col = row1.removeFromLeft(62);
@@ -687,13 +708,70 @@ public:
             detectTransients(currentAudioFile);
     }
 
+    // Auto-tune detection result — read by persistence, written on detection or restore
+    juce::String getDetectedNoteName() const { return detectedNoteName; }
+    double       getDetectedFreqHz()   const { return detectedFreqHz; }
+    int          getBasePitchOffset()  const { return basePitchOffset; }
+
+    // Quietly restore the hidden base offset on session load — does NOT fire any listener.
+    void setBasePitchOffset(int base)
+    {
+        basePitchOffset = juce::jlimit(-48, 48, base);
+    }
+
+    // Restore a previously-detected note (called on session load — does NOT fire the listener).
+    void setDetectedNoteName(const juce::String& name, double freqHz)
+    {
+        detectedNoteName = name;
+        detectedFreqHz   = freqHz;
+        if (name.isNotEmpty())
+        {
+            tuneButton.setButtonText(name);
+            tuneButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A5A1A)); // dark green
+            tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF00FF88)); // bright green text
+            // Build bottomInfoLabel text
+            juce::String info = name;
+            if (freqHz > 0.0)
+                info += " \xc2\xb7 " + juce::String((int)std::round(freqHz)) + " Hz";
+            bottomInfoLabel.setText(info, juce::dontSendNotification);
+        }
+        else
+        {
+            tuneButton.setButtonText("Tune");
+            tuneButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+            tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            updatePitchDisplay(pitchOffset); // restore normal bottom label
+        }
+    }
+
+    bool isTransientDetectionEnabled() const { return transientDetectionEnabled; }
+
+    // Quietly restore transient detection state on startup — does NOT fire listener.
+    void setTransientDetectionEnabled(bool enabled)
+    {
+        transientDetectionEnabled = enabled;
+        detectionToggleButton.setToggleState(enabled, juce::dontSendNotification);
+        detectionToggleButton.setColour(juce::TextButton::buttonColourId,
+            enabled ? juce::Colour(0xFF8B2500) : juce::Colour(0xFF4A4A4A));
+        detectionToggleButton.setColour(juce::TextButton::textColourOffId,
+            enabled ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF7A7A7A));
+        updateTransientControlsState();
+    }
+
     bool isGridSnapEnabled() const { return gridSnapEnabled; }
 
     int getGridResolutionIndex() const { return gridResolutionIndex; }
 
+    double getGridInterval() const
+    {
+        static const double vals[] = { 0.001, 0.01, 0.05, 0.1, 0.5, 1.0 };
+        return vals[juce::jlimit(0, numGridResolutions - 1, gridResolutionIndex)];
+    }
+
     void setGridResolutionIndex(int index)
     {
         gridResolutionIndex = juce::jlimit(0, numGridResolutions - 1, index);
+        userHasSetGridResolution = true; // marks a saved preference — blocks auto-select override
         updateGridResolutionButton();
         if (waveformComponent != nullptr)
             waveformComponent->setGridResolution(gridSnapEnabled, getGridInterval());
@@ -846,20 +924,21 @@ public:
         
         // ===== CRITICAL FIX: Always show pitch indicator (even at 0) =====
         if (semitones > 0)
-        {
             topInfoLabel.setText("COMPRESSED", juce::dontSendNotification);
-            bottomInfoLabel.setText("PITCH UP: +" + juce::String(semitones), juce::dontSendNotification);
-        }
         else if (semitones < 0)
-        {
             topInfoLabel.setText("EXPANDED", juce::dontSendNotification);
-            bottomInfoLabel.setText("PITCH DOWN: " + juce::String(semitones), juce::dontSendNotification);
-        }
         else
-        {
-            // ===== NEW: Show "ORIGINAL" label when pitch is 0 =====
             topInfoLabel.setText("", juce::dontSendNotification);
-            bottomInfoLabel.setText("ORIGINAL WAVE", juce::dontSendNotification);  // ← Changed from empty string
+
+        // Only update bottomInfoLabel when no tune detection result is displayed
+        if (detectedNoteName.isEmpty())
+        {
+            if (semitones > 0)
+                bottomInfoLabel.setText("PITCH UP: +" + juce::String(semitones), juce::dontSendNotification);
+            else if (semitones < 0)
+                bottomInfoLabel.setText("PITCH DOWN: " + juce::String(semitones), juce::dontSendNotification);
+            else
+                bottomInfoLabel.setText("ORIGINAL WAVE", juce::dontSendNotification);
         }
         
         // Force label updates
@@ -872,6 +951,15 @@ public:
         
     void setWaveform(const juce::File& audioFile)
     {
+        // Reset tune detection state for the new file
+        detectedNoteName = "";
+        detectedFreqHz   = 0.0;
+        basePitchOffset  = 0;
+        tuneButton.setButtonText("Tune");
+        tuneButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+        tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        tuneButton.setEnabled(true);
+
         // CRITICAL FIX #1: Store file FIRST
         currentAudioFile = audioFile;
         
@@ -901,8 +989,17 @@ public:
                 resetStartPoint();
                 resetEndPoint();
 
-                // Run transient detection on the new file
-                detectTransients(audioFile);
+                // Run transient detection on the new file — only if CRA is enabled
+                if (transientDetectionEnabled)
+                    detectTransients(audioFile);
+                else
+                {
+                    // CRA is OFF — clear any stale markers without running detection
+                    transientPositionsSeconds.clear();
+                    transientCountLabel.setText("T: 0", juce::dontSendNotification);
+                    if (waveformComponent != nullptr)
+                        waveformComponent->setTransients({});
+                }
 
                 // Auto-select grid resolution based on the new sample's duration
                 {
@@ -969,6 +1066,8 @@ public:
         virtual void freezeChanged(bool isFrozen) = 0;
         virtual void gridSnapChanged(bool isEnabled) = 0;
         virtual void gridResolutionChanged(int index) = 0;
+        virtual void detectedNoteChanged(const juce::String& noteName, double freqHz) = 0;
+        virtual void transientDetectionEnabledChanged(bool enabled) = 0;
     };
     
     void addListener(Listener* listener)
@@ -1026,6 +1125,18 @@ public:
     }
 
     private:
+
+        // Background thread that runs YIN pitch detection
+        class TuneAnalyzerThread : public juce::Thread
+        {
+        public:
+            TuneAnalyzerThread(SampleCard& owner)
+                : juce::Thread("TuneAnalyzer"), owner(owner) {}
+            void run() override { owner.runTuneAnalysis(); }
+        private:
+            SampleCard& owner;
+            JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TuneAnalyzerThread)
+        };
 
         // Scrollbar height constant (Windows default ~14px, macOS ~15px)
         static constexpr int SCROLLBAR_HEIGHT = 14;
@@ -2201,14 +2312,28 @@ void adjustPitchUp()
     juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
     int pitchOffset = 0;  // Pitch offset in semitones
 
-    // Loop / Freeze / Grid buttons
+    // Loop / Freeze / Grid / Tune buttons
     juce::TextButton loopButton;
     juce::TextButton freezeButton { "Freeze" };
     juce::TextButton gridSnapButton { "Grid" };
     juce::TextButton gridResolutionButton { "1s" };
+    juce::TextButton tuneButton { "Tune" };
     bool gridSnapEnabled = false;
     int  gridResolutionIndex = 5;   // default = 1s (index into the 6-step table)
+    bool userHasSetGridResolution = false; // true once user manually clicks or a saved value is restored
     static constexpr int numGridResolutions = 6;
+
+    // Auto-tune / pitch detection state
+    juce::String detectedNoteName;               // e.g. "D3" — empty until Tune is run
+    double       detectedFreqHz   = 0.0;         // detected fundamental frequency in Hz
+    int          basePitchOffset  = 0;           // hidden correction from Tune; user sees 0 st = this note
+    std::atomic<bool> isTuneRunning { false };
+    // Analysis parameters captured on message thread before background thread starts
+    juce::File   tuneFile;
+    double       tuneStartSec     = 0.0;
+    double       tuneEndSec       = 0.0;
+    int          tuneRootMidiNote = 60;
+    std::unique_ptr<TuneAnalyzerThread> tuneThread;
 
     // Transient detection toggle
     juce::TextButton detectionToggleButton { "Tra" };
@@ -2318,13 +2443,6 @@ void adjustPitchUp()
     //==============================================================================
     // Grid snap helpers
 
-    // Grid interval in seconds — returns the user-selected resolution.
-    double getGridInterval() const
-    {
-        static const double vals[] = { 0.001, 0.01, 0.05, 0.1, 0.5, 1.0 };
-        return vals[juce::jlimit(0, numGridResolutions - 1, gridResolutionIndex)];
-    }
-
     // Pixel width actually covered by waveform data (mirrors WaveformComponent::getActualWaveformWidth).
     float computeActualWaveformWidth() const
     {
@@ -2366,6 +2484,12 @@ void adjustPitchUp()
     // Called on every sample load; fires the listener so the choice is persisted.
     void autoSelectGridResolution(double durationSeconds)
     {
+        // Only auto-select when the user has no saved preference.
+        // Once a preference exists (saved to disk and restored via setGridResolutionIndex),
+        // the auto-select is skipped so the user's choice is not overridden on each load.
+        if (userHasSetGridResolution)
+            return;
+
         int newIndex;
         if      (durationSeconds < 0.5)  newIndex = 1; // 10ms
         else if (durationSeconds < 2.0)  newIndex = 2; // 50ms
@@ -2377,7 +2501,7 @@ void adjustPitchUp()
         updateGridResolutionButton();
         if (waveformComponent != nullptr)
             waveformComponent->setGridResolution(gridSnapEnabled, getGridInterval());
-        listeners.call([this](Listener& l) { l.gridResolutionChanged(gridResolutionIndex); });
+        // Does NOT fire listener — auto-select never saves to disk
     }
 
     // Snap `seconds` to the nearest grid line if within 10 pixels (requirement 8).
@@ -2429,6 +2553,248 @@ void adjustPitchUp()
             freezeButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A)); // dark inactive
             freezeButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE)); // off-white text
         }
+    }
+
+    //==============================================================================
+    // Auto pitch detection (YIN algorithm on background thread)
+
+    // Kick off a background pitch analysis for the current file + marker region.
+    void startTuneAnalysis()
+    {
+        if (isTuneRunning.load()) return;
+        if (!currentAudioFile.existsAsFile()) return;
+
+        // Capture analysis params on the message thread
+        tuneFile          = currentAudioFile;
+        tuneStartSec      = startPointNormalized * originalDuration;
+        tuneEndSec        = endPointNormalized   * originalDuration;
+        tuneRootMidiNote  = currentMidiNote;
+
+        // Visual: "Analyzing..." state
+        isTuneRunning.store(true);
+        tuneButton.setEnabled(false);
+        tuneButton.setButtonText("...");
+        tuneButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF2A4A2A));
+        tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF00FF88));
+
+        // Stop any previous thread
+        if (tuneThread != nullptr)
+        {
+            tuneThread->stopThread(500);
+            tuneThread = nullptr;
+        }
+
+        tuneThread = std::make_unique<TuneAnalyzerThread>(*this);
+        tuneThread->startThread();
+    }
+
+    // Runs on the background thread (called by TuneAnalyzerThread::run).
+    void runTuneAnalysis()
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader(
+            formatManager.createReaderFor(tuneFile));
+
+        if (reader == nullptr || juce::Thread::currentThreadShouldExit())
+        {
+            juce::MessageManager::callAsync([this] { onTuneAnalysisComplete(-1.0); });
+            return;
+        }
+
+        const double sr = reader->sampleRate;
+        const juce::int64 totalSamples = reader->lengthInSamples;
+
+        if (sr <= 0.0 || totalSamples <= 0)
+        {
+            juce::MessageManager::callAsync([this] { onTuneAnalysisComplete(-1.0); });
+            return;
+        }
+
+        // Derive sample indices for the analysis region
+        juce::int64 startSample = (juce::int64)(tuneStartSec * sr);
+        juce::int64 endSample   = (tuneEndSec > 0.0 && tuneEndSec < totalSamples / sr)
+                                  ? (juce::int64)(tuneEndSec * sr)
+                                  : totalSamples;
+        startSample = juce::jlimit((juce::int64)0, totalSamples, startSample);
+        endSample   = juce::jlimit(startSample + 1, totalSamples, endSample);
+
+        juce::int64 numSamples = endSample - startSample;
+
+        // Limit to 0.5 s for speed; take from start of region
+        const juce::int64 maxBuf = (juce::int64)(sr * 0.5);
+        numSamples = juce::jmin(numSamples, maxBuf);
+
+        if (numSamples < 512)
+        {
+            juce::MessageManager::callAsync([this] { onTuneAnalysisComplete(-1.0); });
+            return;
+        }
+
+        if (juce::Thread::currentThreadShouldExit())
+        {
+            juce::MessageManager::callAsync([this] { onTuneAnalysisComplete(-1.0); });
+            return;
+        }
+
+        // Read audio into a multi-channel buffer then mix to mono
+        const int numCh = juce::jmin((int)reader->numChannels, 2);
+        juce::AudioBuffer<float> buf(numCh, (int)numSamples);
+        reader->read(&buf, 0, (int)numSamples, startSample, true, true);
+
+        std::vector<float> mono((size_t)numSamples, 0.0f);
+        for (int ch = 0; ch < numCh; ++ch)
+        {
+            const float* data = buf.getReadPointer(ch);
+            for (int i = 0; i < (int)numSamples; ++i)
+                mono[(size_t)i] += data[i] / (float)numCh;
+        }
+
+        if (juce::Thread::currentThreadShouldExit())
+        {
+            juce::MessageManager::callAsync([this] { onTuneAnalysisComplete(-1.0); });
+            return;
+        }
+
+        const double freq = yinDetectPitch(mono.data(), (int)numSamples, sr);
+
+        juce::MessageManager::callAsync([this, freq] { onTuneAnalysisComplete(freq); });
+    }
+
+    // Called back on the message thread with the detection result.
+    void onTuneAnalysisComplete(double freqHz)
+    {
+        isTuneRunning.store(false);
+        tuneButton.setEnabled(true);
+
+        if (freqHz <= 0.0)
+        {
+            // No reliable pitch found
+            detectedNoteName = "";
+            detectedFreqHz   = 0.0;
+
+            tuneButton.setButtonText("Tune");
+            tuneButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+            tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+
+            bottomInfoLabel.setText("No pitch detected", juce::dontSendNotification);
+            printf("[TUNE] No pitch detected\n");
+
+            listeners.call([this](Listener& l) { l.detectedNoteChanged("", 0.0); });
+            return;
+        }
+
+        // Map frequency to nearest MIDI note
+        const double exactNote = 69.0 + 12.0 * std::log2(freqHz / 440.0);
+        int nearestMidi = (int)std::round(exactNote);
+        nearestMidi = juce::jlimit(0, 127, nearestMidi);
+
+        // Build note name string
+        static const char* noteNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+        const int octave  = nearestMidi / 12 - 1;
+        const int noteIdx = nearestMidi % 12;
+        detectedNoteName = juce::String(noteNames[noteIdx]) + juce::String(octave);
+        detectedFreqHz   = freqHz;
+
+        // Store correction as the hidden base offset so "0 st" = this note.
+        // User pitch resets to 0; MainComponent adds basePitchOffset when applying to the engine.
+        const int correction = juce::jlimit(-48, 48, tuneRootMidiNote - nearestMidi);
+        basePitchOffset = correction;
+        pitchOffset     = 0;
+        updatePitchDisplay(0);  // display shows "0 st" = in tune with detected note
+        listeners.call([this](Listener& l) { l.pitchOffsetChanged(0); }); // MainComponent adds base
+
+        // Now update bottomInfoLabel with detection result (overrides what updatePitchDisplay left)
+        const int freqInt = (int)std::round(freqHz);
+        bottomInfoLabel.setText(
+            detectedNoteName + " \xc2\xb7 " + juce::String(freqInt) + " Hz",
+            juce::dontSendNotification);
+
+        // Button shows detected note in bright green
+        tuneButton.setButtonText(detectedNoteName);
+        tuneButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A5A1A));
+        tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF00FF88));
+
+        printf("[TUNE] Detected: %s = %.1f Hz  (MIDI %d) → correction %+d st\n",
+               detectedNoteName.toRawUTF8(), freqHz, nearestMidi, correction);
+
+        // Notify listeners for persistence
+        listeners.call([this](Listener& l) { l.detectedNoteChanged(detectedNoteName, detectedFreqHz); });
+    }
+
+    // YIN pitch detection algorithm.
+    // Returns fundamental frequency in Hz, or -1.0 if not detected reliably.
+    // Range: minFreqHz (C1=27Hz) to maxFreqHz (C8=4186Hz).
+    static double yinDetectPitch(const float* mono, int numSamples, double sampleRate,
+                                 double minFreqHz = 27.0, double maxFreqHz = 4186.0)
+    {
+        const int minPeriod = juce::jmax(2, (int)(sampleRate / maxFreqHz));
+        const int maxPeriod = juce::jmin(numSamples / 2 - 1, (int)(sampleRate / minFreqHz));
+
+        if (maxPeriod <= minPeriod) return -1.0;
+
+        const int bufLen = numSamples - maxPeriod;  // usable window
+        if (bufLen <= 0) return -1.0;
+
+        // Step 1+2: Difference function d[tau] and Cumulative Mean Normalized Difference d'[tau]
+        std::vector<double> cmnd((size_t)(maxPeriod + 1), 0.0);
+        cmnd[0] = 1.0;
+        double runningSum = 0.0;
+
+        for (int tau = 1; tau <= maxPeriod; ++tau)
+        {
+            double sumSq = 0.0;
+            for (int t = 0; t < bufLen; ++t)
+            {
+                const double diff = (double)mono[t] - (double)mono[t + tau];
+                sumSq += diff * diff;
+            }
+            runningSum += sumSq;
+            cmnd[(size_t)tau] = (runningSum > 0.0) ? sumSq * tau / runningSum : 0.0;
+        }
+
+        // Step 3: Absolute threshold — find first local minimum below 0.10
+        const double absThreshold    = 0.10;
+        const double fallbackThresh  = 0.30;
+        int bestTau = -1;
+
+        for (int tau = minPeriod; tau <= maxPeriod - 1; ++tau)
+        {
+            if (cmnd[(size_t)tau] < absThreshold && cmnd[(size_t)tau] <= cmnd[(size_t)(tau + 1)])
+            {
+                bestTau = tau;
+                break;
+            }
+        }
+
+        // If no absolute threshold minimum: use global minimum (with looser threshold)
+        if (bestTau < 0)
+        {
+            double minVal = 1e9;
+            for (int tau = minPeriod; tau <= maxPeriod; ++tau)
+            {
+                if (cmnd[(size_t)tau] < minVal)
+                {
+                    minVal = cmnd[(size_t)tau];
+                    bestTau = tau;
+                }
+            }
+            if (minVal > fallbackThresh)
+                return -1.0;   // no reliable pitch
+        }
+
+        // Step 4: Parabolic interpolation for sub-sample accuracy
+        double refinedTau = (double)bestTau;
+        if (bestTau > minPeriod && bestTau < maxPeriod)
+        {
+            const double s0 = cmnd[(size_t)(bestTau - 1)];
+            const double s1 = cmnd[(size_t) bestTau];
+            const double s2 = cmnd[(size_t)(bestTau + 1)];
+            const double denom = 2.0 * (2.0 * s1 - s0 - s2);
+            if (std::abs(denom) > 1e-9)
+                refinedTau = bestTau + (s2 - s0) / denom;
+        }
+
+        if (refinedTau <= 0.0) return -1.0;
+        return sampleRate / refinedTau;
     }
 
     void toggleFreeze()

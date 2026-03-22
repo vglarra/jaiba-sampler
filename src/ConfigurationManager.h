@@ -155,6 +155,31 @@ public:
         return propertiesFile->getIntValue("gridResolutionIndex", 5); // default 1s
     }
 
+    // FIX 3: transient detection on/off — key 'transientDetectionEnabled'
+    void saveTransientDetectionEnabled(bool enabled)
+    {
+        propertiesFile->setValue("transientDetectionEnabled", enabled);
+        propertiesFile->saveIfNeeded();
+    }
+
+    bool getTransientDetectionEnabled()
+    {
+        return propertiesFile->getBoolValue("transientDetectionEnabled", true); // default ON
+    }
+
+    // FIX 2: user-selected resolution in milliseconds — key 'gridResolution'
+    // Returns -1.0 if the user has never manually selected a resolution.
+    void saveGridResolutionMs(double ms)
+    {
+        propertiesFile->setValue("gridResolution", ms);
+        propertiesFile->saveIfNeeded();
+    }
+
+    double getGridResolutionMs()
+    {
+        return propertiesFile->getDoubleValue("gridResolution", -1.0); // -1 = never set
+    }
+
     // NEW: Save audio device settings
     void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
     {
@@ -228,17 +253,23 @@ public:
         float  volume           = 1.0f;
         bool   loopEnabled      = false;
         double transientThreshold = 4.0; // RMS multiplier for transient detection
+        juce::String detectedNoteName;   // e.g. "D3" — empty if never tuned
+        double detectedFreqHz   = 0.0;   // detected frequency in Hz
+        int    basePitchOffset  = 0;     // hidden tune correction; user pitch 0 = this note
         bool   exists           = false; // false = no saved state found for this file
     };
 
     void saveSampleState(const juce::File& file, const SampleState& s)
     {
         auto k = sampleKey(file);
-        propertiesFile->setValue(k + "_start",  s.startPoint);
-        propertiesFile->setValue(k + "_end",    s.endPoint);
-        propertiesFile->setValue(k + "_vol",    (double)s.volume);
-        propertiesFile->setValue(k + "_loop",   s.loopEnabled);
-        propertiesFile->setValue(k + "_thresh", s.transientThreshold);
+        propertiesFile->setValue(k + "_start",    s.startPoint);
+        propertiesFile->setValue(k + "_end",      s.endPoint);
+        propertiesFile->setValue(k + "_vol",      (double)s.volume);
+        propertiesFile->setValue(k + "_loop",     s.loopEnabled);
+        propertiesFile->setValue(k + "_thresh",   s.transientThreshold);
+        propertiesFile->setValue(k + "_notename",   s.detectedNoteName);
+        propertiesFile->setValue(k + "_notehz",    s.detectedFreqHz);
+        propertiesFile->setValue(k + "_basepitch", s.basePitchOffset);
         propertiesFile->saveIfNeeded();
     }
 
@@ -247,11 +278,14 @@ public:
         auto k = sampleKey(file);
         SampleState s;
         s.exists              = propertiesFile->containsKey(k + "_start");
-        s.startPoint          = propertiesFile->getDoubleValue(k + "_start",  0.0);
-        s.endPoint            = propertiesFile->getDoubleValue(k + "_end",    -1.0);
-        s.volume              = (float)propertiesFile->getDoubleValue(k + "_vol",   1.0);
-        s.loopEnabled         = propertiesFile->getBoolValue  (k + "_loop",   false);
-        s.transientThreshold  = propertiesFile->getDoubleValue(k + "_thresh", 4.0);
+        s.startPoint          = propertiesFile->getDoubleValue(k + "_start",    0.0);
+        s.endPoint            = propertiesFile->getDoubleValue(k + "_end",      -1.0);
+        s.volume              = (float)propertiesFile->getDoubleValue(k + "_vol",     1.0);
+        s.loopEnabled         = propertiesFile->getBoolValue  (k + "_loop",     false);
+        s.transientThreshold  = propertiesFile->getDoubleValue(k + "_thresh",   4.0);
+        s.detectedNoteName    = propertiesFile->getValue      (k + "_notename",   "");
+        s.detectedFreqHz      = propertiesFile->getDoubleValue(k + "_notehz",   0.0);
+        s.basePitchOffset     = propertiesFile->getIntValue   (k + "_basepitch", 0);
         return s;
     }
 

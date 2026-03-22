@@ -1343,23 +1343,30 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
                 effectiveLoop  = state.loopEnabled;
                 // Restore transient threshold (re-runs detection with saved sensitivity)
                 sampleCard.setTransientThreshold(state.transientThreshold);
-                printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f\n",
+                // Restore detected note and hidden base offset (quiet — no listener fired)
+                sampleCard.setDetectedNoteName(state.detectedNoteName, state.detectedFreqHz);
+                sampleCard.setBasePitchOffset(state.basePitchOffset);
+                printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f  note=%s\n",
                        effectiveStart, effectiveEnd, effectiveVol,
                        effectiveLoop ? "ON" : "OFF",
-                       state.transientThreshold);
+                       state.transientThreshold,
+                       state.detectedNoteName.isEmpty() ? "-" : state.detectedNoteName.toRawUTF8());
             }
             else
             {
-                // New file — reset sensitivity to default
+                // New file — reset sensitivity to default, clear detection and base offset
                 sampleCard.setTransientThreshold(4.0);
+                sampleCard.setDetectedNoteName("", 0.0);
+                sampleCard.setBasePitchOffset(0);
                 printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF  thresh=4.0\n");
             }
         }
 
-        // Pitch: read current value from the card so updateSamplerSounds() picks it up.
-        // This is the global pitch — unchanged by sample navigation.
-        sample->pitchOffset = sampleCard.getPitchOffset();
-        printf("[PITCH] Sample loaded with current global pitch: %+d\n", sample->pitchOffset);
+        // Pitch: total = global user offset + per-sample base (from Tune).
+        // basePitchOffset was restored from SampleState above (0 if never tuned).
+        sample->pitchOffset = sampleCard.getPitchOffset() + sampleCard.getBasePitchOffset();
+        printf("[PITCH] Sample loaded: user=%+d  base=%+d  total=%+d\n",
+               sampleCard.getPitchOffset(), sampleCard.getBasePitchOffset(), sample->pitchOffset);
 
         sample->startPointSeconds = effectiveStart;
         sample->endPointSeconds   = effectiveEnd;
@@ -1495,27 +1502,32 @@ void MainComponent::learningModeChanged(bool isLearning)
     printf("MIDI Learn mode: %s\n", isLearning ? "ON" : "OFF");
 }
 
-void MainComponent::pitchOffsetChanged(int pitchOffset)
+void MainComponent::pitchOffsetChanged(int userPitchOffset)
 {
-    // Update the in-memory sample struct
+    // Total offset applied to audio = hidden base (tune correction) + user relative offset.
+    // basePitchOffset = 0 unless Tune has been run; so behaviour is unchanged for un-tuned samples.
+    const int totalOffset = userPitchOffset + sampleCard.getBasePitchOffset();
+
+    // Update the in-memory sample struct with the TOTAL offset
     {
         juce::ScopedLock lock(sampleLock);
         if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
-            samples[selectedSampleIndex]->pitchOffset = pitchOffset;
+            samples[selectedSampleIndex]->pitchOffset = totalOffset;
     }
 
-    // Push to all live sounds atomically — no rebuild, no note cutoff
+    // Push TOTAL to all live sounds atomically — no rebuild, no note cutoff
     for (int i = 0; i < sampler.getNumSounds(); ++i)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
-            sound->pitchOffsetAtomic.store(pitchOffset);
+            sound->pitchOffsetAtomic.store(totalOffset);
 
-    // Save as a single global value — NOT per-sample
+    // Save only the USER offset globally — base is saved per-sample in saveCurrentSampleState
     if (configManager != nullptr)
     {
-        configManager->savePitchOffset(pitchOffset);
-        printf("[PITCH] Saved pitch=%+d  →  %s\n",
-               pitchOffset, configManager->getSettingsFilePath().toRawUTF8());
+        configManager->savePitchOffset(userPitchOffset);
+        printf("[PITCH] user=%+d  base=%+d  total=%+d  saved_user=%+d\n",
+               userPitchOffset, sampleCard.getBasePitchOffset(), totalOffset, userPitchOffset);
     }
+    saveCurrentSampleState();
     fflush(stdout);
 }
 
@@ -1630,8 +1642,26 @@ void MainComponent::gridSnapChanged(bool isEnabled)
 void MainComponent::gridResolutionChanged(int index)
 {
     if (configManager != nullptr)
+    {
         configManager->saveGridResolutionIndex(index);
-    printf("Grid resolution index: %d\n", index);
+        // FIX 2: also save as milliseconds under key 'gridResolution'
+        const double ms = sampleCard.getGridInterval() * 1000.0;
+        configManager->saveGridResolutionMs(ms);
+        printf("Grid resolution: index=%d  %.3f ms\n", index, ms);
+    }
+}
+
+void MainComponent::detectedNoteChanged(const juce::String& noteName, double freqHz)
+{
+    printf("[TUNE] Saving detected note: '%s' %.1f Hz\n", noteName.toRawUTF8(), freqHz);
+    saveCurrentSampleState();
+}
+
+void MainComponent::transientDetectionEnabledChanged(bool enabled)
+{
+    if (configManager != nullptr)
+        configManager->saveTransientDetectionEnabled(enabled);
+    printf("[CRA] Transient detection %s — saved to disk\n", enabled ? "ON" : "OFF");
 }
 
 void MainComponent::freezeChanged(bool isFrozen)
@@ -1776,9 +1806,35 @@ void MainComponent::loadLastSession()
     sampleCard.setGridSnapEnabled(savedGridSnap);
     printf("[PERSIST] Global: grid_snap=%s\n", savedGridSnap ? "ON" : "OFF");
 
-    int savedGridResolution = configManager->getGridResolutionIndex();
-    sampleCard.setGridResolutionIndex(savedGridResolution);
-    printf("[PERSIST] Global: grid_resolution_index=%d\n", savedGridResolution);
+    // FIX 3: restore transient detection (CRA) on/off state
+    bool savedCRA = configManager->getTransientDetectionEnabled();
+    sampleCard.setTransientDetectionEnabled(savedCRA);
+    printf("[CRA] Restored transient detection: %s\n", savedCRA ? "ON" : "OFF");
+
+    // FIX 2: restore user-selected grid resolution from 'gridResolution' (ms) key if present
+    {
+        static const double resVals[] = { 0.001, 0.01, 0.05, 0.1, 0.5, 1.0 };
+        double savedMs = configManager->getGridResolutionMs();
+        if (savedMs > 0.0)
+        {
+            // Convert ms back to index (find closest match)
+            double savedSec = savedMs / 1000.0;
+            int idx = 5; // default 1s
+            double bestDiff = 1e9;
+            for (int i = 0; i < 6; ++i)
+            {
+                double diff = std::abs(resVals[i] - savedSec);
+                if (diff < bestDiff) { bestDiff = diff; idx = i; }
+            }
+            sampleCard.setGridResolutionIndex(idx); // also sets userHasSetGridResolution = true
+            printf("[PERSIST] Grid resolution restored: %.3f ms (index %d)\n", savedMs, idx);
+        }
+        else
+        {
+            // No user preference saved — keep default; auto-select will apply on first load
+            printf("[PERSIST] Grid resolution: no user preference saved, auto-select enabled\n");
+        }
+    }
 
     // ── Restore MIDI device ────────────────────────────────────────────────────────
     if (savedDevice.isNotEmpty() && isValidMidiDevice(savedDevice))
@@ -1848,13 +1904,17 @@ void MainComponent::saveOutgoingSampleState()
     s.volume              = sampleCard.getVolume();
     s.loopEnabled         = sampleCard.isLoopEnabled();
     s.transientThreshold  = sampleCard.getTransientThreshold();
-    // Pitch is NOT saved here — it is a global value saved separately via savePitchOffset()
+    s.detectedNoteName    = sampleCard.getDetectedNoteName();
+    s.detectedFreqHz      = sampleCard.getDetectedFreqHz();
+    s.basePitchOffset     = sampleCard.getBasePitchOffset();
+    // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
-    printf("[PERSIST] SAVED (outgoing): %s  start=%.3f  end=%.3f  vol=%.2f  loop=%s\n",
+    printf("[PERSIST] SAVED (outgoing): %s  start=%.3f  end=%.3f  vol=%.2f  loop=%s  note=%s\n",
            sample->file.getFileName().toRawUTF8(),
            s.startPoint, s.endPoint, s.volume,
-           s.loopEnabled ? "ON" : "OFF");
+           s.loopEnabled ? "ON" : "OFF",
+           s.detectedNoteName.isEmpty() ? "-" : s.detectedNoteName.toRawUTF8());
     fflush(stdout);
 }
 
@@ -1871,13 +1931,17 @@ void MainComponent::saveCurrentSampleState()
     s.volume              = sampleCard.getVolume();
     s.loopEnabled         = sampleCard.isLoopEnabled();
     s.transientThreshold  = sampleCard.getTransientThreshold();
-    // Pitch is NOT saved here — it is a global value saved separately via savePitchOffset()
+    s.detectedNoteName    = sampleCard.getDetectedNoteName();
+    s.detectedFreqHz      = sampleCard.getDetectedFreqHz();
+    s.basePitchOffset     = sampleCard.getBasePitchOffset();
+    // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
-    printf("[PERSIST] SAVED: %s  start=%.3f  end=%.3f  vol=%.2f  loop=%s\n",
+    printf("[PERSIST] SAVED: %s  start=%.3f  end=%.3f  vol=%.2f  loop=%s  note=%s\n",
            sample->file.getFileName().toRawUTF8(),
            s.startPoint, s.endPoint, s.volume,
-           s.loopEnabled ? "ON" : "OFF");
+           s.loopEnabled ? "ON" : "OFF",
+           s.detectedNoteName.isEmpty() ? "-" : s.detectedNoteName.toRawUTF8());
     fflush(stdout);
 }
 
