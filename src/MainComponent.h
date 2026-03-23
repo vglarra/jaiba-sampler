@@ -41,6 +41,7 @@ public:
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
     void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
     void sliderValueChanged(juce::Slider* slider) override;
+    bool keyPressed(const juce::KeyPress& key) override;
 
     //==============================================================================
     // SampleListModel access methods
@@ -104,6 +105,10 @@ private:
     void updateMappingUI();
     
     //==============================================================================
+    // Panic reset — hard-cuts all audio immediately
+    void performPanicReset();
+
+    //==============================================================================
     // New UI functionality
     void showSettingsMenu();
     void scanCurrentFolderForAudioFiles();
@@ -126,6 +131,7 @@ private:
     void gridResolutionChanged(int index) override;
     void detectedNoteChanged(const juce::String& noteName, double freqHz) override;
     void transientDetectionEnabledChanged(bool enabled) override;
+    void oneShotEnabledChanged(bool enabled) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -137,6 +143,7 @@ private:
 
     // UI Components
     juce::TextButton menuButton{ "Menu" };
+    juce::TextButton resetButton{ "Reset" };
     juce::TextButton testToneButton{ "Test tone" };
     juce::Slider masterVolumeKnob;
     juce::Label masterVolumeLabel;
@@ -145,6 +152,7 @@ private:
     juce::Label midiDeviceInfoLabel;
     juce::Label cpuUsageLabel;
     std::unique_ptr<juce::FileChooser> fileChooser;
+    AudioPreviewComponent* activePreviewComp = nullptr;  // non-owning; JUCE owns via fileChooser
     
     //==============================================================================
     // Folder navigation
@@ -249,6 +257,22 @@ private:
     CpuTimer cpuTimer;
     double lastCPU = 0.0;
     int cpuUpdateCounter = 0;
+
+    //==============================================================================
+    // One-shot tail detection — polls voice activity to know when the tail has finished.
+    class OneShotTailTimer : public juce::Timer
+    {
+    public:
+        OneShotTailTimer(MainComponent& owner) : mainOwner(owner) {}
+        void timerCallback() override { mainOwner.checkOneShotTailDone(); }
+    private:
+        MainComponent& mainOwner;
+    };
+
+    OneShotTailTimer oneShotTailTimer;
+    bool isOneShotTailPlaying = false;
+
+    void checkOneShotTailDone();
 
     //==============================================================================
     // MidiSelectorComponent::OwnerInterface implementation

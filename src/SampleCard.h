@@ -292,6 +292,20 @@ public:
         };
         addAndMakeVisible(freezeButton);
 
+        // One Shot button — plays sample fully through regardless of note duration
+        oneShotButton.setClickingTogglesState(true);
+        oneShotButton.setToggleState(false, juce::dontSendNotification);
+        oneShotButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+        oneShotButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFFFB300)); // warm amber
+        oneShotButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+        oneShotButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+        oneShotButton.setTooltip("One Shot: sample plays fully through regardless of note length. Overrides Loop.");
+        oneShotButton.onClick = [this] {
+            oneShotEnabled = oneShotButton.getToggleState();
+            listeners.call([this](Listener& l) { l.oneShotEnabledChanged(oneShotEnabled); });
+        };
+        addAndMakeVisible(oneShotButton);
+
         // Grid snap toggle — snaps markers to nearest grid division
         gridSnapButton.setClickingTogglesState(true);
         gridSnapButton.setToggleState(false, juce::dontSendNotification);
@@ -544,6 +558,11 @@ public:
             loopButton.setBounds(col.withSizeKeepingCentre(58, 30));
         }
         {
+            // One Shot button — right of Loop
+            auto col = row1.removeFromLeft(62);
+            oneShotButton.setBounds(col.withSizeKeepingCentre(58, 30));
+        }
+        {
             // Grid snap button
             auto col = row1.removeFromLeft(62);
             gridSnapButton.setBounds(col.withSizeKeepingCentre(58, 30));
@@ -764,6 +783,36 @@ public:
     }
 
     bool isTransientDetectionEnabled() const { return transientDetectionEnabled; }
+
+    bool isOneShotEnabled() const { return oneShotEnabled; }
+
+    // Quietly restore one-shot state on startup — does NOT fire listener.
+    void setOneShotEnabled(bool enabled)
+    {
+        oneShotEnabled = enabled;
+        oneShotButton.setToggleState(enabled, juce::dontSendNotification);
+    }
+
+    // Called by MainComponent when a note-off arrives while oneshot is active (tail started),
+    // or when all voices have finished (tail ended).  Pulses the button during the tail.
+    void setOneShotTailActive(bool active)
+    {
+        if (active)
+        {
+            oneShotPulsePhase = 0;
+            oneShotPulseTimer.startTimer(350);
+        }
+        else
+        {
+            oneShotPulseTimer.stopTimer();
+            // Restore full amber if still ON
+            if (oneShotEnabled)
+            {
+                oneShotButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFFFB300));
+                oneShotButton.repaint();
+            }
+        }
+    }
 
     // Quietly restore transient detection state on startup — does NOT fire listener.
     void setTransientDetectionEnabled(bool enabled)
@@ -1116,6 +1165,7 @@ public:
         virtual void gridResolutionChanged(int index) = 0;
         virtual void detectedNoteChanged(const juce::String& noteName, double freqHz) = 0;
         virtual void transientDetectionEnabledChanged(bool enabled) = 0;
+        virtual void oneShotEnabledChanged(bool enabled) = 0;
     };
     
     void addListener(Listener* listener)
@@ -1259,6 +1309,16 @@ public:
             int  pitchAtDragStart = 0;
             bool isHovered        = false;
             bool isDragging       = false;
+        };
+
+        // Timer for pulsing the 1Shot button while a one-shot tail is completing.
+        class OneShotPulseTimer : public juce::Timer
+        {
+        public:
+            OneShotPulseTimer(SampleCard& owner) : owner(owner) {}
+            void timerCallback() override { owner.oneShotPulseTick(); }
+        private:
+            SampleCard& owner;
         };
 
         // Scrollbar height constant (Windows default ~14px, macOS ~15px)
@@ -2435,9 +2495,13 @@ void adjustPitchUp()
     juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
     int pitchOffset = 0;  // Pitch offset in semitones
 
-    // Loop / Freeze / Grid / Tune buttons
+    // Loop / Freeze / OneShot / Grid / Tune buttons
     juce::TextButton loopButton;
     juce::TextButton freezeButton { "Freeze" };
+    juce::TextButton oneShotButton { "1Shot" };
+    bool oneShotEnabled   = false;
+    OneShotPulseTimer oneShotPulseTimer { *this };
+    int  oneShotPulsePhase = 0;
     juce::TextButton gridSnapButton { "Grid" };
     juce::TextButton gridResolutionButton { "1s" };
     juce::TextButton tuneButton { "Tune" };
@@ -2561,6 +2625,19 @@ void adjustPitchUp()
                                       on ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF555555));
 
         repaint();
+    }
+
+    //==============================================================================
+    // One-shot pulse animation (called by OneShotPulseTimer when tail is playing)
+    void oneShotPulseTick()
+    {
+        // Alternate between full amber and dimmer amber every tick (~350ms)
+        oneShotPulsePhase = (oneShotPulsePhase + 1) % 2;
+        juce::Colour c = (oneShotPulsePhase == 0)
+                         ? juce::Colour(0xFFFFB300)   // full amber
+                         : juce::Colour(0xFF886000);  // dim amber
+        oneShotButton.setColour(juce::TextButton::buttonOnColourId, c);
+        oneShotButton.repaint();
     }
 
     //==============================================================================

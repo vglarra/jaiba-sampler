@@ -49,6 +49,9 @@ public:
     // Freeze: when true the voice ignores note-offs and always loops.
     // Must be cleared BEFORE calling allNotesOff so stopNote actually fires.
     std::atomic<bool>        freezeActive        { false };
+    // OneShot: when true the voice ignores note-offs and plays to the end point without looping.
+    // Loop is suppressed even if loopEnabled is true.
+    std::atomic<bool>        oneShotEnabled      { false };
 };
 
 //==============================================================================
@@ -95,7 +98,7 @@ public:
         // freezeActive is cleared on the message thread BEFORE allNotesOff is called,
         // so the voice will stop correctly when freeze is turned off.
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(getCurrentlyPlayingSound().get()))
-            if (sound->freezeActive.load())
+            if (sound->freezeActive.load() || sound->oneShotEnabled.load())
                 return;
 
         if (allowTailOff)
@@ -152,7 +155,9 @@ public:
             float* outR = output.getNumChannels() > 1
                               ? output.getWritePointer(1, startSample) : nullptr;
 
-            const bool shouldLoop = sound->loopEnabled.load() || sound->freezeActive.load();
+            // OneShot overrides loop: even if loopEnabled is true, we play through once only.
+            const bool shouldLoop = (sound->loopEnabled.load() || sound->freezeActive.load())
+                                    && !sound->oneShotEnabled.load();
 
             // Clamp position into [sStart, sEnd) in case the atomics just changed.
             if (sourceSamplePosition < (double)sStart)
@@ -165,7 +170,9 @@ public:
                         + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
                 else
                 {
-                    stopNote(0.0f, false);
+                    // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
+                    clearCurrentNote();
+                    adsr.reset();
                     return;
                 }
             }
@@ -204,7 +211,9 @@ public:
                             + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
                     else
                     {
-                        stopNote(0.0f, false);
+                        // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
+                        clearCurrentNote();
+                        adsr.reset();
                         break;
                     }
                 }

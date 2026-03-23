@@ -36,6 +36,12 @@ AudioPreviewComponent::AudioPreviewComponent(juce::AudioFormatManager& fm)
     });
 }
 
+AudioPreviewComponent::~AudioPreviewComponent()
+{
+    stopPreview();  // Ensure transport is stopped before device manager is torn down
+    if (onDestroy) onDestroy();
+}
+
 void AudioPreviewComponent::ensureAudioInitialized()
 {
     if (!audioInitialized)

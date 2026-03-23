@@ -155,6 +155,17 @@ public:
         return propertiesFile->getIntValue("gridResolutionIndex", 5); // default 1s
     }
 
+    void saveOneShotEnabled(bool enabled)
+    {
+        propertiesFile->setValue("oneShotEnabled", enabled);
+        propertiesFile->saveIfNeeded();
+    }
+
+    bool getOneShotEnabled()
+    {
+        return propertiesFile->getBoolValue("oneShotEnabled", false); // default OFF
+    }
+
     // FIX 3: transient detection on/off — key 'transientDetectionEnabled'
     void saveTransientDetectionEnabled(bool enabled)
     {

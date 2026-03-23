@@ -16,15 +16,20 @@ class AudioPreviewComponent : public juce::FilePreviewComponent
 {
 public:
     AudioPreviewComponent(juce::AudioFormatManager& fm);
-    ~AudioPreviewComponent() override = default;
-    
+    ~AudioPreviewComponent() override;
+
     void selectedFileChanged(const juce::File& newFile) override;
 
     void setMasterVolumeRef(std::atomic<float>& ref) { masterVolPtr = &ref; }
 
+    // Called by MainComponent to stop preview (e.g. panic reset)
+    void stopPreview();
+
+    // Notified when this component is about to be deleted (so owner can null its pointer)
+    std::function<void()> onDestroy;
+
 private:
     void playPreview();
-    void stopPreview();
     void ensureAudioInitialized();
     
     juce::AudioFormatManager& formatManager;

@@ -17,7 +17,8 @@
 //==============================================================================
 MainComponent::MainComponent()
     : sampleListBox("samples", nullptr),
-      cpuTimer(*this)
+      cpuTimer(*this),
+      oneShotTailTimer(*this)
 {
     printf("DEBUG: MainComponent constructor started\n");
     fflush(stdout);
@@ -47,6 +48,14 @@ MainComponent::MainComponent()
     menuButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
     addAndMakeVisible(menuButton);
     menuButton.addListener(this);
+
+    // Reset / Panic button — dark red, signals STOP/DANGER
+    resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF8B0000));
+    resetButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
+    addAndMakeVisible(resetButton);
+    resetButton.addListener(this);
+
+    setWantsKeyboardFocus(true);
 
       testToneButton.setButtonText("Test tone");
       testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
@@ -249,10 +258,10 @@ void MainComponent::paint(juce::Graphics& g)
     g.fillAll(juce::Colour(0xFF1E1E1E));
     
     // Draw title centred in the 40px top bar, between Menu button (left) and right controls
-    // Left trim: 20px margin + 60px menu = 80; Right trim: 20px margin + 192px right group = 212
+    // Left trim: 20px margin + 60px menu = 80; Right trim: 20px margin + 250px right group = 270
     g.setColour(juce::Colour(0xFFCECECE));
     g.setFont(juce::Font(18.0f, juce::Font::bold));
-    auto titleArea = getLocalBounds().withTrimmedLeft(80).withTrimmedRight(212).removeFromTop(40);
+    auto titleArea = getLocalBounds().withTrimmedLeft(80).withTrimmedRight(270).removeFromTop(40);
     g.drawText("JAIVA-SAMPLER||1.0", titleArea, juce::Justification::centred, true);
 
     // Line above footer
@@ -263,6 +272,7 @@ void MainComponent::paint(juce::Graphics& g)
     // Draw dark outline around top-level buttons
     g.setColour(juce::Colour(0xFF0A0A0A));
     g.drawRect(menuButton.getBounds(), 1);
+    g.drawRect(resetButton.getBounds(), 1);
     g.drawRect(testToneButton.getBounds(), 1);
     g.drawRect(masterVolumeKnob.getBounds(), 1);
 }
@@ -283,8 +293,12 @@ void MainComponent::resized()
     // Menu button — vertically centred in 40px bar
     menuButton.setBounds(topBar.removeFromLeft(60).withSizeKeepingCentre(56, 30));
 
-    // Right side (left-to-right): label(62) + gap(4) + knob(28) + gap(8) + MIDI(22) + gap(6) + TestTone(62) = 192px
-    auto rightSide = topBar.removeFromRight(62 + 4 + 28 + 8 + 22 + 6 + 62);
+    // Right side: Reset(52) + gap(6) + label(62) + gap(4) + knob(28) + gap(8) + MIDI(22) + gap(6) + TestTone(62) = 250px
+    auto rightSide = topBar.removeFromRight(52 + 6 + 62 + 4 + 28 + 8 + 22 + 6 + 62);
+
+    // Reset/Panic button — left of Master Vol
+    resetButton.setBounds(rightSide.removeFromLeft(52).withSizeKeepingCentre(48, 30));
+    rightSide.removeFromLeft(6);
 
     // Master Vol: label on left, 28x28 knob on right — both vertically centred
     masterVolumeLabel.setBounds(rightSide.removeFromLeft(62).withSizeKeepingCentre(62, 16));
@@ -362,6 +376,10 @@ void MainComponent::buttonClicked(juce::Button* button)
     {
         showSettingsMenu();
     }
+    else if (button == &resetButton)
+    {
+        performPanicReset();
+    }
     else if (button == &testToneButton)
     {
         toggleSineWave();
@@ -370,6 +388,8 @@ void MainComponent::buttonClicked(juce::Button* button)
     {
         auto* previewComp = new ::AudioPreviewComponent(formatManager);
         previewComp->setMasterVolumeRef(masterVolumeGain);
+        activePreviewComp = previewComp;
+        previewComp->onDestroy = [this] { activePreviewComp = nullptr; };
         
         // Use last saved directory or default
         juce::File startingDirectory = configManager->getLastDirectory();
@@ -890,6 +910,17 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juc
     
     // Only add to collector if we passed the flood filter
     midiCollector.addMessageToQueue(message);
+
+    // One-shot tail detection: when a note-off arrives while 1Shot is ON,
+    // the audio engine ignores it and plays to completion.  Start polling
+    // voice activity so we know when to stop the button pulse.
+    if (message.isNoteOff() && sampleCard.isOneShotEnabled() && !isOneShotTailPlaying)
+    {
+        isOneShotTailPlaying = true;
+        juce::MessageManager::callAsync([this] { sampleCard.setOneShotTailActive(true); });
+        oneShotTailTimer.startTimer(200);
+        printf("[1SHOT] Note-off received — tail playing, polling for completion\n");
+    }
     
     // Print human-performed notes normally (no throttling for these)
     if (message.isNoteOn() && lastNoteCount <= 5)
@@ -1138,6 +1169,7 @@ void MainComponent::updateSamplerSounds()
         sound->endSampleAtomic.store(endSample);
         sound->loopEnabled.store(loopEnabled.load());
         sound->pitchOffsetAtomic.store(sample->pitchOffset);
+        sound->oneShotEnabled.store(sampleCard.isOneShotEnabled());
 
         sampler.addSound(sound);
 
@@ -1285,12 +1317,21 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
         // ── Step 2: Stop all audio completely ─────────────────────────────────────
         muteOutput.store(true);   // audio thread bails immediately
 
-        // Clear freeze/loop flags so stopNote() fires correctly
+        // Stop any one-shot tail poll (new sample cancels the old tail)
+        if (isOneShotTailPlaying)
+        {
+            isOneShotTailPlaying = false;
+            oneShotTailTimer.stopTimer();
+            sampleCard.setOneShotTailActive(false);
+        }
+
+        // Clear freeze/loop/oneshot flags so stopNote() fires correctly
         for (int i = 0; i < sampler.getNumSounds(); ++i)
             if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
             {
                 s->freezeActive.store(false);
                 s->loopEnabled.store(false);
+                s->oneShotEnabled.store(false);
             }
         // Force-stop every voice: releases currentlyPlayingSound ref-count directly
         for (int i = 0; i < sampler.getNumVoices(); ++i)
@@ -1393,6 +1434,15 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
 
         // ── Build sampler sounds with fully resolved state ─────────────────────────
         updateSamplerSounds();
+
+        // Propagate current one-shot state to the freshly built sound(s).
+        {
+            const bool oneShot = sampleCard.isOneShotEnabled();
+            for (int i = 0; i < sampler.getNumSounds(); ++i)
+                if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+                    s->oneShotEnabled.store(oneShot);
+        }
+
         muteOutput.store(false);
 
         sampleCard.setMidiNote(sample->rootNote);
@@ -1664,6 +1714,126 @@ void MainComponent::transientDetectionEnabledChanged(bool enabled)
     printf("[CRA] Transient detection %s — saved to disk\n", enabled ? "ON" : "OFF");
 }
 
+void MainComponent::oneShotEnabledChanged(bool enabled)
+{
+    // Propagate to all live sounds atomically — no rebuild needed.
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            sound->oneShotEnabled.store(enabled);
+
+    // If oneshot is being turned off, cancel any running tail poll.
+    if (!enabled && isOneShotTailPlaying)
+    {
+        isOneShotTailPlaying = false;
+        oneShotTailTimer.stopTimer();
+        sampleCard.setOneShotTailActive(false);
+    }
+
+    if (configManager != nullptr)
+        configManager->saveOneShotEnabled(enabled);
+
+    printf("[1SHOT] One Shot %s — saved to disk\n", enabled ? "ON" : "OFF");
+}
+
+void MainComponent::checkOneShotTailDone()
+{
+    // Called every 200ms while a one-shot tail is playing.
+    // Stop polling once no voice is active.
+    bool anyActive = false;
+    for (int i = 0; i < sampler.getNumVoices(); ++i)
+        if (sampler.getVoice(i)->isVoiceActive()) { anyActive = true; break; }
+
+    if (!anyActive)
+    {
+        isOneShotTailPlaying = false;
+        oneShotTailTimer.stopTimer();
+        // Tell SampleCard to stop pulsing and restore steady ON state.
+        juce::MessageManager::callAsync([this] { sampleCard.setOneShotTailActive(false); });
+        printf("[1SHOT] Tail complete — button restored to steady ON\n");
+    }
+}
+
+//==============================================================================
+void MainComponent::performPanicReset()
+{
+    printf("[PANIC] Reset triggered — hard-killing all audio\n");
+
+    // Flash bright red for 200ms then restore dark red
+    resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFFFF0000));
+    resetButton.repaint();
+    juce::Timer::callAfterDelay(200, [this]
+    {
+        resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF8B0000));
+        resetButton.repaint();
+    });
+
+    // 1. Silence audio thread immediately — it will bail on the next block
+    muteOutput.store(true);
+
+    // 2. Clear per-sound states so stopNote() and forceStop() work correctly
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+        {
+            s->freezeActive.store(false);
+            s->loopEnabled.store(false);
+            s->oneShotEnabled.store(false);
+        }
+
+    // 3. Force-stop all voices (releases currentlyPlayingSound refcount)
+    for (int i = 0; i < sampler.getNumVoices(); ++i)
+        if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
+            v->forceStop();
+
+    // 4. Belt-and-suspenders: MIDI all-notes-off on every channel
+    for (int ch = 1; ch <= 16; ++ch)
+        sampler.allNotesOff(ch, false);
+
+    // 5. Stop file browser preview player if open
+    if (activePreviewComp != nullptr)
+        activePreviewComp->stopPreview();
+
+    // 7. Stop one-shot tail poll and pulse animation
+    if (isOneShotTailPlaying)
+    {
+        isOneShotTailPlaying = false;
+        oneShotTailTimer.stopTimer();
+        sampleCard.setOneShotTailActive(false);
+    }
+
+    // 8. Stop test tone (sine wave)
+    if (sineWaveActive)
+    {
+        sineWaveActive = false;
+        testToneButton.setButtonText("Test tone");
+    }
+
+    // 9. Re-propagate Loop and OneShot UI states back to sounds so new notes work correctly.
+    //    Freeze is intentionally left off — freeze requires an active voice to be meaningful.
+    bool loopOn    = sampleCard.isLoopEnabled();
+    bool oneShotOn = sampleCard.isOneShotEnabled();
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+        {
+            s->loopEnabled.store(loopOn);
+            s->oneShotEnabled.store(oneShotOn);
+        }
+
+    // 10. Re-enable audio — engine is now idle and ready for new MIDI triggers
+    muteOutput.store(false);
+
+    printf("[PANIC] Reset complete — audio engine ready\n");
+}
+
+bool MainComponent::keyPressed(const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::escapeKey)
+    {
+        performPanicReset();
+        return true;  // consumed
+    }
+    return false;
+}
+
 void MainComponent::freezeChanged(bool isFrozen)
 {
     printf("Freeze %s\n", isFrozen ? "ON" : "OFF");
@@ -1810,6 +1980,15 @@ void MainComponent::loadLastSession()
     bool savedCRA = configManager->getTransientDetectionEnabled();
     sampleCard.setTransientDetectionEnabled(savedCRA);
     printf("[CRA] Restored transient detection: %s\n", savedCRA ? "ON" : "OFF");
+
+    // Restore One Shot on/off state
+    bool savedOneShot = configManager->getOneShotEnabled();
+    sampleCard.setOneShotEnabled(savedOneShot);
+    // Propagate to any live sounds (none at startup, but safe to call)
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            sound->oneShotEnabled.store(savedOneShot);
+    printf("[1SHOT] Restored one shot: %s\n", savedOneShot ? "ON" : "OFF");
 
     // FIX 2: restore user-selected grid resolution from 'gridResolution' (ms) key if present
     {
