@@ -110,6 +110,7 @@ public:
 
         // Wire drag callbacks — run the same logic as adjustPitchUp/Down
         pitchLabel.getCurrentPitch = [this] { return pitchOffset; };
+        pitchLabel.getPitchStep    = [this] { return currentPitchStepCents; };
         pitchLabel.onPitchDragged  = [this](int newPitch)
         {
             if (newPitch != pitchOffset)
@@ -132,6 +133,37 @@ public:
         pitchUpButton.onClick = [this] { adjustPitchUp(); };
         pitchUpButton.setTooltip("Higher pitch (shorter duration)");
         addAndMakeVisible(pitchUpButton);
+
+        // Pitch step cycling button — cycles through step sizes: 100¢ / 50¢ / 25¢ / 33¢
+        pitchStepButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFFD4A017));
+        pitchStepButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF111111));
+        pitchStepButton.setTooltip("Pitch step size: click to cycle (100=semitone, 50=quarter-tone, 25=eighth-tone, 33=third-tone)");
+        pitchStepButton.onClick = [this]
+        {
+            static const int stepValues[] = { 100, 50, 25, 33 };
+            static constexpr int numStepValues = 4;
+            int currentIdx = 0;
+            for (int i = 0; i < numStepValues; ++i)
+                if (stepValues[i] == currentPitchStepCents) { currentIdx = i; break; }
+            currentPitchStepCents = stepValues[(currentIdx + 1) % numStepValues];
+            updatePitchStepButton();
+            updatePitchDisplay(pitchOffset);
+            listeners.call([this](Listener& l) { l.pitchStepCentsChanged(currentPitchStepCents); });
+        };
+        updatePitchStepButton();
+        addAndMakeVisible(pitchStepButton);
+
+        pitchStepLabel.setText("Step", juce::dontSendNotification);
+        pitchStepLabel.setJustificationType(juce::Justification::centred);
+        pitchStepLabel.setFont(juce::Font(10.0f));
+        pitchStepLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFD4A017));
+        addAndMakeVisible(pitchStepLabel);
+
+        stepDescriptionLabel.setText("Western semitone", juce::dontSendNotification);
+        stepDescriptionLabel.setJustificationType(juce::Justification::centredRight);
+        stepDescriptionLabel.setFont(juce::Font(11.0f));
+        stepDescriptionLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
+        addAndMakeVisible(stepDescriptionLabel);
 
         // Volume knob — neutral gray, same compact style as Master Vol
         volumeKnob.setLookAndFeel(&compactKnobLaf);
@@ -493,6 +525,8 @@ public:
         // Prev/Next buttons on right: Next rightmost, Prev to its left (L→R: Prev | Next)
         nextButton.setBounds(topRow.removeFromRight(60).reduced(2));
         prevButton.setBounds(topRow.removeFromRight(60).reduced(2));
+        // Step description label: fills remaining space on the right, flush left of Prev
+        stepDescriptionLabel.setBounds(topRow.removeFromRight(140).reduced(2, 0));
         
         // Add 5px margin between top row and waveform
         area.removeFromTop(5);
@@ -541,7 +575,14 @@ public:
             pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
             pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         }
-        row1.removeFromLeft(8); // gap between pitch and toggle buttons
+        row1.removeFromLeft(4); // gap
+        {
+            // Pitch Step cycling button + "Step" label below it (60px column)
+            auto col = row1.removeFromLeft(60);
+            pitchStepLabel.setBounds(col.removeFromBottom(13).reduced(2, 0));
+            pitchStepButton.setBounds(col.withSizeKeepingCentre(58, 30));
+        }
+        row1.removeFromLeft(4); // gap between step and toggle buttons
         {
             // Tune button — pitch detection (right of pitch controls)
             auto col = row1.removeFromLeft(62);
@@ -770,7 +811,7 @@ public:
             // Build bottomInfoLabel text
             juce::String info = name;
             if (freqHz > 0.0)
-                info += " \xc2\xb7 " + juce::String((int)std::round(freqHz)) + " Hz";
+                info += " - " + juce::String((int)std::round(freqHz)) + " Hz";
             bottomInfoLabel.setText(info, juce::dontSendNotification);
         }
         else
@@ -812,6 +853,24 @@ public:
                 oneShotButton.repaint();
             }
         }
+    }
+
+    int  getPitchStepCents() const { return currentPitchStepCents; }
+
+    // Quietly restore step size on startup — does NOT fire listener.
+    void setPitchStepCents(int cents)
+    {
+        static const int valid[] = { 100, 50, 25, 33 };
+        for (auto v : valid)
+            if (v == cents) { currentPitchStepCents = v; updatePitchStepButton(); return; }
+    }
+
+    double getBaseTuningHz() const { return baseTuningHz; }
+
+    // Quietly set tuning frequency on startup — does NOT fire a listener.
+    void setBaseTuningHz(double hz)
+    {
+        baseTuningHz = juce::jlimit(400.0, 480.0, hz);
     }
 
     // Quietly restore transient detection state on startup — does NOT fire listener.
@@ -879,15 +938,15 @@ public:
         }
     }
 
-    void setPitchOffset(int offset)
+    void setPitchOffset(int cents)
     {
-        // Constrain to reasonable range: ±48 semitones (4 octaves)
-        if (offset >= -48 && offset <= 48 && offset != pitchOffset)
+        // Constrain to ±4800 cents (±48 semitones × 100)
+        if (cents >= -4800 && cents <= 4800 && cents != pitchOffset)
         {
-            pitchOffset = offset;
+            pitchOffset = cents;
             updatePitchDisplay(pitchOffset);
-            
-            printf("Pitch offset set to: %+d semitones\n", pitchOffset);
+
+            printf("Pitch offset set to: %+d cents\n", pitchOffset);
         }
     }
 
@@ -961,88 +1020,111 @@ public:
             waveformComponent->repaint();
     }
     
-    void updatePitchDisplay(int semitones)
+    void updatePitchDisplay(int cents)
     {
-        // Show actual semitone value
+        // Format pitch display — whole semitones show "N st", fractional show "N¢"
         juce::String displayText;
-        if (semitones == 0)
-            displayText = "0";
-        else if (semitones > 0)
-            displayText = "+" + juce::String(semitones);
+        if (cents % 100 == 0)
+        {
+            int semitones = cents / 100;
+            if (semitones == 0)
+                displayText = "0 st";
+            else if (semitones > 0)
+                displayText = "+" + juce::String(semitones) + " st";
+            else
+                displayText = juce::String(semitones) + " st";
+        }
         else
-            displayText = juce::String(semitones);
-        
-        pitchLabel.setText(displayText + " st", juce::dontSendNotification);
-        
-        // Calculate pitch factor correctly
-        double pitchFactor = std::pow(2.0, semitones / 12.0);
+        {
+            // Microtonal — show in cents
+            if (cents > 0)
+                displayText = "+" + juce::String(cents) + "c"; // ¢
+            else
+                displayText = juce::String(cents) + "c";
+        }
+
+        pitchLabel.setText(displayText, juce::dontSendNotification);
+
+        // Pitch factor from cents: pow(2, cents/1200)
+        double pitchFactor = std::pow(2.0, (double)cents / 1200.0);
         currentPitchFactor = pitchFactor;
-        
+
         if (waveformComponent != nullptr)
-            waveformComponent->setPitchFactor(pitchFactor, semitones);
-        
+            waveformComponent->setPitchFactor(pitchFactor, cents / 100);
+
         // Update duration display
         if (originalDuration > 0)
         {
             double adjustedDuration = originalDuration / pitchFactor;
             durationLabel.setText(juce::String(adjustedDuration, 2) + " s", juce::dontSendNotification);
-            printf("Pitch: %+d, Factor: %.3f, Original: %.2f, Adjusted: %.2f\n",
-                semitones, pitchFactor, originalDuration, adjustedDuration);
+            printf("Pitch: %+d cents, Factor: %.3f, Original: %.2f, Adjusted: %.2f\n",
+                cents, pitchFactor, originalDuration, adjustedDuration);
         }
-        
-        // ===== CRITICAL FIX: Always show pitch indicator (even at 0) =====
-        if (semitones > 0)
+
+        // Top info label
+        if (cents > 0)
             topInfoLabel.setText("COMPRESSED", juce::dontSendNotification);
-        else if (semitones < 0)
+        else if (cents < 0)
             topInfoLabel.setText("EXPANDED", juce::dontSendNotification);
         else
             topInfoLabel.setText("", juce::dontSendNotification);
 
-        // Update bottomInfoLabel — shift detected note name when tune result is active
+        // Bottom info label — shift detected note name when tune result is active
         if (detectedNoteName.isNotEmpty())
         {
-            // nearestMidi = the MIDI note of the detected pitch (at user pitchOffset == 0).
-            // basePitchOffset = tuneRootMidiNote - nearestMidi  →  nearestMidi = tuneRootMidiNote - basePitchOffset
-            const int nearestMidi  = tuneRootMidiNote - basePitchOffset;
-            const int shiftedMidi  = juce::jlimit(0, 127, nearestMidi + semitones);
+            const int nearestMidi = tuneRootMidiNote - basePitchOffset;
+            // shiftedMidi = nearestMidi + user_semitones (approximate for note name display)
+            const int approxSemitones = cents / 100;
+            const int shiftedMidi = juce::jlimit(0, 127, nearestMidi + approxSemitones);
             static const char* noteNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
             const juce::String shiftedName = juce::String(noteNames[shiftedMidi % 12])
                                            + juce::String(shiftedMidi / 12 - 1);
-            if (semitones == 0)
+            if (cents == 0)
             {
-                // At the in-tune position show the full info (name + Hz) as Tune left it
                 const int freqInt = detectedFreqHz > 0.0 ? (int)std::round(detectedFreqHz) : 0;
                 juce::String info = detectedNoteName;
                 if (freqInt > 0)
-                    info += " \xc2\xb7 " + juce::String(freqInt) + " Hz";
+                    info += " - " + juce::String(freqInt) + " Hz";
                 bottomInfoLabel.setText(info, juce::dontSendNotification);
             }
             else
             {
-                // Show shifted note + shifted frequency estimate
-                const double shiftedFreq = detectedFreqHz * std::pow(2.0, semitones / 12.0);
+                const double shiftedFreq = detectedFreqHz * pitchFactor;
                 const int shiftedFreqInt = shiftedFreq > 0.0 ? (int)std::round(shiftedFreq) : 0;
                 juce::String info = shiftedName;
                 if (shiftedFreqInt > 0)
-                    info += " \xc2\xb7 " + juce::String(shiftedFreqInt) + " Hz";
+                    info += " - " + juce::String(shiftedFreqInt) + " Hz";
                 bottomInfoLabel.setText(info, juce::dontSendNotification);
             }
         }
         else
         {
-            if (semitones > 0)
-                bottomInfoLabel.setText("PITCH UP: +" + juce::String(semitones), juce::dontSendNotification);
-            else if (semitones < 0)
-                bottomInfoLabel.setText("PITCH DOWN: " + juce::String(semitones), juce::dontSendNotification);
+            // No tune result: show generic pitch direction
+            if (cents % 100 == 0)
+            {
+                int s = cents / 100;
+                if (s > 0)
+                    bottomInfoLabel.setText("PITCH UP: +" + juce::String(s) + " st", juce::dontSendNotification);
+                else if (s < 0)
+                    bottomInfoLabel.setText("PITCH DOWN: " + juce::String(s) + " st", juce::dontSendNotification);
+                else
+                    bottomInfoLabel.setText("ORIGINAL WAVE", juce::dontSendNotification);
+            }
             else
-                bottomInfoLabel.setText("ORIGINAL WAVE", juce::dontSendNotification);
+            {
+                if (cents > 0)
+                    bottomInfoLabel.setText("PITCH UP: +" + juce::String(cents) + "c", juce::dontSendNotification);
+                else if (cents < 0)
+                    bottomInfoLabel.setText("PITCH DOWN: " + juce::String(cents) + "c", juce::dontSendNotification);
+                else
+                    bottomInfoLabel.setText("ORIGINAL WAVE", juce::dontSendNotification);
+            }
         }
-        
-        // Force label updates
+
         topInfoLabel.repaint();
         bottomInfoLabel.repaint();
         durationLabel.repaint();
-        
+
         updateWaveformSize();
     }
         
@@ -1166,6 +1248,7 @@ public:
         virtual void detectedNoteChanged(const juce::String& noteName, double freqHz) = 0;
         virtual void transientDetectionEnabledChanged(bool enabled) = 0;
         virtual void oneShotEnabledChanged(bool enabled) = 0;
+        virtual void pitchStepCentsChanged(int cents) = 0;
     };
     
     void addListener(Listener* listener)
@@ -1247,6 +1330,8 @@ public:
             std::function<void()>             onDragFinished;
             // Provide the current pitch at drag-start.
             std::function<int()>              getCurrentPitch;
+            // Provide the current step size in cents (default 100 = 1 semitone).
+            std::function<int()>              getPitchStep;
 
             void mouseEnter(const juce::MouseEvent&) override
             {
@@ -1273,8 +1358,10 @@ public:
             void mouseDrag(const juce::MouseEvent& e) override
             {
                 // drag UP (negative delta-Y on screen) → pitch up
-                int deltaY    = dragStartY - e.getScreenPosition().y;
-                int newPitch  = juce::jlimit(-48, 48, pitchAtDragStart + deltaY / 5);
+                // Each 5 px = 1 step; step size determined by getPitchStep() in cents
+                int deltaY   = dragStartY - e.getScreenPosition().y;
+                int stepSize = getPitchStep ? getPitchStep() : 100;
+                int newPitch = juce::jlimit(-4800, 4800, pitchAtDragStart + (deltaY / 5) * stepSize);
                 if (onPitchDragged)
                     onPitchDragged(newPitch);
             }
@@ -1283,7 +1370,8 @@ public:
             {
                 // Compute the same final value as mouseDrag so it is consistent
                 int deltaY   = dragStartY - e.getScreenPosition().y;
-                int newPitch = juce::jlimit(-48, 48, pitchAtDragStart + deltaY / 5);
+                int stepSize = getPitchStep ? getPitchStep() : 100;
+                int newPitch = juce::jlimit(-4800, 4800, pitchAtDragStart + (deltaY / 5) * stepSize);
                 if (onPitchDragged)
                     onPitchDragged(newPitch);
                 if (onDragFinished)
@@ -1444,7 +1532,7 @@ public:
                 
                 if (pitchOffset < 0) // Pitch DOWN - EXPANDED view
                 {
-                    expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
+                    expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 1200.0);
                     expansionFactor = juce::jmin(expansionFactor, 16.0);
 
                     // renderWidth is already viewportWidth * expansionFactor (set in updateWaveformSize)
@@ -1456,7 +1544,7 @@ public:
                 }
                 else if (pitchOffset > 0) // Pitch UP - COMPRESSED view
                 {
-                    double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
+                    double compressionFactor = std::pow(2.0, (double)pitchOffset / 1200.0);
                     compressionFactor = juce::jmin(compressionFactor, 16.0);
                     samplesPerPixel = (totalLength / renderWidth) * compressionFactor;
                 }
@@ -1933,7 +2021,7 @@ public:
             {
                 if (pitchOffset > 0)
                 {
-                    double compressionFactor = std::pow(2.0, pitchOffset / 12.0);
+                    double compressionFactor = std::pow(2.0, (double)pitchOffset / 1200.0);
                     compressionFactor = juce::jmin(compressionFactor, 16.0);
                     return (float)(renderWidth / compressionFactor);
                 }
@@ -2125,40 +2213,39 @@ public:
         pitchUpButton.setTooltip("Higher pitch (shorter duration)");
     }
     
-void adjustPitchDown() 
+void adjustPitchDown()
 {
-    int newOffset = pitchOffset - 1;  // CORRECT: subtract for pitch down
-    
-    if (newOffset >= -48 && newOffset <= 48)
+    int newOffset = pitchOffset - currentPitchStepCents;
+
+    if (newOffset >= -4800 && newOffset <= 4800)
     {
         pitchOffset = newOffset;
         updatePitchDisplay(pitchOffset);
         listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
-        
-        // Just report the value without "unexpected" warnings
+
         if (pitchOffset < 0)
-            printf("✓ Pitch DOWN: %d semitones (lower pitch, longer duration)\n", pitchOffset);
+            printf("Pitch DOWN: %+d cents\n", pitchOffset);
         else if (pitchOffset > 0)
-            printf("→ Pitch DOWN: +%d semitones (moving toward zero)\n", pitchOffset);
+            printf("Pitch DOWN (toward zero): %+d cents\n", pitchOffset);
         else
             printf("Pitch reset to 0\n");
     }
 }
 
-void adjustPitchUp() 
+void adjustPitchUp()
 {
-    int newOffset = pitchOffset + 1;  // CORRECT: add for pitch up
-    
-    if (newOffset >= -48 && newOffset <= 48)
+    int newOffset = pitchOffset + currentPitchStepCents;
+
+    if (newOffset >= -4800 && newOffset <= 4800)
     {
         pitchOffset = newOffset;
         updatePitchDisplay(pitchOffset);
         listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
-        
+
         if (pitchOffset > 0)
-            printf("✓ Pitch UP: +%d semitones (higher pitch, shorter duration)\n", pitchOffset);
+            printf("Pitch UP: %+d cents\n", pitchOffset);
         else if (pitchOffset < 0)
-            printf("→ Pitch UP: %d semitones (moving toward zero)\n", pitchOffset);
+            printf("Pitch UP (toward zero): %+d cents\n", pitchOffset);
         else
             printf("Pitch reset to 0\n");
     }
@@ -2437,7 +2524,7 @@ void adjustPitchUp()
         int containerWidth;
         if (pitchOffset < 0) // Pitch DOWN - EXPAND
         {
-            double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 12.0);
+            double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 1200.0);
             expansionFactor = juce::jmin(expansionFactor, 16.0);
             containerWidth = (int)(viewportBounds.getWidth() * expansionFactor);
         }
@@ -2490,10 +2577,20 @@ void adjustPitchUp()
     juce::Label durationLabel;
     
     // Pitch adjustment controls
-    juce::TextButton pitchDownButton{"Down"};  // Lower pitch = negative semitones = longer duration
+    juce::TextButton pitchDownButton{"Down"};  // Lower pitch = negative cents = longer duration
     DraggablePitchLabel pitchLabel;
-    juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive semitones = shorter duration
-    int pitchOffset = 0;  // Pitch offset in semitones
+    juce::TextButton pitchUpButton{"Up"};      // Higher pitch = positive cents = shorter duration
+    int pitchOffset = 0;  // Pitch offset in CENTS (±4800; 100 cents = 1 semitone)
+
+    // Pitch step size (cycles: 100, 50, 25, 33 cents)
+    int currentPitchStepCents = 100;
+    juce::TextButton pitchStepButton;
+    juce::Label      pitchStepLabel;
+    juce::Label      stepDescriptionLabel;  // Musical meaning of current step size, shown left of Prev
+
+    // Base tuning frequency — default A4 = 440.0 Hz; range 400–480 Hz
+    double baseTuningHz     = 440.0;
+    double tuneBaseTuningHz = 440.0; // captured at Tune analysis start (thread param)
 
     // Loop / Freeze / OneShot / Grid / Tune buttons
     juce::TextButton loopButton;
@@ -2650,7 +2747,7 @@ void adjustPitchUp()
         int rw = waveformComponent->getWidth();
         if (pitchOffset > 0)
         {
-            double cf = juce::jmin(std::pow(2.0, pitchOffset / 12.0), 16.0);
+            double cf = juce::jmin(std::pow(2.0, (double)pitchOffset / 1200.0), 16.0);
             return (float)(rw / cf);
         }
         return (float)rw;
@@ -2661,6 +2758,24 @@ void adjustPitchUp()
     {
         static const char* labels[] = { "1ms", "10ms", "50ms", "100ms", "500ms", "1s" };
         return (index >= 0 && index < numGridResolutions) ? labels[index] : "?";
+    }
+
+    // Refresh the pitch step button text and step description label.
+    void updatePitchStepButton()
+    {
+        juce::String text;
+        juce::String description;
+        switch (currentPitchStepCents)
+        {
+            case 100: text = "100c"; description = "Western semitone";           break;
+            case 50:  text = "50c";  description = "Arabic / Turkish quarter tone"; break;
+            case 25:  text = "25c";  description = "Microtonal eighth tone";     break;
+            case 33:  text = "33c";  description = "Experimental third tone";    break;
+            default:  text = juce::String(currentPitchStepCents) + "c";
+                      description = juce::String(currentPitchStepCents) + "c step"; break;
+        }
+        pitchStepButton.setButtonText(text);
+        stepDescriptionLabel.setText(description, juce::dontSendNotification);
     }
 
     // Refresh the resolution button text and colors to match current state.
@@ -2769,6 +2884,7 @@ void adjustPitchUp()
         tuneStartSec      = startPointNormalized * originalDuration;
         tuneEndSec        = endPointNormalized   * originalDuration;
         tuneRootMidiNote  = currentMidiNote;
+        tuneBaseTuningHz  = baseTuningHz; // use current global tuning reference
 
         // Visual: "Analyzing..." state
         isTuneRunning.store(true);
@@ -2882,8 +2998,8 @@ void adjustPitchUp()
             return;
         }
 
-        // Map frequency to nearest MIDI note
-        const double exactNote = 69.0 + 12.0 * std::log2(freqHz / 440.0);
+        // Map frequency to nearest MIDI note — use current base tuning reference
+        const double exactNote = 69.0 + 12.0 * std::log2(freqHz / tuneBaseTuningHz);
         int nearestMidi = (int)std::round(exactNote);
         nearestMidi = juce::jlimit(0, 127, nearestMidi);
 
@@ -2905,7 +3021,7 @@ void adjustPitchUp()
         // Now update bottomInfoLabel with detection result (overrides what updatePitchDisplay left)
         const int freqInt = (int)std::round(freqHz);
         bottomInfoLabel.setText(
-            detectedNoteName + " \xc2\xb7 " + juce::String(freqInt) + " Hz",
+            detectedNoteName + " - " + juce::String(freqInt) + " Hz",
             juce::dontSendNotification);
 
         // Button shows detected note in bright green

@@ -57,6 +57,29 @@ MainComponent::MainComponent()
 
     setWantsKeyboardFocus(true);
 
+    // Base tuning frequency label — draggable, default 440.0 Hz
+    baseTuningLabel.setText("440.0 Hz", juce::dontSendNotification);
+    baseTuningLabel.setJustificationType(juce::Justification::centred);
+    baseTuningLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFCECECE));
+    baseTuningLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
+    baseTuningLabel.setFont(juce::Font(11.0f));
+    baseTuningLabel.setTooltip("Base tuning: A4 reference frequency. Drag up/down (Shift = coarse 1 Hz steps)");
+    baseTuningLabel.onHzChanged = [this](double newHz)
+    {
+        // Propagate to SampleCard (Tune button uses this)
+        sampleCard.setBaseTuningHz(newHz);
+        // Propagate to all live sounds
+        float ratio = (float)(newHz / 440.0);
+        for (int i = 0; i < sampler.getNumSounds(); ++i)
+            if (auto* snd = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+                snd->baseTuningRatioAtomic.store(ratio);
+        // Save
+        if (configManager != nullptr)
+            configManager->saveBaseTuningHz(newHz);
+        printf("[TUNING] Base tuning changed to %.1f Hz\n", newHz);
+    };
+    addAndMakeVisible(baseTuningLabel);
+
       testToneButton.setButtonText("Test tone");
       testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
       testToneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
@@ -261,7 +284,7 @@ void MainComponent::paint(juce::Graphics& g)
     // Left trim: 20px margin + 60px menu = 80; Right trim: 20px margin + 250px right group = 270
     g.setColour(juce::Colour(0xFFCECECE));
     g.setFont(juce::Font(18.0f, juce::Font::bold));
-    auto titleArea = getLocalBounds().withTrimmedLeft(80).withTrimmedRight(270).removeFromTop(40);
+    auto titleArea = getLocalBounds().withTrimmedLeft(80).withTrimmedRight(348).removeFromTop(40);
     g.drawText("JAIVA-SAMPLER||1.0", titleArea, juce::Justification::centred, true);
 
     // Line above footer
@@ -273,6 +296,7 @@ void MainComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xFF0A0A0A));
     g.drawRect(menuButton.getBounds(), 1);
     g.drawRect(resetButton.getBounds(), 1);
+    g.drawRect(baseTuningLabel.getBounds(), 1);
     g.drawRect(testToneButton.getBounds(), 1);
     g.drawRect(masterVolumeKnob.getBounds(), 1);
 }
@@ -293,11 +317,11 @@ void MainComponent::resized()
     // Menu button — vertically centred in 40px bar
     menuButton.setBounds(topBar.removeFromLeft(60).withSizeKeepingCentre(56, 30));
 
-    // Right side: Reset(52) + gap(6) + label(62) + gap(4) + knob(28) + gap(8) + MIDI(22) + gap(6) + TestTone(62) = 250px
-    auto rightSide = topBar.removeFromRight(52 + 6 + 62 + 4 + 28 + 8 + 22 + 6 + 62);
-
-    // Reset/Panic button — left of Master Vol
+    // Right: Reset(52)+gap(6)+HzLabel(70)+gap(6)+MasterVolLabel(62)+gap(4)+knob(28)+gap(8)+MIDI(22)+gap(6)+TestTone(62) = 326px
+    auto rightSide = topBar.removeFromRight(52 + 6 + 70 + 6 + 62 + 4 + 28 + 8 + 22 + 6 + 62);
     resetButton.setBounds(rightSide.removeFromLeft(52).withSizeKeepingCentre(48, 30));
+    rightSide.removeFromLeft(6);
+    baseTuningLabel.setBounds(rightSide.removeFromLeft(70).withSizeKeepingCentre(68, 24));
     rightSide.removeFromLeft(6);
 
     // Master Vol: label on left, 28x28 knob on right — both vertically centred
@@ -1170,6 +1194,7 @@ void MainComponent::updateSamplerSounds()
         sound->loopEnabled.store(loopEnabled.load());
         sound->pitchOffsetAtomic.store(sample->pitchOffset);
         sound->oneShotEnabled.store(sampleCard.isOneShotEnabled());
+        sound->baseTuningRatioAtomic.store((float)(sampleCard.getBaseTuningHz() / 440.0));
 
         sampler.addSound(sound);
 
@@ -1405,8 +1430,8 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
 
         // Pitch: total = global user offset + per-sample base (from Tune).
         // basePitchOffset was restored from SampleState above (0 if never tuned).
-        sample->pitchOffset = sampleCard.getPitchOffset() + sampleCard.getBasePitchOffset();
-        printf("[PITCH] Sample loaded: user=%+d  base=%+d  total=%+d\n",
+        sample->pitchOffset = sampleCard.getPitchOffset() + sampleCard.getBasePitchOffset() * 100;
+        printf("[PITCH] Sample loaded: user=%+d cents  base=%+d st  total=%+d cents\n",
                sampleCard.getPitchOffset(), sampleCard.getBasePitchOffset(), sample->pitchOffset);
 
         sample->startPointSeconds = effectiveStart;
@@ -1552,30 +1577,30 @@ void MainComponent::learningModeChanged(bool isLearning)
     printf("MIDI Learn mode: %s\n", isLearning ? "ON" : "OFF");
 }
 
-void MainComponent::pitchOffsetChanged(int userPitchOffset)
+void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
 {
-    // Total offset applied to audio = hidden base (tune correction) + user relative offset.
-    // basePitchOffset = 0 unless Tune has been run; so behaviour is unchanged for un-tuned samples.
-    const int totalOffset = userPitchOffset + sampleCard.getBasePitchOffset();
+    // userPitchOffsetCents: user relative offset in CENTS (not semitones).
+    // basePitchOffset: whole semitones from Tune auto-correction → multiply ×100 to get cents.
+    const int totalCents = userPitchOffsetCents + sampleCard.getBasePitchOffset() * 100;
 
     // Update the in-memory sample struct with the TOTAL offset
     {
         juce::ScopedLock lock(sampleLock);
         if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
-            samples[selectedSampleIndex]->pitchOffset = totalOffset;
+            samples[selectedSampleIndex]->pitchOffset = totalCents;
     }
 
-    // Push TOTAL to all live sounds atomically — no rebuild, no note cutoff
+    // Push TOTAL (in cents) to all live sounds atomically — no rebuild, no note cutoff
     for (int i = 0; i < sampler.getNumSounds(); ++i)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
-            sound->pitchOffsetAtomic.store(totalOffset);
+            sound->pitchOffsetAtomic.store(totalCents);
 
-    // Save only the USER offset globally — base is saved per-sample in saveCurrentSampleState
+    // Save only the USER offset globally (in cents) — base is saved per-sample
     if (configManager != nullptr)
     {
-        configManager->savePitchOffset(userPitchOffset);
-        printf("[PITCH] user=%+d  base=%+d  total=%+d  saved_user=%+d\n",
-               userPitchOffset, sampleCard.getBasePitchOffset(), totalOffset, userPitchOffset);
+        configManager->savePitchOffset(userPitchOffsetCents);
+        printf("[PITCH] user=%+d cents  base=%+d st  total=%+d cents  saved_user=%+d cents\n",
+               userPitchOffsetCents, sampleCard.getBasePitchOffset(), totalCents, userPitchOffsetCents);
     }
     saveCurrentSampleState();
     fflush(stdout);
@@ -1712,6 +1737,13 @@ void MainComponent::transientDetectionEnabledChanged(bool enabled)
     if (configManager != nullptr)
         configManager->saveTransientDetectionEnabled(enabled);
     printf("[CRA] Transient detection %s — saved to disk\n", enabled ? "ON" : "OFF");
+}
+
+void MainComponent::pitchStepCentsChanged(int cents)
+{
+    if (configManager != nullptr)
+        configManager->savePitchStepCents(cents);
+    printf("[PITCH] Step size changed to %d cents\n", cents);
 }
 
 void MainComponent::oneShotEnabledChanged(bool enabled)
@@ -1975,6 +2007,17 @@ void MainComponent::loadLastSession()
     bool savedGridSnap = configManager->getGridSnapEnabled();
     sampleCard.setGridSnapEnabled(savedGridSnap);
     printf("[PERSIST] Global: grid_snap=%s\n", savedGridSnap ? "ON" : "OFF");
+
+    // Restore base tuning frequency
+    double savedTuningHz = configManager->getBaseTuningHz();
+    baseTuningLabel.setHz(savedTuningHz);
+    sampleCard.setBaseTuningHz(savedTuningHz);
+    printf("[TUNING] Restored base tuning: %.1f Hz\n", savedTuningHz);
+
+    // Restore pitch step size
+    int savedStepCents = configManager->getPitchStepCents();
+    sampleCard.setPitchStepCents(savedStepCents);
+    printf("[PITCH] Restored step size: %d cents\n", savedStepCents);
 
     // FIX 3: restore transient detection (CRA) on/off state
     bool savedCRA = configManager->getTransientDetectionEnabled();

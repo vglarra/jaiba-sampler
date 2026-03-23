@@ -70,9 +70,9 @@ public:
         propertiesFile->saveIfNeeded();
     }
     
-    void savePitchOffset(int pitchOffset)
+    void savePitchOffset(int pitchOffsetCents)
     {
-        propertiesFile->setValue("pitchOffset", pitchOffset);
+        propertiesFile->setValue("pitchOffsetCents", pitchOffsetCents);
         propertiesFile->saveIfNeeded();  // writes immediately because millisecondsBeforeSaving=0
     }
 
@@ -166,6 +166,30 @@ public:
         return propertiesFile->getBoolValue("oneShotEnabled", false); // default OFF
     }
 
+    // Base tuning frequency — key 'baseTuningHz' (default 440.0 Hz, range 400–480)
+    void saveBaseTuningHz(double hz)
+    {
+        propertiesFile->setValue("baseTuningHz", hz);
+        propertiesFile->saveIfNeeded();
+    }
+
+    double getBaseTuningHz()
+    {
+        return propertiesFile->getDoubleValue("baseTuningHz", 440.0);
+    }
+
+    // Microtonal pitch step size — key 'pitchStepCents' (default 100 = 1 semitone)
+    void savePitchStepCents(int cents)
+    {
+        propertiesFile->setValue("pitchStepCents", cents);
+        propertiesFile->saveIfNeeded();
+    }
+
+    int getPitchStepCents()
+    {
+        return propertiesFile->getIntValue("pitchStepCents", 100);
+    }
+
     // FIX 3: transient detection on/off — key 'transientDetectionEnabled'
     void saveTransientDetectionEnabled(bool enabled)
     {
@@ -218,7 +242,11 @@ public:
     
     int getPitchOffset()
     {
-        return propertiesFile->getIntValue("pitchOffset", 0); // Default to 0 (no transposition)
+        // New key stores cents directly; fall back to old semitone key × 100 for migration
+        if (propertiesFile->containsKey("pitchOffsetCents"))
+            return propertiesFile->getIntValue("pitchOffsetCents", 0);
+        int semitones = propertiesFile->getIntValue("pitchOffset", 0);
+        return semitones * 100;
     }
 
     float getVolume()

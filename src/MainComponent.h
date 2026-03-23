@@ -132,10 +132,74 @@ private:
     void detectedNoteChanged(const juce::String& noteName, double freqHz) override;
     void transientDetectionEnabledChanged(bool enabled) override;
     void oneShotEnabledChanged(bool enabled) override;
+    void pitchStepCentsChanged(int cents) override;
 
     //==============================================================================
     // MIDI Learn handling
     void handleMidiLearn(int noteNumber);
+
+    //==============================================================================
+    // Draggable label for base tuning frequency (400–480 Hz, default 440 Hz).
+    // Drag up = increase Hz, drag down = decrease Hz.
+    // Hold Shift while dragging for coarser 1.0 Hz steps (default 0.1 Hz).
+    class DraggableHzLabel : public juce::Label
+    {
+    public:
+        std::function<void(double newHz)> onHzChanged;
+        std::function<void()>            onDragFinished;
+
+        void mouseEnter(const juce::MouseEvent&) override
+        { isHovered = true; setMouseCursor(juce::MouseCursor::UpDownResizeCursor); repaint(); }
+        void mouseExit(const juce::MouseEvent&) override
+        { isHovered = false; setMouseCursor(juce::MouseCursor::NormalCursor); repaint(); }
+
+        void mouseDown(const juce::MouseEvent& e) override
+        { dragStartY = e.getScreenPosition().y; hzAtDragStart = currentHz; isDragging = true; repaint(); }
+
+        void mouseDrag(const juce::MouseEvent& e) override
+        {
+            int deltaY = dragStartY - e.getScreenPosition().y;
+            double step = e.mods.isShiftDown() ? 1.0 : 0.1;
+            double raw  = hzAtDragStart + deltaY * step;
+            currentHz   = juce::jlimit(400.0, 480.0, std::round(raw / step) * step);
+            updateHzDisplay();
+            if (onHzChanged) onHzChanged(currentHz);
+        }
+
+        void mouseUp(const juce::MouseEvent& e) override
+        {
+            int deltaY = dragStartY - e.getScreenPosition().y;
+            double step = e.mods.isShiftDown() ? 1.0 : 0.1;
+            double raw  = hzAtDragStart + deltaY * step;
+            currentHz   = juce::jlimit(400.0, 480.0, std::round(raw / step) * step);
+            updateHzDisplay();
+            if (onHzChanged) onHzChanged(currentHz);
+            if (onDragFinished) onDragFinished();
+            isDragging = false; repaint();
+        }
+
+        void setHz(double hz)
+        { currentHz = juce::jlimit(400.0, 480.0, hz); updateHzDisplay(); }
+
+        double getHz() const { return currentHz; }
+
+        void paint(juce::Graphics& g) override
+        {
+            juce::Label::paint(g);
+            if (isHovered || isDragging)
+            { g.setColour(juce::Colour(0x44FFFFFF)); g.drawRect(getLocalBounds().reduced(1), 1); }
+        }
+
+    private:
+        void updateHzDisplay()
+        { setText(juce::String(currentHz, 1) + " Hz", juce::dontSendNotification); }
+
+        double currentHz      = 440.0;
+        double hzAtDragStart  = 440.0;
+        int    dragStartY     = 0;
+        bool   isHovered      = false;
+        bool   isDragging     = false;
+    };
 
     //==============================================================================
     // Compact knob LookAndFeel — shared with SampleCard knobs (defined in KnobLookAndFeel.h)
@@ -147,6 +211,7 @@ private:
     juce::TextButton testToneButton{ "Test tone" };
     juce::Slider masterVolumeKnob;
     juce::Label masterVolumeLabel;
+    DraggableHzLabel baseTuningLabel;      // Draggable display of base tuning frequency
     SampleCard sampleCard{formatManager};  // New card component with waveform support
     juce::Label audioDeviceInfoLabel;
     juce::Label midiDeviceInfoLabel;

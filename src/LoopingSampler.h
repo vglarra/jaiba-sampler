@@ -52,6 +52,8 @@ public:
     // OneShot: when true the voice ignores note-offs and plays to the end point without looping.
     // Loop is suppressed even if loopEnabled is true.
     std::atomic<bool>        oneShotEnabled      { false };
+    // Base tuning ratio: baseTuningHz / 440.0. Updated by message thread when user changes tuning.
+    std::atomic<float>       baseTuningRatioAtomic { 1.0f };
 };
 
 //==============================================================================
@@ -76,7 +78,8 @@ public:
             basePitchRatio = std::pow(2.0, (midiNoteNumber - sound->midiRootNote) / 12.0)
                              * sound->sourceSampleRate / getSampleRate();
             const int offset = sound->pitchOffsetAtomic.load();
-            pitchRatio = basePitchRatio * std::pow(2.0, offset / 12.0);
+            const float tuningRatio = sound->baseTuningRatioAtomic.load();
+            pitchRatio = basePitchRatio * (double)tuningRatio * std::pow(2.0, offset / 1200.0);
 
             // Start playback at the current start point (atomic read).
             sourceSamplePosition = (double)sound->startSampleAtomic.load();
@@ -139,7 +142,8 @@ public:
             // Re-apply pitch offset so changes from the message thread are heard
             // within one block (~6 ms) — smooth, no pop (just rate change, not position jump).
             const int offset = sound->pitchOffsetAtomic.load();
-            pitchRatio = basePitchRatio * std::pow(2.0, offset / 12.0);
+            const float tuningRatio = sound->baseTuningRatioAtomic.load();
+            pitchRatio = basePitchRatio * (double)tuningRatio * std::pow(2.0, offset / 1200.0);
             if (sStart >= sEnd) return;
 
             const double regionLen = (double)(sEnd - sStart);
