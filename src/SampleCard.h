@@ -8,6 +8,20 @@
 #include <vector>
 #include "KnobLookAndFeel.h"
 
+// Custom Viewport subclass that exposes visibleAreaChanged so SampleCard can
+// track the horizontal scroll position for the zoom indicator.
+class WaveformViewport : public juce::Viewport
+{
+public:
+    std::function<void(int scrollX)> onScrollChanged;
+
+    void visibleAreaChanged(const juce::Rectangle<int>& newVisibleArea) override
+    {
+        if (onScrollChanged)
+            onScrollChanged(newVisibleArea.getX());
+    }
+};
+
 class SampleCard : public juce::Component
 {
 public:
@@ -53,7 +67,14 @@ public:
         waveformViewport.setScrollBarsShown(true, false); // Show vertical scroll bar? false, show horizontal? true
         waveformViewport.setScrollOnDragEnabled(false); // Disabled so waveform can capture mouse for marker drag
         addAndMakeVisible(waveformViewport);
-        
+
+        // Keep zoom indicator aligned with scroll position
+        waveformViewport.onScrollChanged = [this](int scrollX)
+        {
+            if (waveformComponent != nullptr)
+                waveformComponent->setScrollOffset(scrollX);
+        };
+
         // Set up fixed info labels
         topInfoLabel.setJustificationType(juce::Justification::centred);
         topInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
@@ -268,6 +289,36 @@ public:
             endPointNormalized = newNorm;
             endKnob.setValue(newNorm, juce::dontSendNotification);
             notifyEndPointChanged();
+        };
+
+        // Zoom: mouse wheel → zoom centered on cursor position
+        waveformComponent->onZoomChanged = [this](double factor, int mouseXInComponent)
+        {
+            const int mouseXInContainer = mouseXInComponent + 2; // waveformComponent is at x=2 in container
+            const int viewScrollX       = waveformViewport.getViewPositionX();
+            const int oldContainerWidth = waveformContainer->getWidth();
+
+            waveformZoomLevel = juce::jlimit(1.0, 100.0, waveformZoomLevel * factor);
+            updateWaveformSize(true); // preserve scroll — we set it below
+
+            const int newContainerWidth = waveformContainer->getWidth();
+            const int viewportW         = waveformViewport.getWidth();
+            if (oldContainerWidth > 0)
+            {
+                double ratio   = (double)mouseXInContainer / (double)oldContainerWidth;
+                int newAbsX    = (int)(ratio * newContainerWidth);
+                int screenX    = mouseXInContainer - viewScrollX; // cursor relative to viewport left
+                int newScrollX = newAbsX - screenX;
+                newScrollX = juce::jlimit(0, juce::jmax(0, newContainerWidth - viewportW), newScrollX);
+                waveformViewport.setViewPosition(newScrollX, 0);
+            }
+        };
+
+        // Zoom reset: double-click on waveform area
+        waveformComponent->onZoomReset = [this]()
+        {
+            waveformZoomLevel = 1.0;
+            updateWaveformSize(false); // also resets scroll to 0
         };
 
         // Loop toggle button — left of Start knob in pitch row
@@ -1153,6 +1204,10 @@ public:
                 originalSampleRate = reader->sampleRate;
                 
                 // CRITICAL FIX #2: Reset scroll position BEFORE anything else
+                // Reset zoom on new sample load
+                waveformZoomLevel = 1.0;
+                if (waveformComponent != nullptr)
+                    waveformComponent->setZoomLevel(1.0);
                 waveformViewport.setViewPosition(0, 0);
                 
                 // CRITICAL FIX #3: Force waveform component to invalidate ALL cache
@@ -1905,6 +1960,19 @@ public:
                                           endMarkerX,     (float)waveformBounds.getBottom() - 8);
                     g.fillPath(endHandle);
                 }
+
+                // ===== ZOOM INDICATOR — top-left corner of ruler, tracks visible area =====
+                if (zoomLevel > 1.005)
+                {
+                    juce::String zoomText = juce::String(zoomLevel, 1) + "x";
+                    auto indicRect = juce::Rectangle<int>(viewScrollX + 4, rulerBounds.getY() + 1,
+                                                          44, rulerHeight - 2);
+                    g.setColour(juce::Colour(0xCC1E1E1E));
+                    g.fillRoundedRectangle(indicRect.toFloat(), 2.0f);
+                    g.setColour(juce::Colour(0xFFAAFF00));
+                    g.setFont(juce::Font(9.0f, juce::Font::bold));
+                    g.drawText(zoomText, indicRect, juce::Justification::centred, false);
+                }
             }
 
             void setPitchFactor(double factor, int semitones)
@@ -1967,12 +2035,23 @@ public:
                 repaint();
             }
 
+            void setZoomLevel(double z) { zoomLevel = z; }
+
+            void setScrollOffset(int scrollX) { viewScrollX = scrollX; }
+
             // Callbacks: invoked when user drags either marker
             std::function<void(float)> onMarkerDragged;
             std::function<void(float)> onEndMarkerDragged;
 
+            // Zoom callbacks
+            std::function<void(double factor, int mouseXInComponent)> onZoomChanged;
+            std::function<void()> onZoomReset;
+
             void mouseDown(const juce::MouseEvent& event) override
             {
+                if (event.getNumberOfClicks() > 1)
+                    return; // double-click handled by mouseDoubleClick
+
                 // Pick the marker closest to the click position
                 auto bounds = getLocalBounds().reduced(2);
                 float actualWidth = getActualWaveformWidth(bounds.getWidth());
@@ -1993,6 +2072,24 @@ public:
             void mouseUp(const juce::MouseEvent& event) override
             {
                 currentDragTarget = DragTarget::None;
+            }
+
+            void mouseWheelMove(const juce::MouseEvent& event,
+                                const juce::MouseWheelDetails& wheel) override
+            {
+                // Vertical scroll → zoom in/out centered on cursor
+                if (wheel.deltaY != 0.0f && onZoomChanged)
+                {
+                    const double factor = wheel.deltaY > 0.0f ? 1.2 : (1.0 / 1.2);
+                    onZoomChanged(factor, event.x);
+                }
+                // Note: consume event — use scrollbar to pan when zoomed
+            }
+
+            void mouseDoubleClick(const juce::MouseEvent&) override
+            {
+                if (onZoomReset)
+                    onZoomReset();
             }
 
         private:
@@ -2099,6 +2196,9 @@ public:
 
             enum class DragTarget { None, Start, End };
             DragTarget currentDragTarget = DragTarget::None;
+
+            double zoomLevel   = 1.0;  // Current zoom level for indicator display
+            int    viewScrollX = 0;    // Viewport scroll offset — updated via setScrollOffset()
 
             JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
         };
@@ -2507,46 +2607,51 @@ void adjustPitchUp()
         waveformViewport.setViewPosition(0, 0);
     }  */
     
-    void updateWaveformSize()
+    void updateWaveformSize(bool preserveScroll = false)
     {
         if (waveformComponent == nullptr || waveformContainer == nullptr)
             return;
-        
+
         auto viewportBounds = waveformViewport.getLocalBounds();
         if (viewportBounds.getWidth() <= 0 || viewportBounds.getHeight() <= 0)
             return;
-        
+
         // ===== CRITICAL FIX: Account for scrollbar height in container =====
         // Container height = viewport height - scrollbar height (so waveform isn't squished)
         int containerHeight = viewportBounds.getHeight() - SCROLLBAR_HEIGHT;
         containerHeight = juce::jmax(1, containerHeight);  // Ensure positive
-        
+
         int containerWidth;
         if (pitchOffset < 0) // Pitch DOWN - EXPAND
         {
             double expansionFactor = std::pow(2.0, std::abs(pitchOffset) / 1200.0);
             expansionFactor = juce::jmin(expansionFactor, 16.0);
-            containerWidth = (int)(viewportBounds.getWidth() * expansionFactor);
+            containerWidth = (int)(viewportBounds.getWidth() * expansionFactor * waveformZoomLevel);
         }
         else
         {
-            containerWidth = viewportBounds.getWidth();
+            containerWidth = (int)(viewportBounds.getWidth() * waveformZoomLevel);
         }
-        
-        // Cap maximum width
-        const int maxWidth = 11200;
+
+        // Cap maximum width — dynamic to support up to 100x zoom
+        const int maxWidth = juce::jmax(11200, (int)(viewportBounds.getWidth() * 110));
         containerWidth = juce::jmin(containerWidth, maxWidth);
         containerWidth = juce::jmax(containerWidth, viewportBounds.getWidth());
-        
+
         // Set container bounds with adjusted height
         waveformContainer->setBounds(0, 0, containerWidth, containerHeight);
         waveformComponent->setBounds(waveformContainer->getLocalBounds().reduced(2));
-        
+
+        // Pass current zoom level to waveform component for indicator display
+        if (waveformComponent != nullptr)
+            waveformComponent->setZoomLevel(waveformZoomLevel);
+
         // ===== CRITICAL FIX #3: Always show scrollbar (true = always visible) =====
         waveformViewport.setScrollBarsShown(false, true);
-        
-        // Reset scroll position
-        waveformViewport.setViewPosition(0, 0);
+
+        // Reset scroll position (unless preserving for zoom centering)
+        if (!preserveScroll)
+            waveformViewport.setViewPosition(0, 0);
         waveformComponent->repaint();
     }
 
@@ -2555,7 +2660,7 @@ void adjustPitchUp()
     juce::TextButton prevButton{"Prev"};
     juce::TextButton nextButton{"Next"};
     juce::TextButton learnButton{"Learn"};  // MIDI Learn button
-    juce::Viewport waveformViewport;
+    WaveformViewport waveformViewport;
     std::unique_ptr<juce::Component> waveformContainer;
     std::unique_ptr<WaveformComponent> waveformComponent;
     
@@ -2680,6 +2785,7 @@ void adjustPitchUp()
     // Listener list
     juce::ListenerList<Listener> listeners;
     int fixedViewportWidth = 700;  // Will be updated in resized()
+    double waveformZoomLevel = 1.0;
 
     //==============================================================================
     // Transient detection enable/disable
@@ -3147,4 +3253,5 @@ void adjustPitchUp()
             listeners.call([](Listener& l) { l.freezeChanged(false); });
         }
     }
+
 };
