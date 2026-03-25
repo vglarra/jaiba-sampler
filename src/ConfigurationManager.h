@@ -202,6 +202,18 @@ public:
         return propertiesFile->getBoolValue("transientDetectionEnabled", true); // default ON
     }
 
+    // Active tab index — key 'activeTab' (default 0 = Controls)
+    void saveActiveTab(int tabIndex)
+    {
+        propertiesFile->setValue("activeTab", tabIndex);
+        propertiesFile->saveIfNeeded();
+    }
+
+    int getActiveTab()
+    {
+        return propertiesFile->getIntValue("activeTab", 0);
+    }
+
     // FIX 2: user-selected resolution in milliseconds — key 'gridResolution'
     // Returns -1.0 if the user has never manually selected a resolution.
     void saveGridResolutionMs(double ms)
@@ -296,6 +308,12 @@ public:
         double detectedFreqHz   = 0.0;   // detected frequency in Hz
         int    basePitchOffset  = 0;     // hidden tune correction; user pitch 0 = this note
         bool   exists           = false; // false = no saved state found for this file
+        // ADSR envelope per sample
+        bool   adsrEnabled      = false;
+        float  adsrAttackMs     = 0.0f;
+        float  adsrDecayMs      = 0.0f;
+        float  adsrSustain      = 1.0f;
+        float  adsrReleaseMs    = 0.0f;
     };
 
     void saveSampleState(const juce::File& file, const SampleState& s)
@@ -309,6 +327,12 @@ public:
         propertiesFile->setValue(k + "_notename",   s.detectedNoteName);
         propertiesFile->setValue(k + "_notehz",    s.detectedFreqHz);
         propertiesFile->setValue(k + "_basepitch", s.basePitchOffset);
+        // ADSR per sample
+        propertiesFile->setValue(k + "_adsren",    s.adsrEnabled);
+        propertiesFile->setValue(k + "_adsratk",   (double)s.adsrAttackMs);
+        propertiesFile->setValue(k + "_adsrdcy",   (double)s.adsrDecayMs);
+        propertiesFile->setValue(k + "_adsrsus",   (double)s.adsrSustain);
+        propertiesFile->setValue(k + "_adsrrel",   (double)s.adsrReleaseMs);
         propertiesFile->saveIfNeeded();
     }
 
@@ -325,6 +349,12 @@ public:
         s.detectedNoteName    = propertiesFile->getValue      (k + "_notename",   "");
         s.detectedFreqHz      = propertiesFile->getDoubleValue(k + "_notehz",   0.0);
         s.basePitchOffset     = propertiesFile->getIntValue   (k + "_basepitch", 0);
+        // ADSR per sample
+        s.adsrEnabled         = propertiesFile->getBoolValue  (k + "_adsren",    false);
+        s.adsrAttackMs        = (float)propertiesFile->getDoubleValue(k + "_adsratk", 0.0);
+        s.adsrDecayMs         = (float)propertiesFile->getDoubleValue(k + "_adsrdcy", 0.0);
+        s.adsrSustain         = (float)propertiesFile->getDoubleValue(k + "_adsrsus", 1.0);
+        s.adsrReleaseMs       = (float)propertiesFile->getDoubleValue(k + "_adsrrel", 0.0);
         return s;
     }
 

@@ -504,6 +504,125 @@ public:
         transientCountLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(transientCountLabel);
 
+        // ===== TAB BAR =====
+        auto setupTab = [](juce::TextButton& btn, bool active)
+        {
+            btn.setColour(juce::TextButton::buttonColourId,  active ? juce::Colour(0xFF555555) : juce::Colour(0xFF333333));
+            btn.setColour(juce::TextButton::textColourOffId, active ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF888888));
+        };
+        setupTab(controlsTabButton, true);
+        controlsTabButton.onClick = [this] { setActiveTab(0); };
+        addAndMakeVisible(controlsTabButton);
+
+        setupTab(adsrTabButton, false);
+        adsrTabButton.onClick = [this] { setActiveTab(1); };
+        addAndMakeVisible(adsrTabButton);
+
+        setupTab(eqTabButton, false);
+        eqTabButton.onClick = [this] { setActiveTab(2); };
+        addAndMakeVisible(eqTabButton);
+
+        eqPlaceholderLabel.setText("Coming soon", juce::dontSendNotification);
+        eqPlaceholderLabel.setJustificationType(juce::Justification::centred);
+        eqPlaceholderLabel.setFont(juce::Font(16.0f, juce::Font::italic));
+        eqPlaceholderLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF888888));
+        addAndMakeVisible(eqPlaceholderLabel);
+        eqPlaceholderLabel.setVisible(false);
+
+        // ===== ADSR CONTROLS =====
+        adsrEnableButton.setClickingTogglesState(true);
+        adsrEnableButton.setToggleState(false, juce::dontSendNotification);
+        adsrEnableButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+        adsrEnableButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFCC00A0)); // fuchsia ON
+        adsrEnableButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+        adsrEnableButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFFFFFFFF));
+        adsrEnableButton.setTooltip("Enable / disable ADSR envelope shaping");
+        adsrEnableButton.onClick = [this]
+        {
+            adsrEnabled = adsrEnableButton.getToggleState();
+            updateAdsrControlsState();
+            if (waveformComponent != nullptr)
+                waveformComponent->setAdsrOverlay(adsrEnabled, adsrAttackMs, adsrDecayMs, adsrSustain, adsrReleaseMs);
+            listeners.call([this](Listener& l) { l.adsrParamsChanged(adsrEnabled, adsrAttackMs, adsrDecayMs, adsrSustain, adsrReleaseMs); });
+        };
+        addAndMakeVisible(adsrEnableButton);
+        adsrEnableButton.setVisible(false);
+
+        // ADSR knob helper lambda
+        auto initAdsrKnob = [this](juce::Slider& knob, double rangeMin, double rangeMax, double defaultVal,
+                                   const char* tooltip)
+        {
+            knob.setLookAndFeel(&compactKnobLaf);
+            knob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+            knob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+            knob.setRange(rangeMin, rangeMax, 1.0);
+            knob.setValue(defaultVal, juce::dontSendNotification);
+            knob.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour(0xFFBB0090)); // fuchsia knob
+            knob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
+            knob.setColour(juce::Slider::thumbColourId,               juce::Colour(0xFFFFFFFF));
+            knob.setTooltip(tooltip);
+            addAndMakeVisible(knob);
+            knob.setVisible(false);
+        };
+        auto initAdsrLabel = [this](juce::Label& lbl, const char* text)
+        {
+            lbl.setText(text, juce::dontSendNotification);
+            lbl.setJustificationType(juce::Justification::centred);
+            lbl.setFont(juce::Font(11.0f));
+            lbl.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
+            addAndMakeVisible(lbl);
+            lbl.setVisible(false);
+        };
+        auto initAdsrValueLabel = [this](juce::Label& lbl, const char* text)
+        {
+            lbl.setText(text, juce::dontSendNotification);
+            lbl.setJustificationType(juce::Justification::centred);
+            lbl.setFont(juce::Font(10.0f));
+            lbl.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
+            addAndMakeVisible(lbl);
+            lbl.setVisible(false);
+        };
+
+        initAdsrKnob(adsrAtkKnob, 0.0, 500.0, 0.0,  "Attack (0-500ms)");
+        initAdsrKnob(adsrDcyKnob, 0.0, 500.0, 0.0,  "Decay (0-500ms)");
+        initAdsrKnob(adsrSusKnob, 0.0, 1.0,   1.0,  "Sustain level (0.0-1.0)");
+        initAdsrKnob(adsrRelKnob, 0.0, 2000.0, 0.0, "Release (0-2000ms)");
+        // Sus knob has finer resolution
+        adsrSusKnob.setRange(0.0, 1.0, 0.01);
+
+        initAdsrLabel(adsrAtkLabel, "Atk");
+        initAdsrLabel(adsrDcyLabel, "Dcy");
+        initAdsrLabel(adsrSusLabel, "Sus");
+        initAdsrLabel(adsrRelLabel, "Rel");
+
+        initAdsrValueLabel(adsrAtkValueLabel, "0ms");
+        initAdsrValueLabel(adsrDcyValueLabel, "0ms");
+        initAdsrValueLabel(adsrSusValueLabel, "100%");
+        initAdsrValueLabel(adsrRelValueLabel, "0ms");
+
+        adsrAtkKnob.onValueChange = [this]
+        {
+            adsrAttackMs = (float)adsrAtkKnob.getValue();
+            updateAdsrValueDisplays();
+        };
+        adsrDcyKnob.onValueChange = [this]
+        {
+            adsrDecayMs = (float)adsrDcyKnob.getValue();
+            updateAdsrValueDisplays();
+        };
+        adsrSusKnob.onValueChange = [this]
+        {
+            adsrSustain = (float)adsrSusKnob.getValue();
+            updateAdsrValueDisplays();
+        };
+        adsrRelKnob.onValueChange = [this]
+        {
+            adsrReleaseMs = (float)adsrRelKnob.getValue();
+            updateAdsrValueDisplays();
+        };
+
+        updateAdsrControlsState();
+
         // Update pitch button labels with tooltips
         updatePitchButtonLabels();
         
@@ -533,6 +652,10 @@ public:
         startKnob.setLookAndFeel(nullptr);
         endKnob.setLookAndFeel(nullptr);
         sensKnob.setLookAndFeel(nullptr);
+        adsrAtkKnob.setLookAndFeel(nullptr);
+        adsrDcyKnob.setLookAndFeel(nullptr);
+        adsrSusKnob.setLookAndFeel(nullptr);
+        adsrRelKnob.setLookAndFeel(nullptr);
     }
 
     void resetViewport()
@@ -613,6 +736,27 @@ public:
         
         // Add 5px margin between waveform and controls
         area.removeFromTop(5);
+
+        // ===== TAB BAR (24px) =====
+        {
+            auto tabBar = area.removeFromTop(24);
+            applyTabStyle(controlsTabButton, activeTab == 0);
+            applyTabStyle(adsrTabButton,     activeTab == 1);
+            applyTabStyle(eqTabButton,       activeTab == 2);
+            controlsTabButton.setBounds(tabBar.removeFromLeft(80).reduced(1, 2));
+            adsrTabButton.setBounds    (tabBar.removeFromLeft(80).reduced(1, 2));
+            eqTabButton.setBounds      (tabBar.removeFromLeft(80).reduced(1, 2));
+        }
+        area.removeFromTop(4); // gap below tab bar
+
+        // ===== TAB CONTENT =====
+        if (activeTab == 1)
+            layoutAdsrTabContent(area);
+        else if (activeTab == 2)
+            layoutEqTabContent(area);
+
+        if (activeTab == 0)
+        {
 
         // ===== ROW 1: Playback controls (44px) — Down | Pitch | Up | Freeze | Loop =====
         auto row1 = area.removeFromTop(44);
@@ -726,6 +870,10 @@ public:
         // Add margin before bottom info row
         area.removeFromTop(5);
 
+        } // end if (activeTab == 0)
+
+        updateTabVisibility();
+
         // ===== Bottom info row: filename | duration | pitch indicator =====
         auto bottomRow = area.removeFromTop(22);
 
@@ -756,10 +904,12 @@ public:
         g.setColour(juce::Colour(0xFF5A5A5A));
         g.drawRoundedRectangle(getLocalBounds().toFloat(), 8.0f, 1.5f);
 
-        // Draw dark outline around every TextButton child
+        // Draw dark outline around every VISIBLE TextButton child.
+        // Must skip invisible components — hidden tab controls still exist as children
+        // but must not draw their outlines when their tab is not active.
         g.setColour(juce::Colour(0xFF0A0A0A));
         for (auto* child : getChildren())
-            if (dynamic_cast<juce::TextButton*>(child) != nullptr)
+            if (child->isVisible() && dynamic_cast<juce::TextButton*>(child) != nullptr)
                 g.drawRect(child->getBounds(), 1);
     }
     
@@ -1181,6 +1331,9 @@ public:
         
     void setWaveform(const juce::File& audioFile)
     {
+        // Reset ADSR to defaults for the new file (will be overridden by per-sample state restore)
+        setAdsrParams(false, 0.0f, 0.0f, 1.0f, 0.0f);
+
         // Reset tune detection state for the new file
         detectedNoteName = "";
         detectedFreqHz   = 0.0;
@@ -1304,6 +1457,8 @@ public:
         virtual void transientDetectionEnabledChanged(bool enabled) = 0;
         virtual void oneShotEnabledChanged(bool enabled) = 0;
         virtual void pitchStepCentsChanged(int cents) = 0;
+        virtual void adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs) = 0;
+        virtual void activeTabChanged(int tabIndex) = 0;
     };
     
     void addListener(Listener* listener)
@@ -1926,6 +2081,42 @@ public:
                                                       hlEndX - hlStartX, (float)waveformBounds.getHeight()));
                 }
 
+                // ===== ADSR ENVELOPE OVERLAY =====
+                if (adsrOverlayEnabled && originalDuration > 0.0)
+                {
+                    float startX  = waveformBounds.getX() + startMarkerNormalized * actualWaveformWidth;
+                    float endX    = waveformBounds.getX() + endMarkerNormalized   * actualWaveformWidth;
+                    float regionW = endX - startX;
+                    if (regionW > 2.0f)
+                    {
+                        double regionDur = (double)(endMarkerNormalized - startMarkerNormalized) * originalDuration;
+                        float yTop    = (float)waveformBounds.getY();
+                        float yBottom = (float)waveformBounds.getBottom();
+                        float sustY   = yBottom - (yBottom - yTop) * juce::jlimit(0.0f, 1.0f, adsrSustain);
+
+                        float atkFrac  = (regionDur > 0.0) ? juce::jlimit(0.0f, 1.0f, (adsrAttackMs  / 1000.0f) / (float)regionDur) : 0.0f;
+                        float dcyFrac  = (regionDur > 0.0) ? juce::jlimit(0.0f, 1.0f - atkFrac, (adsrDecayMs   / 1000.0f) / (float)regionDur) : 0.0f;
+                        float relFrac  = (regionDur > 0.0) ? juce::jlimit(0.0f, 1.0f, (adsrReleaseMs / 1000.0f) / (float)regionDur) : 0.0f;
+
+                        float atkX      = startX + atkFrac * regionW;
+                        float dcyX      = atkX   + dcyFrac * regionW;
+                        float relStartX = juce::jmax(dcyX, endX - relFrac * regionW);
+
+                        juce::Path envPath;
+                        envPath.startNewSubPath(startX,    yBottom);
+                        envPath.lineTo         (atkX,      yTop);
+                        envPath.lineTo         (dcyX,      sustY);
+                        envPath.lineTo         (relStartX, sustY);
+                        envPath.lineTo         (endX,      yBottom);
+                        envPath.closeSubPath();
+
+                        g.setColour(juce::Colour(0xFFFF00C8).withAlpha(0.25f)); // fuchsia fill
+                        g.fillPath(envPath);
+                        g.setColour(juce::Colour(0xFFFF00C8).withAlpha(0.60f)); // fuchsia outline
+                        g.strokePath(envPath, juce::PathStrokeType(1.5f));
+                    }
+                }
+
                 // Draw start point marker — deep red normally, flash orange on transient snap
                 // Flash alternates bright/dim each 100ms tick for a pulse effect
                 bool flashOn = (markerFlashCountdown > 0) && (markerFlashCountdown % 2 != 0);
@@ -2038,6 +2229,18 @@ public:
             void setZoomLevel(double z) { zoomLevel = z; }
 
             void setScrollOffset(int scrollX) { viewScrollX = scrollX; }
+
+            // ADSR envelope overlay — drawn as semi-transparent fuchsia shape over the waveform.
+            // Uses startMarkerNormalized / endMarkerNormalized already stored in this component.
+            void setAdsrOverlay(bool enabled, float atkMs, float dcyMs, float sus, float relMs)
+            {
+                adsrOverlayEnabled = enabled;
+                adsrAttackMs  = atkMs;
+                adsrDecayMs   = dcyMs;
+                adsrSustain   = sus;
+                adsrReleaseMs = relMs;
+                repaint();
+            }
 
             // Callbacks: invoked when user drags either marker
             std::function<void(float)> onMarkerDragged;
@@ -2199,6 +2402,13 @@ public:
 
             double zoomLevel   = 1.0;  // Current zoom level for indicator display
             int    viewScrollX = 0;    // Viewport scroll offset — updated via setScrollOffset()
+
+            // ADSR envelope overlay state
+            bool   adsrOverlayEnabled = false;
+            float  adsrAttackMs   = 0.0f;
+            float  adsrDecayMs    = 0.0f;
+            float  adsrSustain    = 1.0f;
+            float  adsrReleaseMs  = 0.0f;
 
             JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
         };
@@ -2787,6 +2997,28 @@ void adjustPitchUp()
     int fixedViewportWidth = 700;  // Will be updated in resized()
     double waveformZoomLevel = 1.0;
 
+    // ===== TAB BAR =====
+    int activeTab = 0;  // 0=Controls, 1=ADSR, 2=EQ
+    juce::TextButton controlsTabButton { "Controls" };
+    juce::TextButton adsrTabButton     { "ADSR" };
+    juce::TextButton eqTabButton       { "EQ" };
+    juce::Label      eqPlaceholderLabel;
+
+    // ===== ADSR ENVELOPE CONTROLS =====
+    bool   adsrEnabled    = false;
+    float  adsrAttackMs   = 0.0f;
+    float  adsrDecayMs    = 0.0f;
+    float  adsrSustain    = 1.0f;
+    float  adsrReleaseMs  = 0.0f;
+
+    juce::TextButton adsrEnableButton { "Env" };
+    juce::Slider     adsrAtkKnob;
+    juce::Slider     adsrDcyKnob;
+    juce::Slider     adsrSusKnob;
+    juce::Slider     adsrRelKnob;
+    juce::Label      adsrAtkLabel, adsrDcyLabel, adsrSusLabel, adsrRelLabel;
+    juce::Label      adsrAtkValueLabel, adsrDcyValueLabel, adsrSusValueLabel, adsrRelValueLabel;
+
     //==============================================================================
     // Transient detection enable/disable
 
@@ -2830,6 +3062,169 @@ void adjustPitchUp()
         repaint();
     }
 
+    //==============================================================================
+    // Tab bar helpers
+
+    static void applyTabStyle(juce::TextButton& btn, bool active)
+    {
+        btn.setColour(juce::TextButton::buttonColourId,
+                      active ? juce::Colour(0xFF555555) : juce::Colour(0xFF333333));
+        btn.setColour(juce::TextButton::textColourOffId,
+                      active ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF888888));
+    }
+
+    void setActiveTab(int tab)
+    {
+        activeTab = juce::jlimit(0, 2, tab);
+        resized();
+        repaint();  // Force full redraw — clears ghost outlines left by hidden tab components
+        listeners.call([this](Listener& l) { l.activeTabChanged(activeTab); });
+    }
+
+public:
+    // Quiet restore from session — no listener fired.
+    void setActiveTabQuiet(int tab)
+    {
+        activeTab = juce::jlimit(0, 2, tab);
+        resized();
+        repaint();  // Force full redraw — clears ghost outlines left by hidden tab components
+    }
+
+private:
+
+    void updateTabVisibility()
+    {
+        // Controls tab (row 1 + row 2 contents)
+        const bool showCtrl = (activeTab == 0);
+        for (auto* c : std::initializer_list<juce::Component*>{
+            &pitchDownButton, &pitchLabel, &pitchUpButton,
+            &pitchStepButton, &pitchStepLabel,
+            &tuneButton, &freezeButton, &loopButton, &oneShotButton,
+            &gridSnapButton, &gridResolutionButton,
+            &detectionToggleButton,
+            &prevTransientButton, &nextTransientButton,
+            &startKnob, &startKnobLabel,
+            &endKnob,   &endKnobLabel,
+            &prevEndTransientButton, &nextEndTransientButton,
+            &sensKnob, &sensLabel, &transientCountLabel,
+            &volumeKnob, &volumeLabel})
+            c->setVisible(showCtrl);
+
+        // ADSR tab
+        const bool showAdsr = (activeTab == 1);
+        for (auto* c : std::initializer_list<juce::Component*>{
+            &adsrEnableButton,
+            &adsrAtkKnob, &adsrAtkLabel, &adsrAtkValueLabel,
+            &adsrDcyKnob, &adsrDcyLabel, &adsrDcyValueLabel,
+            &adsrSusKnob, &adsrSusLabel, &adsrSusValueLabel,
+            &adsrRelKnob, &adsrRelLabel, &adsrRelValueLabel})
+            c->setVisible(showAdsr);
+
+        // EQ tab
+        eqPlaceholderLabel.setVisible(activeTab == 2);
+    }
+
+    void layoutAdsrTabContent(juce::Rectangle<int>& area)
+    {
+        // Row A (44px): Env toggle button
+        {
+            auto rowA = area.removeFromTop(44);
+            adsrEnableButton.setBounds(rowA.removeFromLeft(100).withSizeKeepingCentre(90, 30));
+        }
+        area.removeFromTop(5);
+
+        // Row B (60px): 4 ADSR knobs
+        auto rowB = area.removeFromTop(60);
+        const int labelH = 13;
+
+        juce::Slider* knobs[] = { &adsrAtkKnob, &adsrDcyKnob, &adsrSusKnob, &adsrRelKnob };
+        juce::Label*  vals[]  = { &adsrAtkValueLabel, &adsrDcyValueLabel, &adsrSusValueLabel, &adsrRelValueLabel };
+        juce::Label*  lbls[]  = { &adsrAtkLabel, &adsrDcyLabel, &adsrSusLabel, &adsrRelLabel };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            auto col = rowB.removeFromLeft(60);
+            lbls[i]->setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            vals[i]->setBounds(col.removeFromBottom(labelH).reduced(2, 0));
+            knobs[i]->setBounds(col.reduced(2));
+        }
+
+        area.removeFromTop(5); // keep spacing consistent with Controls tab
+    }
+
+    void layoutEqTabContent(juce::Rectangle<int>& area)
+    {
+        // Same height as Controls tab (44+5+60=109px)
+        eqPlaceholderLabel.setBounds(area.removeFromTop(109));
+        area.removeFromTop(5);
+    }
+
+    //==============================================================================
+    // ADSR helpers
+
+public:
+    // Quietly restore ADSR state (called from per-sample state load — no listener fired).
+    void setAdsrParams(bool enabled, float atkMs, float dcyMs, float sus, float relMs)
+    {
+        adsrEnabled   = enabled;
+        adsrAttackMs  = atkMs;
+        adsrDecayMs   = dcyMs;
+        adsrSustain   = sus;
+        adsrReleaseMs = relMs;
+        adsrEnableButton.setToggleState(enabled, juce::dontSendNotification);
+        adsrAtkKnob.setValue(atkMs,  juce::dontSendNotification);
+        adsrDcyKnob.setValue(dcyMs,  juce::dontSendNotification);
+        adsrSusKnob.setValue(sus,    juce::dontSendNotification);
+        adsrRelKnob.setValue(relMs,  juce::dontSendNotification);
+        updateAdsrControlsState();
+        updateAdsrValueDisplays();
+        if (waveformComponent != nullptr)
+            waveformComponent->setAdsrOverlay(enabled, atkMs, dcyMs, sus, relMs);
+    }
+
+    void updateAdsrValueDisplays()
+    {
+        adsrAtkValueLabel.setText(juce::String((int)std::round(adsrAttackMs))  + "ms",  juce::dontSendNotification);
+        adsrDcyValueLabel.setText(juce::String((int)std::round(adsrDecayMs))   + "ms",  juce::dontSendNotification);
+        adsrSusValueLabel.setText(juce::String((int)std::round(adsrSustain * 100.0f)) + "%", juce::dontSendNotification);
+        adsrRelValueLabel.setText(juce::String((int)std::round(adsrReleaseMs)) + "ms",  juce::dontSendNotification);
+        if (waveformComponent != nullptr)
+            waveformComponent->setAdsrOverlay(adsrEnabled, adsrAttackMs, adsrDecayMs, adsrSustain, adsrReleaseMs);
+        // Notify on every knob change so MainComponent saves state
+        listeners.call([this](Listener& l)
+        {
+            l.adsrParamsChanged(adsrEnabled, adsrAttackMs, adsrDecayMs, adsrSustain, adsrReleaseMs);
+        });
+    }
+
+    void updateAdsrControlsState()
+    {
+        const bool on = adsrEnabled;
+        const juce::Colour activeFill(0xFFBB0090); // fuchsia-ish for knobs
+        const juce::Colour dimFill   (0xFF555555);
+        const juce::Colour activeText(0xFFFFFFFF);
+        const juce::Colour dimText   (0xFF555555);
+
+        for (auto* k : {&adsrAtkKnob, &adsrDcyKnob, &adsrSusKnob, &adsrRelKnob})
+        {
+            k->setEnabled(on);
+            k->setColour(juce::Slider::rotarySliderFillColourId, on ? activeFill : dimFill);
+            k->setColour(juce::Slider::thumbColourId, on ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF777777));
+        }
+        for (auto* l : {&adsrAtkLabel,      &adsrDcyLabel,      &adsrSusLabel,      &adsrRelLabel,
+                        &adsrAtkValueLabel, &adsrDcyValueLabel, &adsrSusValueLabel, &adsrRelValueLabel})
+            l->setColour(juce::Label::textColourId, on ? activeText : dimText);
+    }
+
+    // Getters for MainComponent to read current ADSR state
+    bool  isAdsrEnabled()    const { return adsrEnabled; }
+    float getAdsrAttackMs()  const { return adsrAttackMs; }
+    float getAdsrDecayMs()   const { return adsrDecayMs; }
+    float getAdsrSustain()   const { return adsrSustain; }
+    float getAdsrReleaseMs() const { return adsrReleaseMs; }
+    int   getActiveTabIndex() const { return activeTab; }
+
+private:
     //==============================================================================
     // One-shot pulse animation (called by OneShotPulseTimer when tail is playing)
     void oneShotPulseTick()

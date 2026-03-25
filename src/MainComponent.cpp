@@ -342,7 +342,7 @@ void MainComponent::resized()
     
     // Make the card take most of the body width, but with max width to maintain proportions
     const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
-    const int cardHeight = 385;     // Two control rows (44px + 5px gap + 60px) below waveform
+    const int cardHeight = 415;     // Tab bar (24px + 4px gap) + two control rows (44px + 5px gap + 60px) below waveform
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
     
@@ -1195,6 +1195,11 @@ void MainComponent::updateSamplerSounds()
         sound->pitchOffsetAtomic.store(sample->pitchOffset);
         sound->oneShotEnabled.store(sampleCard.isOneShotEnabled());
         sound->baseTuningRatioAtomic.store((float)(sampleCard.getBaseTuningHz() / 440.0));
+        sound->customAdsrEnabled.store(sampleCard.isAdsrEnabled());
+        sound->customAdsrAttackMs.store(sampleCard.getAdsrAttackMs());
+        sound->customAdsrDecayMs.store(sampleCard.getAdsrDecayMs());
+        sound->customAdsrSustain.store(sampleCard.getAdsrSustain());
+        sound->customAdsrReleaseMs.store(sampleCard.getAdsrReleaseMs());
 
         sampler.addSound(sound);
 
@@ -1412,6 +1417,9 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
                 // Restore detected note and hidden base offset (quiet — no listener fired)
                 sampleCard.setDetectedNoteName(state.detectedNoteName, state.detectedFreqHz);
                 sampleCard.setBasePitchOffset(state.basePitchOffset);
+                // Restore ADSR envelope state (quiet — no listener fired during load)
+                sampleCard.setAdsrParams(state.adsrEnabled, state.adsrAttackMs, state.adsrDecayMs,
+                                         state.adsrSustain, state.adsrReleaseMs);
                 printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f  note=%s\n",
                        effectiveStart, effectiveEnd, effectiveVol,
                        effectiveLoop ? "ON" : "OFF",
@@ -1746,6 +1754,30 @@ void MainComponent::pitchStepCentsChanged(int cents)
     printf("[PITCH] Step size changed to %d cents\n", cents);
 }
 
+void MainComponent::adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs)
+{
+    // Propagate to all live sounds atomically — takes effect on the next noteOn.
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+        {
+            sound->customAdsrEnabled.store(enabled);
+            sound->customAdsrAttackMs.store(attackMs);
+            sound->customAdsrDecayMs.store(decayMs);
+            sound->customAdsrSustain.store(sustain);
+            sound->customAdsrReleaseMs.store(releaseMs);
+        }
+    saveCurrentSampleState();
+    printf("[ADSR] %s  atk=%.0fms  dcy=%.0fms  sus=%.2f  rel=%.0fms\n",
+           enabled ? "ON" : "OFF", attackMs, decayMs, sustain, releaseMs);
+}
+
+void MainComponent::activeTabChanged(int tabIndex)
+{
+    if (configManager != nullptr)
+        configManager->saveActiveTab(tabIndex);
+    printf("[TAB] Active tab changed to %d\n", tabIndex);
+}
+
 void MainComponent::oneShotEnabledChanged(bool enabled)
 {
     // Propagate to all live sounds atomically — no rebuild needed.
@@ -2019,6 +2051,11 @@ void MainComponent::loadLastSession()
     sampleCard.setPitchStepCents(savedStepCents);
     printf("[PITCH] Restored step size: %d cents\n", savedStepCents);
 
+    // Restore active tab
+    int savedTab = configManager->getActiveTab();
+    sampleCard.setActiveTabQuiet(savedTab);
+    printf("[TAB] Restored active tab: %d\n", savedTab);
+
     // FIX 3: restore transient detection (CRA) on/off state
     bool savedCRA = configManager->getTransientDetectionEnabled();
     sampleCard.setTransientDetectionEnabled(savedCRA);
@@ -2129,6 +2166,11 @@ void MainComponent::saveOutgoingSampleState()
     s.detectedNoteName    = sampleCard.getDetectedNoteName();
     s.detectedFreqHz      = sampleCard.getDetectedFreqHz();
     s.basePitchOffset     = sampleCard.getBasePitchOffset();
+    s.adsrEnabled         = sampleCard.isAdsrEnabled();
+    s.adsrAttackMs        = sampleCard.getAdsrAttackMs();
+    s.adsrDecayMs         = sampleCard.getAdsrDecayMs();
+    s.adsrSustain         = sampleCard.getAdsrSustain();
+    s.adsrReleaseMs       = sampleCard.getAdsrReleaseMs();
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
@@ -2156,6 +2198,11 @@ void MainComponent::saveCurrentSampleState()
     s.detectedNoteName    = sampleCard.getDetectedNoteName();
     s.detectedFreqHz      = sampleCard.getDetectedFreqHz();
     s.basePitchOffset     = sampleCard.getBasePitchOffset();
+    s.adsrEnabled         = sampleCard.isAdsrEnabled();
+    s.adsrAttackMs        = sampleCard.getAdsrAttackMs();
+    s.adsrDecayMs         = sampleCard.getAdsrDecayMs();
+    s.adsrSustain         = sampleCard.getAdsrSustain();
+    s.adsrReleaseMs       = sampleCard.getAdsrReleaseMs();
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);

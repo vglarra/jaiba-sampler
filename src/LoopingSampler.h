@@ -54,6 +54,13 @@ public:
     std::atomic<bool>        oneShotEnabled      { false };
     // Base tuning ratio: baseTuningHz / 440.0. Updated by message thread when user changes tuning.
     std::atomic<float>       baseTuningRatioAtomic { 1.0f };
+    // Custom ADSR envelope. When customAdsrEnabled=true the voice uses these parameters
+    // instead of the default short attack/release. All values applied on the next noteOn.
+    std::atomic<bool>        customAdsrEnabled   { false };
+    std::atomic<float>       customAdsrAttackMs  { 0.0f };
+    std::atomic<float>       customAdsrDecayMs   { 0.0f };
+    std::atomic<float>       customAdsrSustain   { 1.0f };
+    std::atomic<float>       customAdsrReleaseMs { 0.0f };
 };
 
 //==============================================================================
@@ -87,11 +94,27 @@ public:
             rgain = velocity;
 
             juce::ADSR::Parameters params;
-            params.attack  = sound->adsrAttack;
-            params.release = sound->adsrRelease;
-            adsr.setSampleRate(sound->sourceSampleRate);
+            if (sound->customAdsrEnabled.load())
+            {
+                // User-configured ADSR envelope
+                params.attack  = juce::jmax(0.001f, sound->customAdsrAttackMs.load()  / 1000.0f);
+                params.decay   = juce::jmax(0.001f, sound->customAdsrDecayMs.load()   / 1000.0f);
+                params.sustain = juce::jlimit(0.0f, 1.0f, sound->customAdsrSustain.load());
+                params.release = juce::jmax(0.001f, sound->customAdsrReleaseMs.load() / 1000.0f);
+            }
+            else
+            {
+                // Default: short fade-in/fade-out for click elimination
+                params.attack  = sound->adsrAttack;
+                params.release = sound->adsrRelease;
+            }
+            // ADSR must use the DEVICE sample rate, not the source file's sample rate.
+            // The ADSR advances one step per device output sample; using sourceSampleRate
+            // here would cause wrong timing whenever file SR != device SR.
+            adsr.setSampleRate(getSampleRate());
             adsr.setParameters(params);
             adsr.noteOn();
+            adsrDebugCounter = 0;
         }
     }
 
@@ -191,7 +214,22 @@ public:
                 float l = inL[pos] * invAlpha + inL[pos + 1] * alpha;
                 float r = inR ? (inR[pos] * invAlpha + inR[pos + 1] * alpha) : l;
 
+                // ADSR advances one step per device sample.
+                // Loop wrap (below) does NOT reset the ADSR — only startNote() calls noteOn().
+                // During loop mode: envelope stays in sustain phase at sustainLevel until note-off.
                 auto env = adsr.getNextSample();
+
+                // Debug: log ADSR gain value every 100 render calls during loop playback
+                // to verify envelope is non-zero during looping. Remove once confirmed.
+                if (shouldLoop && sound->customAdsrEnabled.load())
+                {
+                    ++adsrDebugCounter;
+                    if (adsrDebugCounter >= 100)
+                    {
+                        printf("[ADSR-DBG] loop env=%.4f  active=%d\n", env, adsr.isActive() ? 1 : 0);
+                        adsrDebugCounter = 0;
+                    }
+                }
 
                 // If the ADSR envelope has finished (release tail complete), stop the voice.
                 if (!adsr.isActive())
@@ -211,6 +249,8 @@ public:
                 if (sourceSamplePosition >= (double)sEnd)
                 {
                     if (shouldLoop)
+                        // Loop wrap: only position resets, ADSR state is NOT touched.
+                        // Attack fires once at note-on; Decay → Sustain → stays there across all loop cycles.
                         sourceSamplePosition = (double)sStart
                             + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
                     else
@@ -231,4 +271,5 @@ private:
     double sourceSamplePosition = 0.0;
     float  lgain = 0.0f, rgain = 0.0f;
     juce::ADSR adsr;
+    int adsrDebugCounter = 0;          // Debug: counts samples between ADSR log prints
 };
