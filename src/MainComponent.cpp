@@ -1417,9 +1417,17 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
                 // Restore detected note and hidden base offset (quiet — no listener fired)
                 sampleCard.setDetectedNoteName(state.detectedNoteName, state.detectedFreqHz);
                 sampleCard.setBasePitchOffset(state.basePitchOffset);
-                // Restore ADSR envelope state (quiet — no listener fired during load)
+                // Restore ADSR envelope state.
+                // notifyListeners=false: silent restore, no save triggered here.
+                // The final saveCurrentSampleState() at end of lambda saves the correct values.
+                printf("[ADSR LOAD] Reading from disk: adsrEnabled=%s  atk=%.0fms  dcy=%.0fms  sus=%.0f%%  rel=%.0fms\n",
+                       state.adsrEnabled ? "true" : "false",
+                       state.adsrAttackMs, state.adsrDecayMs,
+                       state.adsrSustain * 100.0f, state.adsrReleaseMs);
                 sampleCard.setAdsrParams(state.adsrEnabled, state.adsrAttackMs, state.adsrDecayMs,
-                                         state.adsrSustain, state.adsrReleaseMs);
+                                         state.adsrSustain, state.adsrReleaseMs, /*notifyListeners=*/false);
+                printf("[ADSR LOAD] Applied to SampleCard  →  card reports: en=%s atk=%.0f\n",
+                       sampleCard.isAdsrEnabled() ? "true" : "false", sampleCard.getAdsrAttackMs());
                 printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f  note=%s\n",
                        effectiveStart, effectiveEnd, effectiveVol,
                        effectiveLoop ? "ON" : "OFF",
@@ -2122,6 +2130,18 @@ void MainComponent::loadLastSession()
     if (lastSample.existsAsFile() &&
         formatManager.findFormatForFileExtension(lastSample.getFileExtension()) != nullptr)
     {
+        // Peek at what the settings file contains for this sample BEFORE any load begins.
+        // This lets us verify the save survived the previous session.
+        {
+            auto peek = configManager->getSampleState(lastSample);
+            printf("[ADSR LOAD] On-disk state for '%s' (before load): exists=%s  adsrEnabled=%s  atk=%.0fms  dcy=%.0fms  sus=%.0f%%  rel=%.0fms\n",
+                   lastSample.getFileName().toRawUTF8(),
+                   peek.exists ? "true" : "false",
+                   peek.adsrEnabled ? "true" : "false",
+                   peek.adsrAttackMs, peek.adsrDecayMs,
+                   peek.adsrSustain * 100.0f, peek.adsrReleaseMs);
+            fflush(stdout);
+        }
         printf("[PERSIST] Startup: loading last sample: %s\n", lastSample.getFileName().toRawUTF8());
 
         currentFolder = lastSample.getParentDirectory();
@@ -2184,9 +2204,19 @@ void MainComponent::saveOutgoingSampleState()
 
 void MainComponent::saveCurrentSampleState()
 {
-    if (configManager == nullptr) return;
+    printf("[ADSR-DBG] saveCurrentSampleState() called  (adsr_en=%s atk=%.0f dcy=%.0f sus=%.2f rel=%.0f)\n",
+           sampleCard.isAdsrEnabled() ? "true" : "false",
+           sampleCard.getAdsrAttackMs(), sampleCard.getAdsrDecayMs(),
+           sampleCard.getAdsrSustain(),  sampleCard.getAdsrReleaseMs());
+
+    if (configManager == nullptr) { printf("[ADSR-DBG]   → skipped: configManager null\n"); return; }
     juce::ScopedLock lock(sampleLock);
-    if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size()) return;
+    if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size())
+    {
+        printf("[ADSR-DBG]   → skipped: no valid sample (idx=%d size=%d)\n",
+               selectedSampleIndex, samples.size());
+        return;
+    }
 
     auto* sample = samples[selectedSampleIndex];
     ConfigurationManager::SampleState s;
@@ -2206,6 +2236,10 @@ void MainComponent::saveCurrentSampleState()
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
+    printf("[ADSR SAVE] adsrEnabled=%s  atk=%.0fms  dcy=%.0fms  sus=%.0f%%  rel=%.0fms  →  %s\n",
+           s.adsrEnabled ? "true" : "false",
+           s.adsrAttackMs, s.adsrDecayMs, s.adsrSustain * 100.0f, s.adsrReleaseMs,
+           configManager->getSettingsFilePath().toRawUTF8());
     printf("[PERSIST] SAVED: %s  start=%.3f  end=%.3f  vol=%.2f  loop=%s  note=%s\n",
            sample->file.getFileName().toRawUTF8(),
            s.startPoint, s.endPoint, s.volume,

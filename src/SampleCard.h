@@ -1331,8 +1331,11 @@ public:
         
     void setWaveform(const juce::File& audioFile)
     {
-        // Reset ADSR to defaults for the new file (will be overridden by per-sample state restore)
-        setAdsrParams(false, 0.0f, 0.0f, 1.0f, 0.0f);
+        // Reset ADSR silently — notifyListeners=false prevents saveCurrentSampleState() from
+        // firing here, which would clobber the PropertiesFile in-memory store with defaults
+        // before getSampleState() reads the previously saved values.
+        setAdsrParams(false, 0.0f, 0.0f, 1.0f, 0.0f, /*notifyListeners=*/false);
+        printf("[ADSR-DBG] setWaveform() silent reset — ADSR defaults applied, no save triggered\n");
 
         // Reset tune detection state for the new file
         detectedNoteName = "";
@@ -3164,7 +3167,11 @@ private:
 
 public:
     // Quietly restore ADSR state (called from per-sample state load — no listener fired).
-    void setAdsrParams(bool enabled, float atkMs, float dcyMs, float sus, float relMs)
+    // notifyListeners=false for silent restores (setWaveform reset, load lambda).
+    // Must be false in setWaveform() to avoid clobbering the PropertiesFile in-memory store
+    // BEFORE getSampleState() reads it — the root cause of ADSR not surviving restart.
+    void setAdsrParams(bool enabled, float atkMs, float dcyMs, float sus, float relMs,
+                       bool notifyListeners = true)
     {
         adsrEnabled   = enabled;
         adsrAttackMs  = atkMs;
@@ -3177,12 +3184,12 @@ public:
         adsrSusKnob.setValue(sus,    juce::dontSendNotification);
         adsrRelKnob.setValue(relMs,  juce::dontSendNotification);
         updateAdsrControlsState();
-        updateAdsrValueDisplays();
+        updateAdsrValueDisplays(notifyListeners);
         if (waveformComponent != nullptr)
             waveformComponent->setAdsrOverlay(enabled, atkMs, dcyMs, sus, relMs);
     }
 
-    void updateAdsrValueDisplays()
+    void updateAdsrValueDisplays(bool notifyListeners = true)
     {
         adsrAtkValueLabel.setText(juce::String((int)std::round(adsrAttackMs))  + "ms",  juce::dontSendNotification);
         adsrDcyValueLabel.setText(juce::String((int)std::round(adsrDecayMs))   + "ms",  juce::dontSendNotification);
@@ -3190,11 +3197,16 @@ public:
         adsrRelValueLabel.setText(juce::String((int)std::round(adsrReleaseMs)) + "ms",  juce::dontSendNotification);
         if (waveformComponent != nullptr)
             waveformComponent->setAdsrOverlay(adsrEnabled, adsrAttackMs, adsrDecayMs, adsrSustain, adsrReleaseMs);
-        // Notify on every knob change so MainComponent saves state
-        listeners.call([this](Listener& l)
+        if (notifyListeners)
         {
-            l.adsrParamsChanged(adsrEnabled, adsrAttackMs, adsrDecayMs, adsrSustain, adsrReleaseMs);
-        });
+            // Notify so MainComponent propagates values to audio engine and saves to disk.
+            // Only fires for real user changes — NOT for silent resets or load restores
+            // (where firing would overwrite PropertiesFile with wrong values).
+            listeners.call([this](Listener& l)
+            {
+                l.adsrParamsChanged(adsrEnabled, adsrAttackMs, adsrDecayMs, adsrSustain, adsrReleaseMs);
+            });
+        }
     }
 
     void updateAdsrControlsState()
