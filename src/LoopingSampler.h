@@ -114,7 +114,23 @@ public:
             adsr.setSampleRate(getSampleRate());
             adsr.setParameters(params);
             adsr.noteOn();
-            adsrDebugCounter = 0;
+            noteIsHeld = true;
+
+            // Precompute manual envelope sample counts for the custom ADSR path.
+            // These are recalculated each block in renderNextBlock for real-time knob updates,
+            // but initialising here ensures correct values on the very first sample.
+            envSamplePosition = 0;
+            inRelease         = false;
+            releasePosition   = -1;
+            debugEnvCounter   = 0;
+            if (sound->customAdsrEnabled.load())
+            {
+                const double sr = getSampleRate();
+                attackSamples  = juce::jmax(0, (int)(sound->customAdsrAttackMs.load()  / 1000.0f * sr));
+                decaySamples   = juce::jmax(0, (int)(sound->customAdsrDecayMs.load()   / 1000.0f * sr));
+                releaseSamples = juce::jmax(1, (int)(sound->customAdsrReleaseMs.load() / 1000.0f * sr));
+                sustainLevel   = juce::jlimit(0.0f, 1.0f, sound->customAdsrSustain.load());
+            }
         }
     }
 
@@ -123,17 +139,30 @@ public:
         // While freeze is active ignore note-offs so the loop keeps running.
         // freezeActive is cleared on the message thread BEFORE allNotesOff is called,
         // so the voice will stop correctly when freeze is turned off.
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(getCurrentlyPlayingSound().get()))
-            if (sound->freezeActive.load() || sound->oneShotEnabled.load())
-                return;
+        auto* sound = dynamic_cast<LoopingSamplerSound*>(getCurrentlyPlayingSound().get());
+        if (sound != nullptr && (sound->freezeActive.load() || sound->oneShotEnabled.load()))
+            return;
 
-        if (allowTailOff)
-            adsr.noteOff();
-        else
+        noteIsHeld = false;   // note is genuinely being released — loop wraps must not restart envelope
+
+        if (!allowTailOff)
         {
+            inRelease       = false;
+            releasePosition = -1;
             clearCurrentNote();
             adsr.reset();
+            return;
         }
+
+        // Custom ADSR path: hand off to manual release counter — do not touch JUCE ADSR.
+        if (sound != nullptr && sound->customAdsrEnabled.load())
+        {
+            inRelease       = true;
+            releasePosition = 0;
+            return;   // renderNextBlock will call clearCurrentNote() when counter expires
+        }
+
+        adsr.noteOff();   // default click-elimination path
     }
 
     void pitchWheelMoved(int) override {}
@@ -144,6 +173,10 @@ public:
     // so the audio thread is not inside renderNextBlock concurrently.
     void forceStop()
     {
+        noteIsHeld        = false;
+        inRelease         = false;
+        releasePosition   = -1;
+        envSamplePosition = 0;
         clearCurrentNote();   // sets currentlyPlayingSound = nullptr (releases ref-count)
         adsr.reset();
         sourceSamplePosition = 0.0;
@@ -186,6 +219,19 @@ public:
             const bool shouldLoop = (sound->loopEnabled.load() || sound->freezeActive.load())
                                     && !sound->oneShotEnabled.load();
 
+            // Cache once per block — avoids repeated atomic loads inside the sample loop.
+            const bool customAdsr = sound->customAdsrEnabled.load();
+
+            // Re-read custom ADSR knob values once per block so changes take effect within ~6 ms.
+            if (customAdsr)
+            {
+                const double sr = getSampleRate();
+                attackSamples  = juce::jmax(0, (int)(sound->customAdsrAttackMs.load()  / 1000.0f * sr));
+                decaySamples   = juce::jmax(0, (int)(sound->customAdsrDecayMs.load()   / 1000.0f * sr));
+                releaseSamples = juce::jmax(1, (int)(sound->customAdsrReleaseMs.load() / 1000.0f * sr));
+                sustainLevel   = juce::jlimit(0.0f, 1.0f, sound->customAdsrSustain.load());
+            }
+
             // Clamp position into [sStart, sEnd) in case the atomics just changed.
             if (sourceSamplePosition < (double)sStart)
                 sourceSamplePosition = (double)sStart;
@@ -193,8 +239,15 @@ public:
             if (sourceSamplePosition >= (double)sEnd)
             {
                 if (shouldLoop)
+                {
                     sourceSamplePosition = (double)sStart
                         + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
+                    // Reset manual envelope counter so the new loop cycle starts from attack.
+                    // Only when note is still held — if released, inRelease is already true
+                    // and we must not disturb the release counter.
+                    if (customAdsr && noteIsHeld)
+                        envSamplePosition = 0;
+                }
                 else
                 {
                     // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
@@ -214,28 +267,63 @@ public:
                 float l = inL[pos] * invAlpha + inL[pos + 1] * alpha;
                 float r = inR ? (inR[pos] * invAlpha + inR[pos + 1] * alpha) : l;
 
-                // ADSR advances one step per device sample.
-                // Loop wrap (below) does NOT reset the ADSR — only startNote() calls noteOn().
-                // During loop mode: envelope stays in sustain phase at sustainLevel until note-off.
-                auto env = adsr.getNextSample();
-
-                // Debug: log ADSR gain value every 100 render calls during loop playback
-                // to verify envelope is non-zero during looping. Remove once confirmed.
-                if (shouldLoop && sound->customAdsrEnabled.load())
+                // Envelope gain — manual calculation for custom ADSR, JUCE ADSR for click-elimination.
+                float env;
+                if (customAdsr)
                 {
-                    ++adsrDebugCounter;
-                    if (adsrDebugCounter >= 100)
+                    if (inRelease)
                     {
-                        printf("[ADSR-DBG] loop env=%.4f  active=%d\n", env, adsr.isActive() ? 1 : 0);
-                        adsrDebugCounter = 0;
+                        // Linear release from sustainLevel → 0 over releaseSamples.
+                        env = (releaseSamples > 0)
+                            ? sustainLevel * juce::jmax(0.0f, 1.0f - (float)releasePosition / (float)releaseSamples)
+                            : 0.0f;
+                        ++releasePosition;
+                        if (releasePosition >= releaseSamples)
+                        {
+                            clearCurrentNote();
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        // Attack: linear ramp 0 → 1 over attackSamples.
+                        if (attackSamples > 0 && envSamplePosition < attackSamples)
+                        {
+                            env = (float)envSamplePosition / (float)attackSamples;
+                        }
+                        // Decay: linear ramp 1 → sustainLevel over decaySamples.
+                        else if (decaySamples > 0 && envSamplePosition < attackSamples + decaySamples)
+                        {
+                            const float dp = (float)(envSamplePosition - attackSamples) / (float)decaySamples;
+                            env = 1.0f - dp * (1.0f - sustainLevel);
+                        }
+                        // Sustain: hold at sustainLevel.
+                        else
+                        {
+                            env = sustainLevel;
+                        }
+                        ++envSamplePosition;
+                    }
+
+                    // Debug: print envelope state ~once per second.
+                    if (++debugEnvCounter >= 44100)
+                    {
+                        debugEnvCounter = 0;
+                        DBG("[ADSR-MANUAL] envPos=" + juce::String(envSamplePosition)
+                            + " gain=" + juce::String(env, 4)
+                            + " inRelease=" + juce::String((int)inRelease)
+                            + " relPos=" + juce::String(releasePosition));
                     }
                 }
-
-                // If the ADSR envelope has finished (release tail complete), stop the voice.
-                if (!adsr.isActive())
+                else
                 {
-                    clearCurrentNote();
-                    break;
+                    // Default click-elimination ADSR — runs once, never restarted at loop wraps.
+                    env = adsr.getNextSample();
+                    if (!adsr.isActive())
+                    {
+                        clearCurrentNote();
+                        break;
+                    }
                 }
 
                 l *= lgain * env;
@@ -249,10 +337,15 @@ public:
                 if (sourceSamplePosition >= (double)sEnd)
                 {
                     if (shouldLoop)
-                        // Loop wrap: only position resets, ADSR state is NOT touched.
-                        // Attack fires once at note-on; Decay → Sustain → stays there across all loop cycles.
+                    {
                         sourceSamplePosition = (double)sStart
                             + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
+                        // Reset manual envelope counter so the new cycle starts from attack.
+                        // Guard: if released (noteIsHeld=false), inRelease is already running —
+                        // do not touch envSamplePosition.
+                        if (customAdsr && noteIsHeld)
+                            envSamplePosition = 0;
+                    }
                     else
                     {
                         // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
@@ -271,5 +364,19 @@ private:
     double sourceSamplePosition = 0.0;
     float  lgain = 0.0f, rgain = 0.0f;
     juce::ADSR adsr;
-    int adsrDebugCounter = 0;          // Debug: counts samples between ADSR log prints
+    // True from startNote until a genuine note-off (not frozen/oneshot early-return).
+    // Guards the loop-wrap envSamplePosition reset so a released note's release tail is never canceled.
+    bool noteIsHeld = false;
+
+    // Manual per-cycle ADSR envelope (used when customAdsrEnabled=true).
+    // Replaces adsr.noteOn() re-triggers at loop wraps — JUCE ADSR does not reliably restart
+    // the attack phase from sustain state; it blends from current level instead of resetting to 0.
+    int   envSamplePosition = 0;   // samples elapsed since start of current loop cycle
+    int   attackSamples     = 0;   // precomputed: attackMs * sampleRate / 1000
+    int   decaySamples      = 0;
+    int   releaseSamples    = 1;
+    float sustainLevel      = 1.0f;
+    bool  inRelease         = false;
+    int   releasePosition   = -1;  // -1 = not in release; >=0 = samples elapsed in release phase
+    int   debugEnvCounter   = 0;   // throttles debug prints to ~1 per second
 };
