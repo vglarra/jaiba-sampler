@@ -68,11 +68,13 @@ public:
         waveformViewport.setScrollOnDragEnabled(false); // Disabled so waveform can capture mouse for marker drag
         addAndMakeVisible(waveformViewport);
 
-        // Keep zoom indicator aligned with scroll position
+        // Keep zoom indicator aligned with scroll position; save scroll state on every change
         waveformViewport.onScrollChanged = [this](int scrollX)
         {
             if (waveformComponent != nullptr)
                 waveformComponent->setScrollOffset(scrollX);
+            if (onZoomStateChanged)
+                onZoomStateChanged(waveformZoomLevel, getScrollPositionNormalized());
         };
 
         // Set up fixed info labels
@@ -312,6 +314,8 @@ public:
                 newScrollX = juce::jlimit(0, juce::jmax(0, newContainerWidth - viewportW), newScrollX);
                 waveformViewport.setViewPosition(newScrollX, 0);
             }
+            if (onZoomStateChanged)
+                onZoomStateChanged(waveformZoomLevel, getScrollPositionNormalized());
         };
 
         // Zoom reset: double-click on waveform area
@@ -319,6 +323,8 @@ public:
         {
             waveformZoomLevel = 1.0;
             updateWaveformSize(false); // also resets scroll to 0
+            if (onZoomStateChanged)
+                onZoomStateChanged(1.0, 0.0f);
         };
 
         // Loop toggle button — left of Start knob in pitch row
@@ -3093,7 +3099,36 @@ public:
         repaint();  // Force full redraw — clears ghost outlines left by hidden tab components
     }
 
+    // Restore saved zoom level and scroll position after a sample load.
+    // Must be called after setWaveform() so the container is already sized.
+    void restoreZoomAndScroll(double zoomLevel, float normalizedScroll)
+    {
+        waveformZoomLevel = juce::jlimit(1.0, 100.0, zoomLevel);
+        if (waveformComponent != nullptr)
+            waveformComponent->setZoomLevel(waveformZoomLevel);
+        updateWaveformSize(true);
+        const int containerW = waveformContainer != nullptr ? waveformContainer->getWidth() : 0;
+        const int viewportW  = waveformViewport.getWidth();
+        const int maxScroll  = juce::jmax(0, containerW - viewportW);
+        waveformViewport.setViewPosition((int)(normalizedScroll * (float)maxScroll), 0);
+    }
+
+    // Fired whenever zoom or scroll changes interactively.
+    // Hook this in MainComponent to save zoom state to disk.
+    std::function<void(double zoomLevel, float normalizedScroll)> onZoomStateChanged;
+
 private:
+
+    // Normalized scroll position [0, 1] — 0 = fully left, 1 = fully right.
+    float getScrollPositionNormalized() const
+    {
+        if (waveformContainer == nullptr) return 0.0f;
+        const int containerW = waveformContainer->getWidth();
+        const int viewportW  = waveformViewport.getWidth();
+        const int maxScroll  = juce::jmax(0, containerW - viewportW);
+        if (maxScroll <= 0) return 0.0f;
+        return (float)waveformViewport.getViewPositionX() / (float)maxScroll;
+    }
 
     void updateTabVisibility()
     {

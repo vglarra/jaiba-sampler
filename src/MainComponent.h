@@ -81,7 +81,7 @@ private:
     //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
-    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true);
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, bool resetZoom = false);
     void updateSamplerSounds();
     
     // Audio device management

@@ -124,6 +124,16 @@ MainComponent::MainComponent()
       // Add listener for MIDI note changes
       sampleCard.addListener(this);
 
+      // Save zoom level and scroll position whenever they change interactively
+      sampleCard.onZoomStateChanged = [this](double zoomLevel, float normalizedScroll)
+      {
+          if (configManager != nullptr)
+          {
+              configManager->saveZoomLevel((float)zoomLevel);
+              configManager->saveZoomScrollPosition(normalizedScroll);
+          }
+      };
+
       // Set initial sample name
       sampleCard.setSampleName("No sample loaded");
 
@@ -467,7 +477,11 @@ void MainComponent::buttonClicked(juce::Button* button)
                     if (configManager != nullptr)
                         configManager->savePitchOffset(0);
 
-                    loadSampleFileAsync(file, true);
+                    // Reset zoom immediately so user sees full waveform as soon as file loads
+                    sampleCard.restoreZoomAndScroll(1.0, 0.0f);
+                    if (configManager != nullptr) { configManager->saveZoomLevel(1.0f); configManager->saveZoomScrollPosition(0.0f); }
+
+                    loadSampleFileAsync(file, true, /*resetZoom=*/true);
                 }
             },
             previewComp
@@ -475,10 +489,14 @@ void MainComponent::buttonClicked(juce::Button* button)
     }
     else if (button == &sampleCard.getPrevButton())
     {
+        sampleCard.restoreZoomAndScroll(1.0, 0.0f);
+        if (configManager != nullptr) { configManager->saveZoomLevel(1.0f); configManager->saveZoomScrollPosition(0.0f); }
         loadPrevSample();
     }
     else if (button == &sampleCard.getNextButton())
     {
+        sampleCard.restoreZoomAndScroll(1.0, 0.0f);
+        if (configManager != nullptr) { configManager->saveZoomLevel(1.0f); configManager->saveZoomScrollPosition(0.0f); }
         loadNextSample();
     }
 }
@@ -1301,7 +1319,7 @@ void MainComponent::navigateToFile(int index)
     });
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, bool resetZoom)
 {
     // ── Background thread: read audio data ────────────────────────────────────────
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -1342,7 +1360,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
     sample->audioData = std::move(buffer);
 
     // ── Message thread: stop audio, restore state, rebuild sampler ────────────────
-    juce::MessageManager::callAsync([this, sample, file, autoPlay]() {
+    juce::MessageManager::callAsync([this, sample, file, autoPlay, resetZoom]() {
 
         // ── Step 2: Stop all audio completely ─────────────────────────────────────
         muteOutput.store(true);   // audio thread bails immediately
@@ -1488,6 +1506,29 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay)
 
         sampleCard.setMidiNote(sample->rootNote);
         // Do NOT call setPitchOffset here — pitch display was not changed during load
+
+        // Zoom: reset for new sample (+button), restore saved zoom for Prev/Next/startup
+        if (resetZoom)
+        {
+            // + button load: setWaveform() already reset zoom to 1.0 — just save
+            if (configManager != nullptr)
+            {
+                configManager->saveZoomLevel(1.0f);
+                configManager->saveZoomScrollPosition(0.0f);
+            }
+            printf("[ZOOM] New sample load: zoom reset to 1.0x\n");
+        }
+        else
+        {
+            // Navigation or startup: restore previously saved zoom and scroll
+            const float savedZoom   = configManager != nullptr ? configManager->getZoomLevel() : 1.0f;
+            const float savedScroll = configManager != nullptr ? configManager->getZoomScrollPosition() : 0.0f;
+            if (savedZoom > 1.001f)
+            {
+                sampleCard.restoreZoomAndScroll((double)savedZoom, savedScroll);
+                printf("[ZOOM] Restored: %.2fx  scroll=%.3f\n", savedZoom, savedScroll);
+            }
+        }
 
         // Save the fully-resolved state so it's on disk as the authoritative record
         saveCurrentSampleState();

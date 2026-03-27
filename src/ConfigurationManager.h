@@ -227,6 +227,29 @@ public:
         return propertiesFile->getDoubleValue("gridResolution", -1.0); // -1 = never set
     }
 
+    // Waveform zoom state — keys 'zoomLevel' (multiplier) and 'zoomScrollPosition' (normalized 0-1)
+    void saveZoomLevel(float zoomLevel)
+    {
+        propertiesFile->setValue("zoomLevel", (double)zoomLevel);
+        propertiesFile->saveIfNeeded();
+    }
+
+    float getZoomLevel()
+    {
+        return (float)propertiesFile->getDoubleValue("zoomLevel", 1.0);
+    }
+
+    void saveZoomScrollPosition(float normalizedScroll)
+    {
+        propertiesFile->setValue("zoomScrollPosition", (double)normalizedScroll);
+        propertiesFile->saveIfNeeded();
+    }
+
+    float getZoomScrollPosition()
+    {
+        return (float)propertiesFile->getDoubleValue("zoomScrollPosition", 0.0);
+    }
+
     // NEW: Save audio device settings
     void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
     {
