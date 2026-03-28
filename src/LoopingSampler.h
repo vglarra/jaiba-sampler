@@ -149,6 +149,7 @@ public:
         {
             inRelease       = false;
             releasePosition = -1;
+            playheadPositionAtomic.store(-1);
             clearCurrentNote();
             adsr.reset();
             return;
@@ -177,10 +178,16 @@ public:
         inRelease         = false;
         releasePosition   = -1;
         envSamplePosition = 0;
+        playheadPositionAtomic.store(-1);  // hide playhead immediately
         clearCurrentNote();   // sets currentlyPlayingSound = nullptr (releases ref-count)
         adsr.reset();
         sourceSamplePosition = 0.0;
     }
+
+    // Written by audio thread once per block; read by UI timer (60 fps) for playhead display.
+    // Both are public so MainComponent can read them directly — no lock, no sound pointer access.
+    std::atomic<juce::int64> playheadPositionAtomic { -1 };  // -1 = not playing
+    std::atomic<juce::int64> totalSamplesAtomic     {  0 };  // total sample count for normalization
 
     void renderNextBlock(juce::AudioBuffer<float>& output,
                          int startSample, int numSamples) override
@@ -251,11 +258,16 @@ public:
                 else
                 {
                     // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
+                    playheadPositionAtomic.store(-1);
                     clearCurrentNote();
                     adsr.reset();
                     return;
                 }
             }
+
+            // Update playhead display once per block (not per sample — negligible cost).
+            totalSamplesAtomic.store(data->getNumSamples());
+            playheadPositionAtomic.store((juce::int64)sourceSamplePosition);
 
             while (--numSamples >= 0)
             {
@@ -280,6 +292,7 @@ public:
                         ++releasePosition;
                         if (releasePosition >= releaseSamples)
                         {
+                            playheadPositionAtomic.store(-1);
                             clearCurrentNote();
                             break;
                         }
@@ -321,6 +334,7 @@ public:
                     env = adsr.getNextSample();
                     if (!adsr.isActive())
                     {
+                        playheadPositionAtomic.store(-1);
                         clearCurrentNote();
                         break;
                     }
@@ -349,6 +363,7 @@ public:
                     else
                     {
                         // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
+                        playheadPositionAtomic.store(-1);
                         clearCurrentNote();
                         adsr.reset();
                         break;

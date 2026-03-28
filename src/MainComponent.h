@@ -111,6 +111,25 @@ private:
     void performPanicReset();
 
     //==============================================================================
+    // Playhead — called 60fps from SampleCard's PlayheadTimer.
+    // Iterates voices, reads playheadPositionAtomic / totalSamplesAtomic (both atomic),
+    // returns normalized [0,1] position or -1.0 when no voice is active.
+    double getPlayheadPositionNormalized()
+    {
+        for (int i = 0; i < sampler.getNumVoices(); ++i)
+        {
+            if (auto* voice = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
+            {
+                const juce::int64 pos   = voice->playheadPositionAtomic.load();
+                const juce::int64 total = voice->totalSamplesAtomic.load();
+                if (pos >= 0 && total > 0)
+                    return (double)pos / (double)total;
+            }
+        }
+        return -1.0;
+    }
+
+    //==============================================================================
     // Navigation optimizations
     // Flushes the deferred save (called 500ms after last navigation press stops).
     void flushNavigationSave();

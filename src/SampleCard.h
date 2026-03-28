@@ -643,7 +643,9 @@ public:
         durationLabel.setFont(juce::Font(11.0f, juce::Font::bold));  // Matches other indicators
         durationLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
         addAndMakeVisible(durationLabel);
-        
+
+        // 60fps playhead animation timer — cheap when idle (position stays at -1, no repaint)
+        playheadTimer.startTimer(16);
     }
     
     ~SampleCard() override
@@ -1685,6 +1687,9 @@ public:
                 // The guard below only skips cache invalidation, but the overlay must
                 // always disappear when a file (re-)arrives.
                 isLoading = false;
+                // Hide playhead — new sample hasn't started playing yet
+                playheadNormalized = -1.0f;
+                prevPlayheadX      = -1;
                 printf("[LOADING] setLoading(false) called for '%s'\n",
                        newFile.getFileName().toRawUTF8());
 
@@ -2229,6 +2234,24 @@ public:
                     g.setFont(juce::Font(9.0f, juce::Font::bold));
                     g.drawText(zoomText, indicRect, juce::Justification::centred, false);
                 }
+
+                // ===== PLAYHEAD — drawn on top of everything =====
+                if (playheadNormalized >= 0.0f && playheadNormalized <= 1.0f)
+                {
+                    const float phX = waveformBounds.getX() + playheadNormalized * actualWaveformWidth;
+
+                    // Thin black vertical line spanning full waveform height
+                    g.setColour(juce::Colour(0xFF000000));
+                    g.drawLine(phX, (float)waveformBounds.getY(),
+                               phX, (float)waveformBounds.getBottom(), 1.5f);
+
+                    // Small downward triangle at the top of the ruler (easy to spot)
+                    juce::Path phTri;
+                    phTri.addTriangle(phX - 3.0f, (float)rulerBounds.getY(),
+                                      phX + 3.0f, (float)rulerBounds.getY(),
+                                      phX,        (float)rulerBounds.getY() + 6.0f);
+                    g.fillPath(phTri);
+                }
             }
 
             void setPitchFactor(double factor, int semitones)
@@ -2294,6 +2317,42 @@ public:
             void setZoomLevel(double z) { zoomLevel = z; }
 
             void setScrollOffset(int scrollX) { viewScrollX = scrollX; }
+
+            // Called by SampleCard's 60fps PlayheadTimer.
+            // normalizedPos is the audio playback position mapped to [0,1] over the full sample.
+            // Pass -1 to hide the playhead (no note playing).
+            // Only repaints the thin dirty strip where the playhead moved — not the full waveform.
+            void setPlayheadPosition(float normalizedPos)
+            {
+                if (normalizedPos == playheadNormalized) return;
+
+                auto fullBounds   = getLocalBounds();
+                auto innerBounds  = fullBounds.reduced(2);
+                innerBounds.removeFromTop(16); // ruler height
+                int renderWidth   = innerBounds.getWidth();
+                float actualWidth = getActualWaveformWidth(renderWidth);
+
+                const int margin = 3; // px either side of the 1.5px line
+
+                // Erase previous strip
+                if (prevPlayheadX >= 0)
+                    repaint(prevPlayheadX - margin, fullBounds.getY(),
+                            2 * margin + 2, fullBounds.getHeight());
+
+                playheadNormalized = normalizedPos;
+
+                if (normalizedPos >= 0.0f && normalizedPos <= 1.0f)
+                {
+                    int px = innerBounds.getX() + (int)(normalizedPos * actualWidth);
+                    repaint(px - margin, fullBounds.getY(),
+                            2 * margin + 2, fullBounds.getHeight());
+                    prevPlayheadX = px;
+                }
+                else
+                {
+                    prevPlayheadX = -1;
+                }
+            }
 
             // ADSR envelope overlay — drawn as semi-transparent fuchsia shape over the waveform.
             // Uses startMarkerNormalized / endMarkerNormalized already stored in this component.
@@ -2468,6 +2527,10 @@ public:
 
             double zoomLevel   = 1.0;  // Current zoom level for indicator display
             int    viewScrollX = 0;    // Viewport scroll offset — updated via setScrollOffset()
+
+            // Playhead — written from SampleCard's 60fps timer, read only in paint()
+            float playheadNormalized = -1.0f;  // -1 = hidden
+            int   prevPlayheadX      = -1;     // pixel X from last frame, for dirty-region erase
 
             // ADSR envelope overlay state
             bool   adsrOverlayEnabled = false;
@@ -3129,6 +3192,28 @@ void adjustPitchUp()
     }
 
     //==============================================================================
+    // Playhead — 60fps timer reads voice atomic, forwards normalized position to WaveformComponent
+
+    class PlayheadTimer : public juce::Timer
+    {
+    public:
+        PlayheadTimer(SampleCard& o) : owner(o) {}
+        void timerCallback() override { owner.updatePlayhead(); }
+    private:
+        SampleCard& owner;
+    };
+    PlayheadTimer playheadTimer { *this };
+
+    void updatePlayhead()
+    {
+        if (waveformComponent == nullptr) return;
+        float pos = getPlayheadPosition
+                    ? (float)getPlayheadPosition()
+                    : -1.0f;
+        waveformComponent->setPlayheadPosition(pos);
+    }
+
+    //==============================================================================
     // Tab bar helpers
 
     static void applyTabStyle(juce::TextButton& btn, bool active)
@@ -3173,6 +3258,10 @@ public:
     // Fired whenever zoom or scroll changes interactively.
     // Hook this in MainComponent to save zoom state to disk.
     std::function<void(double zoomLevel, float normalizedScroll)> onZoomStateChanged;
+
+    // Wired by MainComponent to return the current playback position normalized [0,1]
+    // over the full sample, or -1 if no voice is active.  Read 60 times per second.
+    std::function<double()> getPlayheadPosition;
 
 private:
 

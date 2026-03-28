@@ -134,6 +134,9 @@ MainComponent::MainComponent()
           }
       };
 
+      // Wire playhead position — read 60fps from SampleCard's PlayheadTimer
+      sampleCard.getPlayheadPosition = [this] { return getPlayheadPositionNormalized(); };
+
       // Set initial sample name
       sampleCard.setSampleName("No sample loaded");
 
