@@ -668,6 +668,26 @@ public:
     {
         waveformViewport.setViewPosition(0, 0);
     }
+
+    // Show "Loading..." in the waveform area immediately on button press — before
+    // the background thread finishes reading the file. Cleared by setWaveform().
+    void showLoadingState()
+    {
+        if (waveformComponent != nullptr)
+            waveformComponent->setLoading(true);
+    }
+
+    // Run transient detection now (called by deferred timer after navigation stops).
+    // Safe to call on the message thread — file I/O is proportional to file length.
+    void runTransientDetection()
+    {
+        if (transientDetectionEnabled && currentAudioFile.existsAsFile())
+        {
+            printf("[NAV-TRANSIENT] Deferred transient detection starting: %s\n",
+                   currentAudioFile.getFileName().toRawUTF8());
+            detectTransients(currentAudioFile);
+        }
+    }
     
     void resized() override
     {
@@ -1335,7 +1355,9 @@ public:
         updateWaveformSize();
     }
         
-    void setWaveform(const juce::File& audioFile)
+    // skipTransients=true during rapid navigation: skip detectTransients() here and
+    // let the deferred timer in MainComponent run it 800ms after navigation stops.
+    void setWaveform(const juce::File& audioFile, bool skipTransients = false)
     {
         // Reset ADSR silently — notifyListeners=false prevents saveCurrentSampleState() from
         // firing here, which would clobber the PropertiesFile in-memory store with defaults
@@ -1385,8 +1407,17 @@ public:
                 resetStartPoint();
                 resetEndPoint();
 
-                // Run transient detection on the new file — only if CRA is enabled
-                if (transientDetectionEnabled)
+                // Transient detection: run immediately on normal load (+button / startup).
+                // Skip during navigation (skipTransients=true) — deferred timer will run it.
+                if (skipTransients)
+                {
+                    // Clear stale markers from previous sample; show "?" count until timer fires
+                    transientPositionsSeconds.clear();
+                    transientCountLabel.setText("T: ?", juce::dontSendNotification);
+                    if (waveformComponent != nullptr)
+                        waveformComponent->setTransients({});
+                }
+                else if (transientDetectionEnabled)
                     detectTransients(audioFile);
                 else
                 {
@@ -1650,18 +1681,32 @@ public:
 
             void setFile(const juce::File& newFile)
             {
+                // Always clear loading state — even if the file is the same one.
+                // The guard below only skips cache invalidation, but the overlay must
+                // always disappear when a file (re-)arrives.
+                isLoading = false;
+                printf("[LOADING] setLoading(false) called for '%s'\n",
+                       newFile.getFileName().toRawUTF8());
+
                 if (currentAudioFile != newFile)
                 {
                     currentAudioFile = newFile;
-                    
+
                     // CRITICAL FIX: Clear ALL cached data, not just the reader
                     cachedReader.reset();
                     cachedTotalLength = 0;      // CLEAR THIS!
                     cachedNumChannels = 0;      // CLEAR THIS!
                     lastFile = juce::File();    // Force cache regeneration on next paint()
-                    
-                    repaint();
                 }
+
+                repaint();  // Always repaint so the loading overlay is cleared
+            }
+
+            // Show a "Loading..." overlay. Cleared automatically when setFile() is called.
+            void setLoading(bool loading)
+            {
+                isLoading = loading;
+                repaint();
             }
 
             void paint(juce::Graphics& g) override
@@ -1675,6 +1720,17 @@ public:
                 // Draw border
                 g.setColour(juce::Colour(0xFFB0B0B0));
                 g.drawRect(bounds, 2);
+
+                // Loading indicator — shown while background thread reads the new file
+                if (isLoading)
+                {
+                    g.setColour(juce::Colour(0xFFD0D0D0));
+                    g.fillRect(bounds);
+                    g.setColour(juce::Colour(0xFF555555));
+                    g.setFont(juce::Font(13.0f, juce::Font::italic));
+                    g.drawText("Loading...", bounds, juce::Justification::centred, true);
+                    return;
+                }
 
                 if (!currentAudioFile.existsAsFile())
                 {
@@ -2396,6 +2452,7 @@ public:
             float startMarkerNormalized = 0.0f;
             float endMarkerNormalized   = 1.0f;
             bool loopHighlightEnabled   = false;
+            bool isLoading              = false;  // true while background thread reads new file
 
             // Grid snap display state
             bool   gridSnapActive        = false;

@@ -188,6 +188,8 @@ MainComponent::~MainComponent()
 {
     masterVolumeKnob.setLookAndFeel(nullptr);
     cpuTimer.stopTimer();
+    navSaveTimer.stopTimer();
+    transientDetectionTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // Kill any active freeze/loop voices before audio shutdown
@@ -205,8 +207,8 @@ MainComponent::~MainComponent()
     sampler.allNotesOff(0, false);
 
     // Shutdown save — flush current state to disk before the app closes.
-    // This is a safety net: all individual saves already write immediately
-    // (millisecondsBeforeSaving=0), but this guarantees nothing is lost.
+    // Also covers the case where navSaveTimer was still pending (user closed the app
+    // quickly after navigation before the 500ms timer fired).
     if (configManager != nullptr)
     {
         configManager->savePitchOffset(sampleCard.getPitchOffset());
@@ -1281,15 +1283,46 @@ void MainComponent::scanCurrentFolderForAudioFiles()
         
         // Update UI on message thread
         juce::MessageManager::callAsync([this, newFiles]() {
+            // Capture current file before lock so we can find it in the new list
+            juce::File currentFile;
+            {
+                juce::ScopedLock lock(sampleLock);
+                if (!samples.isEmpty())
+                    currentFile = samples[0]->file;
+            }
+
             {
                 juce::ScopedWriteLock lock(folderLock);
                 folderAudioFiles = newFiles;
             }
             isScanning = false;
-            printf("Scanned folder: %s, found %d audio files\n", 
-                   currentFolder.getFullPathName().toRawUTF8(), 
-                   newFiles.size());
+
+            // Set currentFileIndex to point at the currently loaded sample
+            if (currentFile.existsAsFile())
+            {
+                for (int i = 0; i < folderAudioFiles.size(); ++i)
+                {
+                    if (folderAudioFiles[i] == currentFile)
+                    {
+                        currentFileIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            printf("Scanned folder: %s, found %d audio files (currentFileIndex=%d)\n",
+                   currentFolder.getFullPathName().toRawUTF8(),
+                   newFiles.size(), currentFileIndex);
             fflush(stdout);
+
+            // Fire any pending lazy-navigation action (set by loadNextSample/loadPrevSample
+            // when the folder hadn't been scanned yet).
+            if (postScanAction)
+            {
+                auto action = std::move(postScanAction);
+                postScanAction = nullptr;
+                action();
+            }
         });
     });
 }
@@ -1299,27 +1332,38 @@ void MainComponent::navigateToFile(int index)
     if (folderAudioFiles.isEmpty() || index < 0 || index >= folderAudioFiles.size())
         return;
 
+    // Record navigation start time for latency measurement
+    navStartTimeMs = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
+
     // Step 1 — Save current sample state to disk BEFORE anything changes.
     // Must be synchronous here so the card still holds the true values.
     saveOutgoingSampleState();
 
+    // Reset both deferred timers: if user navigates again before they fire, the
+    // timers restart — saves and transient detection only run once navigation stops.
+    navSaveTimer.stopTimer();
+    transientDetectionTimer.stopTimer();
+
     currentFileIndex = index;
     auto file = folderAudioFiles[index];
 
-    // Step 2 — Reset waveform viewport on the message thread (cosmetic).
-    sampleCard.resetViewport();
+    // Step 2 — Show loading indicator immediately (before background thread starts).
+    sampleCard.showLoadingState();
 
     // Pitch is NOT touched during Next/Prev — it stays exactly as the user left it.
     printf("[PITCH] Next/Prev: pitch stays at %+d (not changed)\n", sampleCard.getPitchOffset());
 
-    // Steps 3-7 happen inside loadSampleFileAsync:
-    //   stop audio → reset → load → restore per-sample state (or defaults) → save.
+    // Steps 3-7 happen inside loadSampleFileAsync on the background thread.
+    // addJob() returns immediately — the message thread is NOT blocked.
     backgroundThreads.addJob([this, file]() {
-        loadSampleFileAsync(file, true);
+        loadSampleFileAsync(file, true, false, /*deferTransients=*/true);
     });
+    printf("[ASYNC] Background load started for '%s' — returning to UI immediately\n",
+           file.getFileName().toRawUTF8());
+    fflush(stdout);
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, bool resetZoom)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, bool resetZoom, bool deferTransients)
 {
     // ── Background thread: read audio data ────────────────────────────────────────
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
@@ -1360,7 +1404,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
     sample->audioData = std::move(buffer);
 
     // ── Message thread: stop audio, restore state, rebuild sampler ────────────────
-    juce::MessageManager::callAsync([this, sample, file, autoPlay, resetZoom]() {
+    juce::MessageManager::callAsync([this, sample, file, autoPlay, resetZoom, deferTransients]() {
 
         // ── Step 2: Stop all audio completely ─────────────────────────────────────
         muteOutput.store(true);   // audio thread bails immediately
@@ -1403,7 +1447,9 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         }
 
         sampleCard.setSampleName(file.getFileName());
-        sampleCard.setWaveform(file);
+        // During navigation (deferTransients=true) skip the blocking detectTransients()
+        // call — the deferred timer will run it 800ms after navigation stops.
+        sampleCard.setWaveform(file, /*skipTransients=*/deferTransients);
         sampleCard.setDuration(sample->lengthInSamples / sample->sampleRate);
 
         sample->rootNote = sampleCard.getMidiNote();
@@ -1504,6 +1550,16 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
 
         muteOutput.store(false);
 
+        // ── Timing: print ms from button press to audio ready ─────────────────────
+        if (deferTransients && navStartTimeMs > 0)
+        {
+            const juce::int64 elapsed =
+                static_cast<juce::int64>(juce::Time::getMillisecondCounter()) - navStartTimeMs;
+            printf("[NAV-TIMING] Audio ready in %lldms for '%s'\n",
+                   elapsed, file.getFileName().toRawUTF8());
+            fflush(stdout);
+        }
+
         sampleCard.setMidiNote(sample->rootNote);
         // Do NOT call setPitchOffset here — pitch display was not changed during load
 
@@ -1530,9 +1586,21 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             }
         }
 
-        // Save the fully-resolved state so it's on disk as the authoritative record
-        saveCurrentSampleState();
-        saveCurrentSession();
+        if (deferTransients)
+        {
+            // Opt 2: Batch disk saves — wait 500ms after navigation stops, write once.
+            // Opt 3: Detect transients — wait 800ms after navigation stops.
+            // Starting the timer again resets it, so rapid navigation only fires once.
+            navSaveTimer.startTimer(500);
+            transientDetectionTimer.startTimer(800);
+            printf("[NAV-OPT] Deferred save (500ms) + transient detection (800ms) scheduled\n");
+        }
+        else
+        {
+            // Normal load (+button, startup): save immediately as before.
+            saveCurrentSampleState();
+            saveCurrentSession();
+        }
 
         printf("[PERSIST] --- Load complete: %s ---\n", file.getFileName().toRawUTF8());
         fflush(stdout);
@@ -1553,26 +1621,46 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
 void MainComponent::loadNextSample()
 {
     if (folderAudioFiles.isEmpty())
+    {
+        // Folder not scanned yet — trigger lazy scan and navigate when done
+        if (currentFolder.exists() && !isScanning)
+        {
+            printf("[NAV] Folder not scanned yet — triggering lazy scan, then navigating next\n");
+            fflush(stdout);
+            postScanAction = [this]() { loadNextSample(); };
+            scanCurrentFolderForAudioFiles();
+        }
         return;
-    
+    }
+
     if (currentFileIndex < 0)
         currentFileIndex = 0;
     else
         currentFileIndex = (currentFileIndex + 1) % folderAudioFiles.size();
-    
+
     navigateToFile(currentFileIndex);
 }
 
 void MainComponent::loadPrevSample()
 {
     if (folderAudioFiles.isEmpty())
+    {
+        // Folder not scanned yet — trigger lazy scan and navigate when done
+        if (currentFolder.exists() && !isScanning)
+        {
+            printf("[NAV] Folder not scanned yet — triggering lazy scan, then navigating prev\n");
+            fflush(stdout);
+            postScanAction = [this]() { loadPrevSample(); };
+            scanCurrentFolderForAudioFiles();
+        }
         return;
-    
+    }
+
     if (currentFileIndex < 0)
         currentFileIndex = folderAudioFiles.size() - 1;
     else
         currentFileIndex = (currentFileIndex - 1 + folderAudioFiles.size()) % folderAudioFiles.size();
-    
+
     navigateToFile(currentFileIndex);
 }
 
@@ -1864,6 +1952,30 @@ void MainComponent::checkOneShotTailDone()
         juce::MessageManager::callAsync([this] { sampleCard.setOneShotTailActive(false); });
         printf("[1SHOT] Tail complete — button restored to steady ON\n");
     }
+}
+
+//==============================================================================
+// Navigation optimizations — deferred save and transient detection
+
+void MainComponent::flushNavigationSave()
+{
+    // Opt 2: Called once, 500ms after the last Prev/Next press.
+    // Writes the authoritative on-disk record for the sample that is now current.
+    printf("[NAV-SAVE] Deferred save firing — writing state for current sample\n");
+    saveCurrentSampleState();
+    saveCurrentSession();
+    fflush(stdout);
+}
+
+void MainComponent::runDeferredTransientDetection()
+{
+    // Opt 3: Called once, 800ms after the last Prev/Next press.
+    // Runs detectTransients() on the message thread (file I/O) for the sample
+    // that is now current.  At this point the user has stopped navigating so
+    // a brief message-thread stall is acceptable.
+    printf("[NAV-TRANSIENT] Deferred transient detection firing\n");
+    fflush(stdout);
+    sampleCard.runTransientDetection();
 }
 
 //==============================================================================
@@ -2183,19 +2295,11 @@ void MainComponent::loadLastSession()
                    peek.adsrSustain * 100.0f, peek.adsrReleaseMs);
             fflush(stdout);
         }
-        printf("[PERSIST] Startup: loading last sample: %s\n", lastSample.getFileName().toRawUTF8());
-
         currentFolder = lastSample.getParentDirectory();
-        scanCurrentFolderForAudioFiles();
-
-        for (int i = 0; i < folderAudioFiles.size(); ++i)
-        {
-            if (folderAudioFiles[i] == lastSample)
-            {
-                currentFileIndex = i;
-                break;
-            }
-        }
+        // Don't scan the folder on startup — only one file needs to load.
+        // The folder listing is built lazily on the first Prev/Next press.
+        printf("[STARTUP] Loading only saved sample: '%s' — no directory preload\n",
+               lastSample.getFileName().toRawUTF8());
 
         // autoPlay=false → no preview note played on startup
         backgroundThreads.addJob([this, lastSample]() {

@@ -81,7 +81,9 @@ private:
     //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
-    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, bool resetZoom = false);
+    // deferTransients=true during Prev/Next navigation: skips detectTransients() on the
+    // message thread and fires it via transientDetectionTimer 800ms after navigation stops.
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, bool resetZoom = false, bool deferTransients = false);
     void updateSamplerSounds();
     
     // Audio device management
@@ -107,6 +109,13 @@ private:
     //==============================================================================
     // Panic reset — hard-cuts all audio immediately
     void performPanicReset();
+
+    //==============================================================================
+    // Navigation optimizations
+    // Flushes the deferred save (called 500ms after last navigation press stops).
+    void flushNavigationSave();
+    // Runs transient detection on the current sample (called 800ms after navigation stops).
+    void runDeferredTransientDetection();
 
     //==============================================================================
     // New UI functionality
@@ -340,6 +349,35 @@ private:
     bool isOneShotTailPlaying = false;
 
     void checkOneShotTailDone();
+
+    //==============================================================================
+    // Opt 2 — deferred settings flush: writes once after 500ms of navigation idle
+    class NavSaveTimer : public juce::Timer
+    {
+    public:
+        NavSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.flushNavigationSave(); }
+    private:
+        MainComponent& owner;
+    };
+    NavSaveTimer navSaveTimer { *this };
+
+    // Opt 3 — deferred transient detection: runs once after 800ms of navigation idle
+    class TransientDetectionTimer : public juce::Timer
+    {
+    public:
+        TransientDetectionTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.runDeferredTransientDetection(); }
+    private:
+        MainComponent& owner;
+    };
+    TransientDetectionTimer transientDetectionTimer { *this };
+
+    // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
+    juce::int64 navStartTimeMs = 0;
+
+    // Called once after scanCurrentFolderForAudioFiles() completes (lazy scan on first Prev/Next).
+    std::function<void()> postScanAction;
 
     //==============================================================================
     // MidiSelectorComponent::OwnerInterface implementation
