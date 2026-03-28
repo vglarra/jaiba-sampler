@@ -1224,6 +1224,7 @@ void MainComponent::updateSamplerSounds()
         sound->customAdsrDecayMs.store(sampleCard.getAdsrDecayMs());
         sound->customAdsrSustain.store(sampleCard.getAdsrSustain());
         sound->customAdsrReleaseMs.store(sampleCard.getAdsrReleaseMs());
+        sound->reverseEnabled.store(sampleCard.isReverseEnabled());
 
         sampler.addSound(sound);
 
@@ -1563,6 +1564,14 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             for (int i = 0; i < sampler.getNumSounds(); ++i)
                 if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
                     s->oneShotEnabled.store(oneShot);
+        }
+
+        // Propagate current reverse state to the freshly built sound(s).
+        {
+            const bool rev = sampleCard.isReverseEnabled();
+            for (int i = 0; i < sampler.getNumSounds(); ++i)
+                if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+                    s->reverseEnabled.store(rev);
         }
 
         muteOutput.store(false);
@@ -1977,6 +1986,42 @@ void MainComponent::oneShotEnabledChanged(bool enabled)
     printf("[1SHOT] One Shot %s — saved to disk\n", enabled ? "ON" : "OFF");
 }
 
+void MainComponent::reverseEnabledChanged(bool enabled)
+{
+    // Before updating the sound flag, mirror the current playback position so
+    // the audio continues from the same perceptual location but in the new direction.
+    // Formula: mirrored = (sEnd - 1) - (currentPos - sStart)
+    for (int si = 0; si < sampler.getNumSounds(); ++si)
+    {
+        if (auto* snd = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(si).get()))
+        {
+            const juce::int64 sStart = snd->startSampleAtomic.load();
+            const juce::int64 sEnd   = snd->endSampleAtomic.load();
+
+            for (int vi = 0; vi < sampler.getNumVoices(); ++vi)
+            {
+                if (auto* voice = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(vi)))
+                {
+                    const juce::int64 pos = voice->playheadPositionAtomic.load();
+                    if (pos >= sStart && pos < sEnd)
+                    {
+                        juce::int64 mirrored = (sEnd - 1) - (pos - sStart);
+                        mirrored = juce::jlimit(sStart, sEnd - 1, mirrored);
+                        voice->pendingSeekAtomic.store(mirrored);
+                    }
+                }
+            }
+
+            snd->reverseEnabled.store(enabled);
+        }
+    }
+
+    if (configManager != nullptr)
+        configManager->saveReverseEnabled(enabled);
+
+    printf("[REV] Reverse playback %s — saved to disk\n", enabled ? "ON" : "OFF");
+}
+
 void MainComponent::checkOneShotTailDone()
 {
     // Called every 200ms while a one-shot tail is playing.
@@ -2271,6 +2316,14 @@ void MainComponent::loadLastSession()
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
             sound->oneShotEnabled.store(savedOneShot);
     printf("[1SHOT] Restored one shot: %s\n", savedOneShot ? "ON" : "OFF");
+
+    // Restore Reverse on/off state
+    bool savedReverse = configManager->getReverseEnabled();
+    sampleCard.setReverseEnabled(savedReverse);
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            sound->reverseEnabled.store(savedReverse);
+    printf("[REV] Restored reverse: %s\n", savedReverse ? "ON" : "OFF");
 
     // FIX 2: restore user-selected grid resolution from 'gridResolution' (ms) key if present
     {

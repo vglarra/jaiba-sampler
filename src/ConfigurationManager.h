@@ -166,6 +166,17 @@ public:
         return propertiesFile->getBoolValue("oneShotEnabled", false); // default OFF
     }
 
+    void saveReverseEnabled(bool enabled)
+    {
+        propertiesFile->setValue("reverseEnabled", enabled);
+        propertiesFile->saveIfNeeded();
+    }
+
+    bool getReverseEnabled()
+    {
+        return propertiesFile->getBoolValue("reverseEnabled", false); // default OFF
+    }
+
     // Base tuning frequency — key 'baseTuningHz' (default 440.0 Hz, range 400–480)
     void saveBaseTuningHz(double hz)
     {

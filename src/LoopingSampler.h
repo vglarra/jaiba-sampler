@@ -61,6 +61,8 @@ public:
     std::atomic<float>       customAdsrDecayMs   { 0.0f };
     std::atomic<float>       customAdsrSustain   { 1.0f };
     std::atomic<float>       customAdsrReleaseMs { 0.0f };
+    // Reverse playback: when true the voice reads samples from End→Start instead of Start→End.
+    std::atomic<bool>        reverseEnabled      { false };
 };
 
 //==============================================================================
@@ -88,8 +90,13 @@ public:
             const float tuningRatio = sound->baseTuningRatioAtomic.load();
             pitchRatio = basePitchRatio * (double)tuningRatio * std::pow(2.0, offset / 1200.0);
 
-            // Start playback at the current start point (atomic read).
-            sourceSamplePosition = (double)sound->startSampleAtomic.load();
+            // Start playback at the correct boundary for current direction.
+            // Reverse: start at End−1 and count down toward Start.
+            // Forward: start at Start and count up toward End.
+            if (sound->reverseEnabled.load())
+                sourceSamplePosition = (double)(sound->endSampleAtomic.load() - 1);
+            else
+                sourceSamplePosition = (double)sound->startSampleAtomic.load();
             lgain = velocity;
             rgain = velocity;
 
@@ -179,6 +186,7 @@ public:
         releasePosition   = -1;
         envSamplePosition = 0;
         playheadPositionAtomic.store(-1);  // hide playhead immediately
+        pendingSeekAtomic.store(-1);       // cancel any pending direction-switch seek
         clearCurrentNote();   // sets currentlyPlayingSound = nullptr (releases ref-count)
         adsr.reset();
         sourceSamplePosition = 0.0;
@@ -188,6 +196,10 @@ public:
     // Both are public so MainComponent can read them directly — no lock, no sound pointer access.
     std::atomic<juce::int64> playheadPositionAtomic { -1 };  // -1 = not playing
     std::atomic<juce::int64> totalSamplesAtomic     {  0 };  // total sample count for normalization
+    // Written by message thread when reverse is toggled during active playback.
+    // Audio thread applies the seek at start of next block and resets to -1.
+    // Enables the "mirror current position" behavior required for seamless direction switches.
+    std::atomic<juce::int64> pendingSeekAtomic      { -1 };  // -1 = no pending seek
 
     void renderNextBlock(juce::AudioBuffer<float>& output,
                          int startSample, int numSamples) override
@@ -210,6 +222,9 @@ public:
             if (sStart >= sEnd) return;
 
             const double regionLen = (double)(sEnd - sStart);
+
+            // Cache reverse flag once per block.
+            const bool reversePlayback = sound->reverseEnabled.load();
 
             // maxSafePos: highest pos where inL[pos+1] is still within the buffer.
             const int maxSafePos = data->getNumSamples() - 2;
@@ -239,29 +254,64 @@ public:
                 sustainLevel   = juce::jlimit(0.0f, 1.0f, sound->customAdsrSustain.load());
             }
 
-            // Clamp position into [sStart, sEnd) in case the atomics just changed.
-            if (sourceSamplePosition < (double)sStart)
-                sourceSamplePosition = (double)sStart;
-
-            if (sourceSamplePosition >= (double)sEnd)
+            // Apply any pending position seek (written by message thread on direction toggle).
+            // Mirrors the current position around the midpoint so playback continues smoothly.
             {
-                if (shouldLoop)
+                const juce::int64 seek = pendingSeekAtomic.load();
+                if (seek >= 0)
                 {
-                    sourceSamplePosition = (double)sStart
-                        + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
-                    // Reset manual envelope counter so the new loop cycle starts from attack.
-                    // Only when note is still held — if released, inRelease is already true
-                    // and we must not disturb the release counter.
-                    if (customAdsr && noteIsHeld)
-                        envSamplePosition = 0;
+                    sourceSamplePosition = (double)seek;
+                    pendingSeekAtomic.store(-1);
                 }
-                else
+            }
+
+            // Clamp position to valid range for current direction.
+            if (reversePlayback)
+            {
+                // Reverse: position counts down from (sEnd-1) toward sStart.
+                if (sourceSamplePosition >= (double)sEnd)
+                    sourceSamplePosition = (double)(sEnd - 1);
+
+                if (sourceSamplePosition < (double)sStart)
                 {
-                    // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
-                    playheadPositionAtomic.store(-1);
-                    clearCurrentNote();
-                    adsr.reset();
-                    return;
+                    if (shouldLoop)
+                    {
+                        const double overshoot = (double)sStart - sourceSamplePosition;
+                        sourceSamplePosition = (double)(sEnd - 1) - std::fmod(overshoot, regionLen);
+                        if (customAdsr && noteIsHeld)
+                            envSamplePosition = 0;
+                    }
+                    else
+                    {
+                        playheadPositionAtomic.store(-1);
+                        clearCurrentNote();
+                        adsr.reset();
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                // Forward: position counts up from sStart toward sEnd.
+                if (sourceSamplePosition < (double)sStart)
+                    sourceSamplePosition = (double)sStart;
+
+                if (sourceSamplePosition >= (double)sEnd)
+                {
+                    if (shouldLoop)
+                    {
+                        sourceSamplePosition = (double)sStart
+                            + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
+                        if (customAdsr && noteIsHeld)
+                            envSamplePosition = 0;
+                    }
+                    else
+                    {
+                        playheadPositionAtomic.store(-1);
+                        clearCurrentNote();
+                        adsr.reset();
+                        return;
+                    }
                 }
             }
 
@@ -271,8 +321,9 @@ public:
 
             while (--numSamples >= 0)
             {
-                // Safety clamp for interpolation — never read past end of buffer.
-                int pos = juce::jmin((int)sourceSamplePosition, maxSafePos);
+                // Safety clamp for interpolation — valid for both forward and reverse.
+                // For reverse, position decreases so we need the lower bound (0) as well.
+                int pos = juce::jlimit(0, maxSafePos, (int)sourceSamplePosition);
                 auto alpha    = (float)(sourceSamplePosition - (double)pos);
                 auto invAlpha = 1.0f - alpha;
 
@@ -346,27 +397,56 @@ public:
                 if (outR != nullptr) { *outL++ += l; *outR++ += r; }
                 else                 { *outL++ += (l + r) * 0.5f; }
 
-                sourceSamplePosition += pitchRatio;
+                // Advance position in the correct direction.
+                if (reversePlayback)
+                    sourceSamplePosition -= pitchRatio;
+                else
+                    sourceSamplePosition += pitchRatio;
 
-                if (sourceSamplePosition >= (double)sEnd)
+                // Boundary check — loop wrap or natural stop.
+                if (reversePlayback)
                 {
-                    if (shouldLoop)
+                    if (sourceSamplePosition < (double)sStart)
                     {
-                        sourceSamplePosition = (double)sStart
-                            + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
-                        // Reset manual envelope counter so the new cycle starts from attack.
-                        // Guard: if released (noteIsHeld=false), inRelease is already running —
-                        // do not touch envSamplePosition.
-                        if (customAdsr && noteIsHeld)
-                            envSamplePosition = 0;
+                        if (shouldLoop)
+                        {
+                            // Wrap: overshoot past start → jump back near end.
+                            const double overshoot = (double)sStart - sourceSamplePosition;
+                            sourceSamplePosition = (double)(sEnd - 1) - std::fmod(overshoot, regionLen);
+                            if (customAdsr && noteIsHeld)
+                                envSamplePosition = 0;
+                        }
+                        else
+                        {
+                            playheadPositionAtomic.store(-1);
+                            clearCurrentNote();
+                            adsr.reset();
+                            break;
+                        }
                     }
-                    else
+                }
+                else
+                {
+                    if (sourceSamplePosition >= (double)sEnd)
                     {
-                        // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
-                        playheadPositionAtomic.store(-1);
-                        clearCurrentNote();
-                        adsr.reset();
-                        break;
+                        if (shouldLoop)
+                        {
+                            sourceSamplePosition = (double)sStart
+                                + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
+                            // Reset manual envelope counter so the new cycle starts from attack.
+                            // Guard: if released (noteIsHeld=false), inRelease is already running —
+                            // do not touch envSamplePosition.
+                            if (customAdsr && noteIsHeld)
+                                envSamplePosition = 0;
+                        }
+                        else
+                        {
+                            // Use direct stop to bypass the oneshot/freeze early-return guard in stopNote.
+                            playheadPositionAtomic.store(-1);
+                            clearCurrentNote();
+                            adsr.reset();
+                            break;
+                        }
                     }
                 }
             }

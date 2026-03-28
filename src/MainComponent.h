@@ -160,6 +160,7 @@ private:
     void detectedNoteChanged(const juce::String& noteName, double freqHz) override;
     void transientDetectionEnabledChanged(bool enabled) override;
     void oneShotEnabledChanged(bool enabled) override;
+    void reverseEnabledChanged(bool enabled) override;
     void pitchStepCentsChanged(int cents) override;
     void adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs) override;
     void activeTabChanged(int tabIndex) override;

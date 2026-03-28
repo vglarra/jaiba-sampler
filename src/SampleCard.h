@@ -395,6 +395,20 @@ public:
         };
         addAndMakeVisible(oneShotButton);
 
+        // Reverse playback button — plays sample backwards from End to Start
+        reverseButton.setClickingTogglesState(true);
+        reverseButton.setToggleState(false, juce::dontSendNotification);
+        reverseButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+        reverseButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFFF6600)); // bright orange
+        reverseButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+        reverseButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+        reverseButton.setTooltip("Reverse: play sample backwards from End to Start");
+        reverseButton.onClick = [this] {
+            reverseEnabledState = reverseButton.getToggleState();
+            listeners.call([this](Listener& l) { l.reverseEnabledChanged(reverseEnabledState); });
+        };
+        addAndMakeVisible(reverseButton);
+
         // Grid snap toggle — snaps markers to nearest grid division
         gridSnapButton.setClickingTogglesState(true);
         gridSnapButton.setToggleState(false, juce::dontSendNotification);
@@ -827,6 +841,11 @@ public:
             oneShotButton.setBounds(col.withSizeKeepingCentre(58, 30));
         }
         {
+            // Rev (reverse) button — right of One Shot
+            auto col = row1.removeFromLeft(62);
+            reverseButton.setBounds(col.withSizeKeepingCentre(58, 30));
+        }
+        {
             // Grid snap button
             auto col = row1.removeFromLeft(62);
             gridSnapButton.setBounds(col.withSizeKeepingCentre(58, 30));
@@ -1061,6 +1080,15 @@ public:
     {
         oneShotEnabled = enabled;
         oneShotButton.setToggleState(enabled, juce::dontSendNotification);
+    }
+
+    bool isReverseEnabled() const { return reverseEnabledState; }
+
+    // Quietly restore reverse state on startup — does NOT fire listener.
+    void setReverseEnabled(bool enabled)
+    {
+        reverseEnabledState = enabled;
+        reverseButton.setToggleState(enabled, juce::dontSendNotification);
     }
 
     // Called by MainComponent when a note-off arrives while oneshot is active (tail started),
@@ -1498,6 +1526,7 @@ public:
         virtual void detectedNoteChanged(const juce::String& noteName, double freqHz) = 0;
         virtual void transientDetectionEnabledChanged(bool enabled) = 0;
         virtual void oneShotEnabledChanged(bool enabled) = 0;
+        virtual void reverseEnabledChanged(bool enabled) = 0;
         virtual void pitchStepCentsChanged(int cents) = 0;
         virtual void adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs) = 0;
         virtual void activeTabChanged(int tabIndex) = 0;
@@ -3036,11 +3065,13 @@ void adjustPitchUp()
     double baseTuningHz     = 440.0;
     double tuneBaseTuningHz = 440.0; // captured at Tune analysis start (thread param)
 
-    // Loop / Freeze / OneShot / Grid / Tune buttons
+    // Loop / Freeze / OneShot / Reverse / Grid / Tune buttons
     juce::TextButton loopButton;
     juce::TextButton freezeButton { "Freeze" };
     juce::TextButton oneShotButton { "1Shot" };
     bool oneShotEnabled   = false;
+    juce::TextButton reverseButton { "Rev" };
+    bool reverseEnabledState = false;
     OneShotPulseTimer oneShotPulseTimer { *this };
     int  oneShotPulsePhase = 0;
     juce::TextButton gridSnapButton { "Grid" };
@@ -3283,7 +3314,7 @@ private:
         for (auto* c : std::initializer_list<juce::Component*>{
             &pitchDownButton, &pitchLabel, &pitchUpButton,
             &pitchStepButton, &pitchStepLabel,
-            &tuneButton, &freezeButton, &loopButton, &oneShotButton,
+            &tuneButton, &freezeButton, &loopButton, &oneShotButton, &reverseButton,
             &gridSnapButton, &gridResolutionButton,
             &detectionToggleButton,
             &prevTransientButton, &nextTransientButton,
