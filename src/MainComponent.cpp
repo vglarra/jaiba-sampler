@@ -190,6 +190,7 @@ MainComponent::~MainComponent()
     cpuTimer.stopTimer();
     navSaveTimer.stopTimer();
     transientDetectionTimer.stopTimer();
+    navDebounceTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // Kill any active freeze/loop voices before audio shutdown
@@ -1332,6 +1333,10 @@ void MainComponent::navigateToFile(int index)
     if (folderAudioFiles.isEmpty() || index < 0 || index >= folderAudioFiles.size())
         return;
 
+    // Fix 1 — Increment generation: any previously queued job that has not yet started
+    // will see a mismatched generation and abort immediately without loading.
+    const int myGeneration = navigationGeneration.fetch_add(1) + 1;
+
     // Record navigation start time for latency measurement
     navStartTimeMs = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
 
@@ -1355,7 +1360,16 @@ void MainComponent::navigateToFile(int index)
 
     // Steps 3-7 happen inside loadSampleFileAsync on the background thread.
     // addJob() returns immediately — the message thread is NOT blocked.
-    backgroundThreads.addJob([this, file]() {
+    backgroundThreads.addJob([this, file, myGeneration]() {
+        // Fix 1 — Stale job check: if a newer navigation has been triggered since this
+        // job was queued, discard it immediately without reading any audio data.
+        if (myGeneration != navigationGeneration.load())
+        {
+            printf("[NAV] Cancelled pending job (gen %d), starting new load for '%s'\n",
+                   myGeneration, file.getFileName().toRawUTF8());
+            fflush(stdout);
+            return;
+        }
         loadSampleFileAsync(file, true, false, /*deferTransients=*/true);
     });
     printf("[ASYNC] Background load started for '%s' — returning to UI immediately\n",
@@ -1633,12 +1647,20 @@ void MainComponent::loadNextSample()
         return;
     }
 
+    // Fix 2 — Debounce: update the index immediately (so rapid presses accumulate
+    // correctly), but only start the actual file load after 50ms of no new presses.
     if (currentFileIndex < 0)
         currentFileIndex = 0;
     else
         currentFileIndex = (currentFileIndex + 1) % folderAudioFiles.size();
 
-    navigateToFile(currentFileIndex);
+    if (navDebounceTimer.isTimerRunning())
+    {
+        printf("[NAV] Debounced — skipping intermediate file, jumping to '%s'\n",
+               folderAudioFiles[currentFileIndex].getFileName().toRawUTF8());
+        fflush(stdout);
+    }
+    navDebounceTimer.startTimer(50);  // restart; fires once presses stop
 }
 
 void MainComponent::loadPrevSample()
@@ -1656,12 +1678,28 @@ void MainComponent::loadPrevSample()
         return;
     }
 
+    // Fix 2 — Debounce: update the index immediately (so rapid presses accumulate
+    // correctly), but only start the actual file load after 50ms of no new presses.
     if (currentFileIndex < 0)
         currentFileIndex = folderAudioFiles.size() - 1;
     else
         currentFileIndex = (currentFileIndex - 1 + folderAudioFiles.size()) % folderAudioFiles.size();
 
-    navigateToFile(currentFileIndex);
+    if (navDebounceTimer.isTimerRunning())
+    {
+        printf("[NAV] Debounced — skipping intermediate file, jumping to '%s'\n",
+               folderAudioFiles[currentFileIndex].getFileName().toRawUTF8());
+        fflush(stdout);
+    }
+    navDebounceTimer.startTimer(50);  // restart; fires once presses stop
+}
+
+void MainComponent::fireDebounceNavigation()
+{
+    // Called by NavDebounceTimer 50ms after the last Prev/Next press.
+    // currentFileIndex has already been updated to the final target by loadNext/PrevSample().
+    if (!folderAudioFiles.isEmpty() && currentFileIndex >= 0 && currentFileIndex < folderAudioFiles.size())
+        navigateToFile(currentFileIndex);
 }
 
 //==============================================================================

@@ -243,7 +243,7 @@ private:
     juce::Synthesiser sampler;
     juce::AudioFormatManager formatManager;
     juce::MidiMessageCollector midiCollector;
-    juce::ThreadPool backgroundThreads{4};  // For background tasks
+    juce::ThreadPool backgroundThreads{1};  // 1 thread — prevents stale loads finishing after newer ones
     
     //==============================================================================
     // MIDI components
@@ -375,6 +375,23 @@ private:
 
     // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
     juce::int64 navStartTimeMs = 0;
+
+    // Fix 1 — generation counter: incremented on each new navigation press.
+    // Background jobs capture their generation; stale jobs abort before doing any work.
+    std::atomic<int> navigationGeneration { 0 };
+
+    // Fix 2 — 50ms debounce: rapid presses update currentFileIndex immediately but only
+    // one load job fires after the presses stop.
+    class NavDebounceTimer : public juce::Timer
+    {
+    public:
+        NavDebounceTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.fireDebounceNavigation(); }
+    private:
+        MainComponent& owner;
+    };
+    NavDebounceTimer navDebounceTimer { *this };
+    void fireDebounceNavigation();
 
     // Called once after scanCurrentFolderForAudioFiles() completes (lazy scan on first Prev/Next).
     std::function<void()> postScanAction;
