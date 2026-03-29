@@ -4,6 +4,7 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_dsp/juce_dsp.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <memory>
@@ -164,6 +165,10 @@ private:
     void pitchStepCentsChanged(int cents) override;
     void adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs) override;
     void activeTabChanged(int tabIndex) override;
+    void eqParamsChanged(bool enabled,
+                         float f1, float g1, float q1,
+                         float f2, float g2, float q2,
+                         float f3, float g3, float q3) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -283,6 +288,62 @@ private:
     // Set true during sample-change to silence the audio thread immediately.
     // Audio thread checks this at the top of getNextAudioBlock and returns a zeroed buffer.
     std::atomic<bool>  muteOutput { false };
+
+    //==============================================================================
+    // EQ — three-band parametric biquad filters
+    // Coefficients updated atomically from message thread; read once per audio block.
+    struct EQBandCoeffs
+    {
+        std::atomic<float> b0 { 1.0f }, b1 { 0.0f }, b2 { 0.0f };
+        std::atomic<float> a1 { 0.0f }, a2 { 0.0f };
+    };
+    EQBandCoeffs        eqCoeffs[3];
+    std::atomic<bool>   eqActive   { false };
+
+    // Per-channel filter state — audio thread only, no locking needed.
+    double eqZ1[3][2] {};  // [band][channel]
+    double eqZ2[3][2] {};
+
+    // Resets filter state (called from prepareToPlay and on EQ toggle).
+    void resetEqState()
+    {
+        for (int b = 0; b < 3; ++b)
+            for (int ch = 0; ch < 2; ++ch)
+                eqZ1[b][ch] = eqZ2[b][ch] = 0.0;
+    }
+
+    // Computes peaking EQ biquad coefficients (Audio EQ Cookbook) and stores to eqCoeffs[band].
+    void computeAndStoreEqCoeffs(int band, float freqHz, float gainDb, float q, double sampleRate);
+
+    //==============================================================================
+    // FFT spectrum analyzer — lock-free double buffer
+    static constexpr int kFFTOrder  = 11;               // 2^11 = 2048
+    static constexpr int kFFTSize   = 1 << kFFTOrder;   // 2048
+    static constexpr int kSpecBins  = kFFTSize / 2;     // 1024 output bins
+
+    std::unique_ptr<juce::dsp::FFT> fft;                // initialized in prepareToPlay
+
+    // FIFO accumulates mono samples from the audio thread; when full a FFT frame is computed.
+    float   fftFifo[kFFTSize]  {};
+    int     fftFifoIndex = 0;
+
+    // Hann window applied before FFT to reduce spectral leakage.
+    float   fftWindow[kFFTSize] {};
+
+    // Scratch buffer: interleaved real/imag pairs for juce::dsp::FFT.
+    float   fftScratch[kFFTSize * 2] {};
+
+    // Double-buffered magnitude spectrum (after smoothing).
+    // Audio thread always writes to buffer[1 - specFront]; UI reads from buffer[specFront].
+    float   specBuffers[2][kSpecBins] {};
+    std::atomic<int> specFront { 0 };
+
+    // Exponential smoothing factors for spectrum display.
+    static constexpr float kSpecSmoothUp   = 0.7f;   // fast attack
+    static constexpr float kSpecSmoothDown = 0.3f;   // slower decay
+
+    // Called by EQDisplay's getSpectrumCallback — copies front buffer to dest.
+    void getSpectrumSnapshot(float* dest, int numBins);
 
     //==============================================================================
     // Sine wave generation

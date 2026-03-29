@@ -348,6 +348,17 @@ public:
         float  adsrDecayMs      = 0.0f;
         float  adsrSustain      = 1.0f;
         float  adsrReleaseMs    = 0.0f;
+        // Parametric EQ per sample (3 bands)
+        bool   eqEnabled        = false;
+        float  eq1Freq          = 100.0f;
+        float  eq1Gain          = 0.0f;
+        float  eq1Q             = 1.0f;
+        float  eq2Freq          = 500.0f;
+        float  eq2Gain          = 0.0f;
+        float  eq2Q             = 1.0f;
+        float  eq3Freq          = 8000.0f;
+        float  eq3Gain          = 0.0f;
+        float  eq3Q             = 1.0f;
     };
 
     void saveSampleState(const juce::File& file, const SampleState& s)
@@ -367,6 +378,17 @@ public:
         propertiesFile->setValue(k + "_adsrdcy",   (double)s.adsrDecayMs);
         propertiesFile->setValue(k + "_adsrsus",   (double)s.adsrSustain);
         propertiesFile->setValue(k + "_adsrrel",   (double)s.adsrReleaseMs);
+        // EQ per sample
+        propertiesFile->setValue(k + "_eqen",      s.eqEnabled);
+        propertiesFile->setValue(k + "_eq1f",      (double)s.eq1Freq);
+        propertiesFile->setValue(k + "_eq1g",      (double)s.eq1Gain);
+        propertiesFile->setValue(k + "_eq1q",      (double)s.eq1Q);
+        propertiesFile->setValue(k + "_eq2f",      (double)s.eq2Freq);
+        propertiesFile->setValue(k + "_eq2g",      (double)s.eq2Gain);
+        propertiesFile->setValue(k + "_eq2q",      (double)s.eq2Q);
+        propertiesFile->setValue(k + "_eq3f",      (double)s.eq3Freq);
+        propertiesFile->setValue(k + "_eq3g",      (double)s.eq3Gain);
+        propertiesFile->setValue(k + "_eq3q",      (double)s.eq3Q);
         propertiesFile->saveIfNeeded();
     }
 
@@ -389,6 +411,17 @@ public:
         s.adsrDecayMs         = (float)propertiesFile->getDoubleValue(k + "_adsrdcy", 0.0);
         s.adsrSustain         = (float)propertiesFile->getDoubleValue(k + "_adsrsus", 1.0);
         s.adsrReleaseMs       = (float)propertiesFile->getDoubleValue(k + "_adsrrel", 0.0);
+        // EQ per sample
+        s.eqEnabled           = propertiesFile->getBoolValue  (k + "_eqen",      false);
+        s.eq1Freq             = (float)propertiesFile->getDoubleValue(k + "_eq1f",  100.0);
+        s.eq1Gain             = (float)propertiesFile->getDoubleValue(k + "_eq1g",    0.0);
+        s.eq1Q                = (float)propertiesFile->getDoubleValue(k + "_eq1q",    1.0);
+        s.eq2Freq             = (float)propertiesFile->getDoubleValue(k + "_eq2f",  500.0);
+        s.eq2Gain             = (float)propertiesFile->getDoubleValue(k + "_eq2g",    0.0);
+        s.eq2Q                = (float)propertiesFile->getDoubleValue(k + "_eq2q",    1.0);
+        s.eq3Freq             = (float)propertiesFile->getDoubleValue(k + "_eq3f", 8000.0);
+        s.eq3Gain             = (float)propertiesFile->getDoubleValue(k + "_eq3g",    0.0);
+        s.eq3Q                = (float)propertiesFile->getDoubleValue(k + "_eq3q",    1.0);
         return s;
     }
 

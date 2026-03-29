@@ -231,6 +231,28 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
 {
     sampler.setCurrentPlaybackSampleRate(sampleRate);
     midiCollector.reset(sampleRate);
+
+    // ── FFT + EQ initialization ───────────────────────────────────────────────────
+    fft = std::make_unique<juce::dsp::FFT>(kFFTOrder);
+
+    // Precompute Hann window — reduces spectral leakage.
+    for (int i = 0; i < kFFTSize; ++i)
+        fftWindow[i] = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * i / (kFFTSize - 1)));
+
+    // Reset filter state (fresh start; no clicks from stale z1/z2)
+    resetEqState();
+    std::fill(std::begin(fftFifo), std::end(fftFifo), 0.0f);
+    fftFifoIndex = 0;
+
+    // Inform EQDisplay of the current sample rate so biquad response rendering is correct.
+    sampleCard.setEqSampleRate(sampleRate);
+
+    // Wire the lock-free spectrum data path: EQDisplay asks → MainComponent copies front buffer.
+    sampleCard.setEqSpectrumCallback([this](float* dest, int numBins) {
+        getSpectrumSnapshot(dest, numBins);
+    });
+
+    printf("[EQ] prepareToPlay: sampleRate=%.1f  fftSize=%d\n", sampleRate, kFFTSize);
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
@@ -257,6 +279,89 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     float gain = volumeGain.load();
     if (gain != 1.0f)
         bufferToFill.buffer->applyGain(gain);
+
+    // ── Parametric EQ (3 biquad bands) ───────────────────────────────────────────
+    if (eqActive.load())
+    {
+        const int numSamples  = bufferToFill.numSamples;
+        const int numChannels = bufferToFill.buffer->getNumChannels();
+
+        for (int b = 0; b < 3; ++b)
+        {
+            // Load coefficients once per block — not per sample.
+            const double b0 = (double)eqCoeffs[b].b0.load();
+            const double b1 = (double)eqCoeffs[b].b1.load();
+            const double b2 = (double)eqCoeffs[b].b2.load();
+            const double a1 = (double)eqCoeffs[b].a1.load();
+            const double a2 = (double)eqCoeffs[b].a2.load();
+
+            for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
+            {
+                float* data = bufferToFill.buffer->getWritePointer(ch);
+                double z1 = eqZ1[b][ch];
+                double z2 = eqZ2[b][ch];
+
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    const double x = (double)data[i];
+                    const double y = b0 * x + z1;
+                    z1 = b1 * x - a1 * y + z2;
+                    z2 = b2 * x - a2 * y;
+                    data[i] = (float)y;
+                }
+
+                eqZ1[b][ch] = z1;
+                eqZ2[b][ch] = z2;
+            }
+        }
+    }
+
+    // ── FFT spectrum analyzer (post-EQ) ──────────────────────────────────────────
+    if (fft != nullptr)
+    {
+        const int numSamples  = bufferToFill.numSamples;
+        const int numChannels = bufferToFill.buffer->getNumChannels();
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            // Mix to mono
+            float mono = 0.0f;
+            for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
+                mono += bufferToFill.buffer->getReadPointer(ch)[i];
+            if (numChannels > 0) mono /= (float)numChannels;
+
+            fftFifo[fftFifoIndex++] = mono;  // store raw; window applied when copying to scratch
+
+            if (fftFifoIndex >= kFFTSize)
+            {
+                fftFifoIndex = 0;
+
+                // Apply Hann window and copy to scratch
+                for (int k = 0; k < kFFTSize; ++k)
+                {
+                    fftScratch[k * 2]     = fftFifo[k] * fftWindow[k]; // real
+                    fftScratch[k * 2 + 1] = 0.0f;                       // imag
+                }
+
+                fft->performFrequencyOnlyForwardTransform(fftScratch);
+
+                // Write to back buffer with exponential smoothing
+                const int back = 1 - specFront.load();
+                for (int k = 0; k < kSpecBins; ++k)
+                {
+                    const float mag = fftScratch[k] / (float)kFFTSize;
+                    const float db  = juce::Decibels::gainToDecibels(mag, -100.0f);
+                    const float prev = specBuffers[back][k];
+                    specBuffers[back][k] = (db > prev)
+                        ? kSpecSmoothUp   * db + (1.0f - kSpecSmoothUp)   * prev
+                        : kSpecSmoothDown * db + (1.0f - kSpecSmoothDown) * prev;
+                }
+
+                // Flip front/back atomically — UI reads the new front on next timer tick.
+                specFront.store(back);
+            }
+        }
+    }
 
     if (sineWaveActive)
     {
@@ -1510,6 +1615,21 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                                          state.adsrSustain, state.adsrReleaseMs, /*notifyListeners=*/false);
                 printf("[ADSR LOAD] Applied to SampleCard  →  card reports: en=%s atk=%.0f\n",
                        sampleCard.isAdsrEnabled() ? "true" : "false", sampleCard.getAdsrAttackMs());
+
+                // Restore EQ state silently (no listener = no redundant save)
+                sampleCard.setEqParams(state.eqEnabled,
+                                       state.eq1Freq, state.eq1Gain, state.eq1Q,
+                                       state.eq2Freq, state.eq2Gain, state.eq2Q,
+                                       state.eq3Freq, state.eq3Gain, state.eq3Q,
+                                       /*notifyListeners=*/false);
+                // Apply EQ coefficients to the audio engine
+                eqActive.store(state.eqEnabled);
+                const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
+                computeAndStoreEqCoeffs(0, state.eq1Freq, state.eq1Gain, state.eq1Q, sr);
+                computeAndStoreEqCoeffs(1, state.eq2Freq, state.eq2Gain, state.eq2Q, sr);
+                computeAndStoreEqCoeffs(2, state.eq3Freq, state.eq3Gain, state.eq3Q, sr);
+                if (state.eqEnabled) resetEqState();
+
                 printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f  note=%s\n",
                        effectiveStart, effectiveEnd, effectiveVol,
                        effectiveLoop ? "ON" : "OFF",
@@ -1522,6 +1642,10 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                 sampleCard.setTransientThreshold(4.0);
                 sampleCard.setDetectedNoteName("", 0.0);
                 sampleCard.setBasePitchOffset(0);
+                // New file: reset EQ to defaults (OFF, all bands flat)
+                sampleCard.setEqParams(false, 100.0f,0.0f,1.0f, 500.0f,0.0f,1.0f, 8000.0f,0.0f,1.0f,
+                                       /*notifyListeners=*/false);
+                eqActive.store(false);
                 printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF  thresh=4.0\n");
             }
         }
@@ -1963,6 +2087,63 @@ void MainComponent::activeTabChanged(int tabIndex)
     if (configManager != nullptr)
         configManager->saveActiveTab(tabIndex);
     printf("[TAB] Active tab changed to %d\n", tabIndex);
+}
+
+//==============================================================================
+// EQ helpers
+
+void MainComponent::computeAndStoreEqCoeffs(int band, float freqHz, float gainDb, float q, double sampleRate)
+{
+    // Audio EQ Cookbook — peaking EQ biquad filter
+    const double A     = std::pow(10.0, (double)gainDb / 40.0);
+    const double w0    = juce::MathConstants<double>::twoPi * (double)freqHz / sampleRate;
+    const double sinW0 = std::sin(w0);
+    const double cosW0 = std::cos(w0);
+    const double alpha = sinW0 / (2.0 * (double)q);
+
+    const double b0 =  1.0 + alpha * A;
+    const double b1 = -2.0 * cosW0;
+    const double b2 =  1.0 - alpha * A;
+    const double a0 =  1.0 + alpha / A;
+    const double a1 = -2.0 * cosW0;
+    const double a2 =  1.0 - alpha / A;
+
+    // Normalise by a0
+    eqCoeffs[band].b0.store((float)(b0 / a0));
+    eqCoeffs[band].b1.store((float)(b1 / a0));
+    eqCoeffs[band].b2.store((float)(b2 / a0));
+    eqCoeffs[band].a1.store((float)(a1 / a0));
+    eqCoeffs[band].a2.store((float)(a2 / a0));
+}
+
+void MainComponent::getSpectrumSnapshot(float* dest, int numBins)
+{
+    const int front = specFront.load();
+    const int count = juce::jmin(numBins, kSpecBins);
+    std::memcpy(dest, specBuffers[front], sizeof(float) * count);
+    // Zero any extra bins the caller asked for beyond what we have
+    if (numBins > kSpecBins)
+        std::memset(dest + kSpecBins, 0, sizeof(float) * (numBins - kSpecBins));
+}
+
+void MainComponent::eqParamsChanged(bool enabled,
+                                     float f1, float g1, float q1,
+                                     float f2, float g2, float q2,
+                                     float f3, float g3, float q3)
+{
+    eqActive.store(enabled);
+
+    const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
+    computeAndStoreEqCoeffs(0, f1, g1, q1, sr);
+    computeAndStoreEqCoeffs(1, f2, g2, q2, sr);
+    computeAndStoreEqCoeffs(2, f3, g3, q3, sr);
+
+    // Reset filter state to avoid a transient when coefficients change.
+    if (enabled) resetEqState();
+
+    saveCurrentSampleState();
+    printf("[EQ] %s  band1=%.0fHz/%.1fdB/Q%.2f  band2=%.0fHz/%.1fdB/Q%.2f  band3=%.0fHz/%.1fdB/Q%.2f\n",
+           enabled ? "ON" : "OFF", f1, g1, q1, f2, g2, q2, f3, g3, q3);
 }
 
 void MainComponent::oneShotEnabledChanged(bool enabled)
@@ -2430,6 +2611,16 @@ void MainComponent::saveOutgoingSampleState()
     s.adsrDecayMs         = sampleCard.getAdsrDecayMs();
     s.adsrSustain         = sampleCard.getAdsrSustain();
     s.adsrReleaseMs       = sampleCard.getAdsrReleaseMs();
+    s.eqEnabled           = sampleCard.isEqEnabled();
+    s.eq1Freq             = sampleCard.getEqBandFreq(0);
+    s.eq1Gain             = sampleCard.getEqBandGain(0);
+    s.eq1Q                = sampleCard.getEqBandQ(0);
+    s.eq2Freq             = sampleCard.getEqBandFreq(1);
+    s.eq2Gain             = sampleCard.getEqBandGain(1);
+    s.eq2Q                = sampleCard.getEqBandQ(1);
+    s.eq3Freq             = sampleCard.getEqBandFreq(2);
+    s.eq3Gain             = sampleCard.getEqBandGain(2);
+    s.eq3Q                = sampleCard.getEqBandQ(2);
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
@@ -2472,6 +2663,16 @@ void MainComponent::saveCurrentSampleState()
     s.adsrDecayMs         = sampleCard.getAdsrDecayMs();
     s.adsrSustain         = sampleCard.getAdsrSustain();
     s.adsrReleaseMs       = sampleCard.getAdsrReleaseMs();
+    s.eqEnabled           = sampleCard.isEqEnabled();
+    s.eq1Freq             = sampleCard.getEqBandFreq(0);
+    s.eq1Gain             = sampleCard.getEqBandGain(0);
+    s.eq1Q                = sampleCard.getEqBandQ(0);
+    s.eq2Freq             = sampleCard.getEqBandFreq(1);
+    s.eq2Gain             = sampleCard.getEqBandGain(1);
+    s.eq2Q                = sampleCard.getEqBandQ(1);
+    s.eq3Freq             = sampleCard.getEqBandFreq(2);
+    s.eq3Gain             = sampleCard.getEqBandGain(2);
+    s.eq3Q                = sampleCard.getEqBandQ(2);
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);

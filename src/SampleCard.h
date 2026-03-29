@@ -8,6 +8,9 @@
 #include <vector>
 #include "KnobLookAndFeel.h"
 
+// Forward declaration — EQDisplay is defined after WaveformViewport, before SampleCard.
+class EQDisplay;
+
 // Custom Viewport subclass that exposes visibleAreaChanged so SampleCard can
 // track the horizontal scroll position for the zoom indicator.
 class WaveformViewport : public juce::Viewport
@@ -21,6 +24,413 @@ public:
             onScrollChanged(newVisibleArea.getX());
     }
 };
+
+// ===========================================================================
+// EQDisplay — parametric EQ display with real-time spectrum overlay.
+// Drawn inside the EQ tab of SampleCard.
+// Spectrum data is pushed from the audio thread via getSpectrumCallback.
+// Band dragging fires onBandChanged; scroll-wheel adjusts Q factor.
+// ===========================================================================
+class EQDisplay : public juce::Component, public juce::Timer
+{
+public:
+    struct Band
+    {
+        float freq   = 500.0f;  // Hz
+        float gainDb = 0.0f;    // -12..+12
+        float q      = 1.0f;    // 0.5..10
+    };
+
+    // Wire from MainComponent — fills dest[0..numBins-1] with dB magnitudes.
+    std::function<void(float* dest, int numBins)> getSpectrumCallback;
+
+    // Fired on every drag / scroll so MainComponent can update filter coefficients.
+    std::function<void(int bandIdx, float freq, float gainDb, float q)> onBandChanged;
+
+    EQDisplay()
+    {
+        bands[0] = { 100.0f,  0.0f, 1.0f };
+        bands[1] = { 500.0f,  0.0f, 1.0f };
+        bands[2] = { 8000.0f, 0.0f, 1.0f };
+        std::fill(spectrumData, spectrumData + kSpecBins, -120.0f);
+    }
+
+    ~EQDisplay() override { stopTimer(); }
+
+    void setEqEnabled(bool e)  { eqEnabled = e;  repaint(); }
+    void setSampleRate(double sr) { sampleRate = juce::jmax(sr, 1.0); }
+
+    void setBands(const Band newBands[3])
+    {
+        for (int i = 0; i < 3; ++i) bands[i] = newBands[i];
+        repaint();
+    }
+    void setBand(int i, const Band& b)
+    {
+        if (i >= 0 && i < 3) { bands[i] = b; repaint(); }
+    }
+    const Band* getBands() const { return bands; }
+
+    void startAnimation() { startTimerHz(30); }
+    void stopAnimation()  { stopTimer(); }
+
+    // Timer callback — fetch new spectrum and repaint.
+    void timerCallback() override
+    {
+        if (getSpectrumCallback)
+        {
+            getSpectrumCallback(spectrumData, kSpecBins);
+            repaint();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    void paint(juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds();
+        g.fillAll(juce::Colour(0xFF0D0D0D));
+        drawGrid(g, bounds);
+        if (getSpectrumCallback) drawSpectrum(g, bounds);
+        drawEQCurve(g, bounds);
+        drawControlPoints(g, bounds);
+        if (draggingBand >= 0) drawTooltip(g, bounds);
+        g.setColour(juce::Colour(0xFF333333));
+        g.drawRect(bounds, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (e.getNumberOfClicks() > 1) return;
+        draggingBand = findNearestBand(e.x, e.y);
+        if (draggingBand >= 0)
+        {
+            dragStartX      = (float)e.x;
+            dragStartY      = (float)e.y;
+            dragStartFreq   = bands[draggingBand].freq;
+            dragStartGainDb = bands[draggingBand].gainDb;
+        }
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        if (draggingBand < 0) return;
+        const float w = (float)getWidth();
+        const float h = (float)getHeight();
+        float newFreq   = xToFreq((float)e.x, w);
+        float newGainDb = yToGain((float)e.y, h);
+
+        // Per-band frequency range
+        float minF, maxF;
+        switch (draggingBand)
+        {
+            case 0: minF =  20.0f; maxF =   500.0f; break;
+            case 1: minF = 200.0f; maxF =  5000.0f; break;
+            case 2: minF =1000.0f; maxF = 20000.0f; break;
+            default:minF =  20.0f; maxF = 20000.0f;
+        }
+        bands[draggingBand].freq   = juce::jlimit(minF, maxF, newFreq);
+        bands[draggingBand].gainDb = juce::jlimit(-12.0f, 12.0f, newGainDb);
+
+        if (onBandChanged)
+            onBandChanged(draggingBand, bands[draggingBand].freq,
+                          bands[draggingBand].gainDb, bands[draggingBand].q);
+        repaint();
+    }
+
+    void mouseUp(const juce::MouseEvent&) override { draggingBand = -1; repaint(); }
+
+    void mouseWheelMove(const juce::MouseEvent& e,
+                        const juce::MouseWheelDetails& d) override
+    {
+        int band = findNearestBand(e.x, e.y);
+        if (band < 0) return;
+        float factor = d.deltaY > 0 ? 1.15f : (1.0f / 1.15f);
+        bands[band].q = juce::jlimit(0.5f, 10.0f, bands[band].q * factor);
+        if (onBandChanged)
+            onBandChanged(band, bands[band].freq, bands[band].gainDb, bands[band].q);
+        repaint();
+    }
+
+private:
+    // -----------------------------------------------------------------------
+    static constexpr int   kSpecBins = 1024;
+    static constexpr float kMinHz    = 20.0f;
+    static constexpr float kMaxHz    = 20000.0f;
+    static constexpr float kEqMinDb  = -12.0f;
+    static constexpr float kEqMaxDb  = +12.0f;
+
+    Band   bands[3];
+    float  spectrumData[kSpecBins];
+    double sampleRate    = 44100.0;
+    bool   eqEnabled     = false;
+    int    draggingBand  = -1;
+    float  dragStartX    = 0.0f;
+    float  dragStartY    = 0.0f;
+    float  dragStartFreq   = 500.0f;
+    float  dragStartGainDb = 0.0f;
+
+    // -----------------------------------------------------------------------
+    // Log-frequency ↔ pixel x  (20 Hz … 20 kHz, full width)
+    float freqToX(float freq, float width) const
+    {
+        return width * std::log10(freq / kMinHz) / std::log10(kMaxHz / kMinHz);
+    }
+    float xToFreq(float x, float width) const
+    {
+        float t = juce::jlimit(0.0f, 1.0f, x / juce::jmax(width, 1.0f));
+        return kMinHz * std::pow(kMaxHz / kMinHz, t);
+    }
+    // dB gain ↔ pixel y  (+12 dB at top, -12 dB at bottom)
+    float gainToY(float db, float height) const
+    {
+        float t = 1.0f - (db - kEqMinDb) / (kEqMaxDb - kEqMinDb);
+        return height * t;
+    }
+    float yToGain(float y, float height) const
+    {
+        float t = 1.0f - y / juce::jmax(height, 1.0f);
+        return kEqMinDb + t * (kEqMaxDb - kEqMinDb);
+    }
+
+    // Nearest control point within hit radius
+    int findNearestBand(int mx, int my) const
+    {
+        const float w = (float)getWidth(), h = (float)getHeight();
+        const float kHitRadius = 18.0f;
+        int   best = -1;
+        float bestDist = kHitRadius;
+        for (int i = 0; i < 3; ++i)
+        {
+            float cx = freqToX(bands[i].freq, w);
+            float cy = gainToY(bands[i].gainDb, h);
+            float d  = std::sqrt((mx - cx) * (mx - cx) + (my - cy) * (my - cy));
+            if (d < bestDist) { bestDist = d; best = i; }
+        }
+        return best;
+    }
+
+    // -----------------------------------------------------------------------
+    // Biquad peaking EQ (Audio EQ Cookbook)
+    struct BiqCoeffs { double b0, b1, b2, a1, a2; };
+
+    BiqCoeffs computePeaking(float freq, float gainDb, float q) const
+    {
+        if (std::abs(gainDb) < 0.001f) return { 1, 0, 0, 0, 0 };
+        double A    = std::pow(10.0, gainDb / 40.0);
+        double w0   = 2.0 * juce::MathConstants<double>::pi * freq / sampleRate;
+        double al   = std::sin(w0) / (2.0 * q);
+        double cw   = std::cos(w0);
+        double a0   = 1.0 + al / A;
+        return { (1.0 + al * A) / a0,
+                 (-2.0 * cw)    / a0,
+                 (1.0 - al * A) / a0,
+                 (-2.0 * cw)    / a0,
+                 (1.0 - al / A) / a0 };
+    }
+
+    // Magnitude response of one biquad in dB at testFreq
+    double filterResponseDb(const BiqCoeffs& c, double testFreq) const
+    {
+        double w   = 2.0 * juce::MathConstants<double>::pi * testFreq / sampleRate;
+        double cw  = std::cos(w),  sw  = std::sin(w);
+        double c2w = std::cos(2.0 * w), s2w = std::sin(2.0 * w);
+        double nr = c.b0 + c.b1 * cw  + c.b2 * c2w;
+        double ni =        c.b1 * (-sw) + c.b2 * (-s2w);
+        double dr = 1.0  + c.a1 * cw  + c.a2 * c2w;
+        double di =        c.a1 * (-sw) + c.a2 * (-s2w);
+        double mag2 = (nr * nr + ni * ni) / juce::jmax(dr * dr + di * di, 1e-30);
+        return 20.0 * std::log10(std::sqrt(juce::jmax(mag2, 1e-30)));
+    }
+
+    // -----------------------------------------------------------------------
+    void drawGrid(juce::Graphics& g, juce::Rectangle<int> b) const
+    {
+        const float w = (float)b.getWidth();
+        const float h = (float)b.getHeight();
+
+        g.setColour(juce::Colour(0xFF222222));
+
+        // Vertical frequency lines
+        const float vFreqs[] = { 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 };
+        for (float f : vFreqs)
+            g.drawVerticalLine((int)(b.getX() + freqToX(f, w)), (float)b.getY(), (float)b.getBottom());
+
+        // Horizontal dB lines
+        const float dbLines[] = { -12.0f, -6.0f, 0.0f, 6.0f, 12.0f };
+        for (float db : dbLines)
+        {
+            int y = b.getY() + (int)gainToY(db, h);
+            if (db == 0.0f) g.setColour(juce::Colour(0xFF444444));
+            else            g.setColour(juce::Colour(0xFF222222));
+            g.drawHorizontalLine(y, (float)b.getX(), (float)b.getRight());
+        }
+
+        // Frequency labels (bottom)
+        g.setColour(juce::Colour(0xFF666666));
+        g.setFont(9.0f);
+        const float labelFs[]    = { 100.0f, 1000.0f, 10000.0f };
+        const char* labelTexts[] = { "100",  "1k",    "10k" };
+        for (int i = 0; i < 3; ++i)
+        {
+            int x = b.getX() + (int)freqToX(labelFs[i], w);
+            g.drawText(labelTexts[i], x - 12, b.getBottom() - 12, 24, 11,
+                       juce::Justification::centred);
+        }
+
+        // dB labels (left)
+        const char* dbTexts[] = { "+12", "+6", "0", "-6", "-12" };
+        for (int i = 0; i < 5; ++i)
+        {
+            int y = b.getY() + (int)gainToY(dbLines[i], h);
+            g.drawText(dbTexts[i], b.getX() + 1, y - 5, 22, 11, juce::Justification::left);
+        }
+    }
+
+    void drawSpectrum(juce::Graphics& g, juce::Rectangle<int> b) const
+    {
+        const float w = (float)b.getWidth();
+        const float h = (float)b.getHeight();
+        juce::Path fill, stroke;
+        bool started = false;
+
+        for (int px = 0; px < (int)w; ++px)
+        {
+            float freq = xToFreq((float)px, w);
+            float nyq  = (float)(sampleRate * 0.5);
+            float binf = freq / nyq * (float)(kSpecBins - 1);
+            binf = juce::jlimit(0.0f, (float)(kSpecBins - 1), binf);
+            int   b0 = (int)binf, b1 = juce::jmin(b0 + 1, kSpecBins - 1);
+            float fr  = binf - (float)b0;
+            float db  = spectrumData[b0] * (1.0f - fr) + spectrumData[b1] * fr;
+            db = juce::jlimit(-80.0f, 6.0f, db);
+            // Map dB to y: 0 dB → top, -80 dB → bottom
+            float norm = (db + 80.0f) / 86.0f;
+            float y    = (float)(b.getBottom()) - norm * h;
+
+            float fx = (float)(b.getX() + px);
+            if (!started)
+            {
+                fill.startNewSubPath(fx, (float)b.getBottom());
+                fill.lineTo(fx, y);
+                stroke.startNewSubPath(fx, y);
+                started = true;
+            }
+            else
+            {
+                fill.lineTo(fx, y);
+                stroke.lineTo(fx, y);
+            }
+        }
+
+        if (started)
+        {
+            fill.lineTo((float)b.getRight(), (float)b.getBottom());
+            fill.closeSubPath();
+            g.setColour(juce::Colour(0x99B4142A));
+            g.fillPath(fill);
+            g.setColour(juce::Colour(0xFFFF2244));
+            g.strokePath(stroke, juce::PathStrokeType(1.5f));
+        }
+    }
+
+    void drawEQCurve(juce::Graphics& g, juce::Rectangle<int> b) const
+    {
+        const float w = (float)b.getWidth();
+        const float h = (float)b.getHeight();
+
+        BiqCoeffs c[3];
+        for (int i = 0; i < 3; ++i)
+            c[i] = computePeaking(bands[i].freq, bands[i].gainDb, bands[i].q);
+
+        juce::Path curve;
+        bool started = false;
+
+        for (int px = 0; px < (int)w; px += 2)
+        {
+            float freq = xToFreq((float)px, w);
+            if (freq < kMinHz || freq > kMaxHz) continue;
+
+            double totalDb = 0.0;
+            for (int i = 0; i < 3; ++i)
+                totalDb += filterResponseDb(c[i], (double)freq);
+
+            float y = (float)(b.getY()) + gainToY((float)juce::jlimit(-13.0, 13.0, totalDb), h);
+            float fx = (float)(b.getX() + px);
+
+            if (!started) { curve.startNewSubPath(fx, y); started = true; }
+            else          { curve.lineTo(fx, y); }
+        }
+
+        if (started)
+        {
+            juce::Colour curveCol = eqEnabled ? juce::Colour(0xFFFF4466)
+                                              : juce::Colour(0xFF885566);
+            g.setColour(curveCol);
+            g.strokePath(curve, juce::PathStrokeType(2.0f));
+        }
+    }
+
+    void drawControlPoints(juce::Graphics& g, juce::Rectangle<int> b) const
+    {
+        const float w = (float)b.getWidth();
+        const float h = (float)b.getHeight();
+        const float r = 8.0f;
+
+        for (int i = 0; i < 3; ++i)
+        {
+            float cx = (float)b.getX() + freqToX(bands[i].freq, w);
+            float cy = (float)b.getY() + gainToY(bands[i].gainDb, h);
+
+            // Shadow
+            g.setColour(juce::Colour(0x88000000));
+            g.fillEllipse(cx - r - 1.0f, cy - r - 1.0f, (r + 1.0f) * 2.0f, (r + 1.0f) * 2.0f);
+
+            // Body
+            bool active = (i == draggingBand);
+            juce::Colour col = active ? juce::Colour(0xFF44E8FF) : juce::Colour(0xFF00CFFF);
+            g.setColour(col);
+            g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+
+            // Band number
+            g.setColour(juce::Colour(0xFF000000));
+            g.setFont(9.0f);
+            g.drawText(juce::String(i + 1),
+                       (int)(cx - 4), (int)(cy - 5), 9, 10,
+                       juce::Justification::centred);
+        }
+    }
+
+    void drawTooltip(juce::Graphics& g, juce::Rectangle<int> b) const
+    {
+        if (draggingBand < 0) return;
+        const float w = (float)b.getWidth(), h = (float)b.getHeight();
+        float cx = (float)b.getX() + freqToX(bands[draggingBand].freq, w);
+        float cy = (float)b.getY() + gainToY(bands[draggingBand].gainDb, h);
+
+        const float f = bands[draggingBand].freq;
+        juce::String freqStr = f >= 1000.0f
+            ? juce::String(f / 1000.0f, 1) + "kHz"
+            : juce::String((int)f) + "Hz";
+        juce::String gainStr = (bands[draggingBand].gainDb >= 0 ? "+" : "")
+                             + juce::String(bands[draggingBand].gainDb, 1) + "dB";
+        juce::String text = freqStr + " / " + gainStr;
+
+        float tx = cx + 10.0f;
+        float ty = cy - 18.0f;
+        if (tx + 84.0f > (float)b.getRight())  tx = cx - 94.0f;
+        if (ty < (float)b.getY())              ty = cy + 5.0f;
+
+        g.setColour(juce::Colour(0xDD000000));
+        g.fillRoundedRectangle(tx - 2.0f, ty - 2.0f, 86.0f, 16.0f, 3.0f);
+        g.setColour(juce::Colour(0xFFCECECE));
+        g.setFont(10.0f);
+        g.drawText(text, (int)tx, (int)ty, 84, 12, juce::Justification::left);
+    }
+};
+
+
+// ===========================================================================
 
 class SampleCard : public juce::Component
 {
@@ -657,6 +1067,38 @@ public:
         durationLabel.setFont(juce::Font(11.0f, juce::Font::bold));  // Matches other indicators
         durationLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
         addAndMakeVisible(durationLabel);
+
+        // ===== EQ CONTROLS =====
+        eqEnableButton.setClickingTogglesState(true);
+        eqEnableButton.setToggleState(false, juce::dontSendNotification);
+        eqEnableButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+        eqEnableButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFF00CFFF)); // ice-blue ON
+        eqEnableButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+        eqEnableButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+        eqEnableButton.setTooltip("Enable / bypass the 3-band parametric EQ");
+        eqEnableButton.onClick = [this]
+        {
+            eqEnabled = eqEnableButton.getToggleState();
+            if (eqDisplay != nullptr) eqDisplay->setEqEnabled(eqEnabled);
+            fireEqParamsChanged();
+        };
+        addAndMakeVisible(eqEnableButton);
+        eqEnableButton.setVisible(false);
+
+        // EQ Display — spectrum + curve + draggable bands
+        eqDisplay = std::make_unique<EQDisplay>();
+        eqDisplay->setSampleRate(44100.0);
+        eqDisplay->setBands(eqBands);
+        eqDisplay->onBandChanged = [this](int idx, float freq, float gainDb, float q)
+        {
+            eqBands[idx].freq   = freq;
+            eqBands[idx].gainDb = gainDb;
+            eqBands[idx].q      = q;
+            eqDisplay->setBand(idx, eqBands[idx]);
+            fireEqParamsChanged();
+        };
+        addAndMakeVisible(*eqDisplay);
+        eqDisplay->setVisible(false);
 
         // 60fps playhead animation timer — cheap when idle (position stays at -1, no repaint)
         playheadTimer.startTimer(16);
@@ -1530,6 +1972,10 @@ public:
         virtual void pitchStepCentsChanged(int cents) = 0;
         virtual void adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs) = 0;
         virtual void activeTabChanged(int tabIndex) = 0;
+        virtual void eqParamsChanged(bool enabled,
+                                     float f1, float g1, float q1,
+                                     float f2, float g2, float q2,
+                                     float f3, float g3, float q3) = 0;
     };
     
     void addListener(Listener* listener)
@@ -3179,6 +3625,14 @@ void adjustPitchUp()
     juce::Label      adsrAtkLabel, adsrDcyLabel, adsrSusLabel, adsrRelLabel;
     juce::Label      adsrAtkValueLabel, adsrDcyValueLabel, adsrSusValueLabel, adsrRelValueLabel;
 
+    // ===== EQ CONTROLS =====
+    bool eqEnabled = false;
+    EQDisplay::Band eqBands[3] = { {100.0f, 0.0f, 1.0f},
+                                   {500.0f, 0.0f, 1.0f},
+                                   {8000.0f,0.0f, 1.0f} };
+    juce::TextButton          eqEnableButton { "EQ" };
+    std::unique_ptr<EQDisplay> eqDisplay;
+
     //==============================================================================
     // Transient detection enable/disable
 
@@ -3336,7 +3790,15 @@ private:
             c->setVisible(showAdsr);
 
         // EQ tab
-        eqPlaceholderLabel.setVisible(activeTab == 2);
+        eqPlaceholderLabel.setVisible(false);  // replaced by eqDisplay
+        const bool showEq = (activeTab == 2);
+        eqEnableButton.setVisible(showEq);
+        if (eqDisplay != nullptr)
+        {
+            eqDisplay->setVisible(showEq);
+            if (showEq)  eqDisplay->startAnimation();
+            else         eqDisplay->stopAnimation();
+        }
     }
 
     void layoutAdsrTabContent(juce::Rectangle<int>& area)
@@ -3369,9 +3831,20 @@ private:
 
     void layoutEqTabContent(juce::Rectangle<int>& area)
     {
-        // Same height as Controls tab (44+5+60=109px)
-        eqPlaceholderLabel.setBounds(area.removeFromTop(109));
-        area.removeFromTop(5);
+        // Row A (30px): EQ enable button
+        {
+            auto rowA = area.removeFromTop(30);
+            eqEnableButton.setBounds(rowA.removeFromLeft(80).withSizeKeepingCentre(74, 28));
+        }
+        area.removeFromTop(5); // gap
+
+        // Row B (74px): EQDisplay fills full width
+        if (eqDisplay != nullptr)
+            eqDisplay->setBounds(area.removeFromTop(74).reduced(2, 0));
+        else
+            area.removeFromTop(74);
+
+        area.removeFromTop(5); // trailing gap — keeps same total height as Controls tab (114px)
     }
 
     //==============================================================================
@@ -3448,6 +3921,44 @@ public:
     float getAdsrReleaseMs() const { return adsrReleaseMs; }
     int   getActiveTabIndex() const { return activeTab; }
 
+    // ===== EQ public API =====
+    bool  isEqEnabled()           const { return eqEnabled; }
+    float getEqBandFreq(int i)    const { return (i>=0&&i<3) ? eqBands[i].freq   : 500.0f; }
+    float getEqBandGain(int i)    const { return (i>=0&&i<3) ? eqBands[i].gainDb : 0.0f;   }
+    float getEqBandQ(int i)       const { return (i>=0&&i<3) ? eqBands[i].q      : 1.0f;   }
+
+    // Set EQ sample rate so the frequency-response curve is accurate.
+    void setEqSampleRate(double sr)
+    {
+        if (eqDisplay != nullptr) eqDisplay->setSampleRate(sr);
+    }
+
+    // Wire the spectrum data callback from MainComponent → EQDisplay.
+    void setEqSpectrumCallback(std::function<void(float*, int)> cb)
+    {
+        if (eqDisplay != nullptr) eqDisplay->getSpectrumCallback = cb;
+    }
+
+    // Quietly restore EQ state (no listener fired) — used by per-sample load.
+    void setEqParams(bool enabled,
+                     float f1, float g1, float q1,
+                     float f2, float g2, float q2,
+                     float f3, float g3, float q3,
+                     bool notifyListeners = true)
+    {
+        eqEnabled  = enabled;
+        eqBands[0] = { f1, g1, q1 };
+        eqBands[1] = { f2, g2, q2 };
+        eqBands[2] = { f3, g3, q3 };
+        eqEnableButton.setToggleState(enabled, juce::dontSendNotification);
+        if (eqDisplay != nullptr)
+        {
+            eqDisplay->setEqEnabled(enabled);
+            eqDisplay->setBands(eqBands);
+        }
+        if (notifyListeners) fireEqParamsChanged();
+    }
+
 private:
     //==============================================================================
     // One-shot pulse animation (called by OneShotPulseTimer when tail is playing)
@@ -3460,6 +3971,19 @@ private:
                          : juce::Colour(0xFF886000);  // dim amber
         oneShotButton.setColour(juce::TextButton::buttonOnColourId, c);
         oneShotButton.repaint();
+    }
+
+    //==============================================================================
+    // EQ helpers
+
+    void fireEqParamsChanged()
+    {
+        listeners.call([this](Listener& l) {
+            l.eqParamsChanged(eqEnabled,
+                              eqBands[0].freq, eqBands[0].gainDb, eqBands[0].q,
+                              eqBands[1].freq, eqBands[1].gainDb, eqBands[1].q,
+                              eqBands[2].freq, eqBands[2].gainDb, eqBands[2].q);
+        });
     }
 
     //==============================================================================

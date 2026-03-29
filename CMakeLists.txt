@@ -36,6 +36,7 @@ target_link_libraries(MySampler
         juce::juce_audio_devices
         juce::juce_audio_formats
         juce::juce_audio_utils
+        juce::juce_dsp
         juce::juce_gui_basics
         juce::juce_gui_extra
 )
