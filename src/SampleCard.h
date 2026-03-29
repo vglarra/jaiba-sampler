@@ -47,6 +47,30 @@ public:
     // Fired on every drag / scroll so MainComponent can update filter coefficients.
     std::function<void(int bandIdx, float freq, float gainDb, float q)> onBandChanged;
 
+    // Fired when the user clicks a control point, making it the active band.
+    std::function<void(int bandIdx)> onActiveBandChanged;
+
+    // Filter mode per band: 0=LowCut, 1=LowShelf, 2=Bell, 3=Notch, 4=HighShelf, 5=HighCut
+    void setFilterMode(int bandIdx, int mode)
+    {
+        if (bandIdx >= 0 && bandIdx < 3) { filterModes[bandIdx] = mode; repaint(); }
+    }
+    int getFilterMode(int bandIdx) const
+    {
+        return (bandIdx >= 0 && bandIdx < 3) ? filterModes[bandIdx] : 2;
+    }
+
+    // Active band — the last band the user clicked (shows which band the filter mode button controls)
+    void setActiveBand(int band) { activeBand = band; repaint(); }
+    int  getActiveBand() const   { return activeBand; }
+
+    // Returns the human-readable name for a filter mode index (0-5).
+    static const char* filterModeName(int mode)
+    {
+        static const char* names[] = { "Low Cut", "Low Shelf", "Bell", "Notch", "High Shelf", "High Cut" };
+        return (mode >= 0 && mode < 6) ? names[mode] : "Bell";
+    }
+
     EQDisplay()
     {
         bands[0] = { 100.0f,  0.0f, 1.0f };
@@ -105,6 +129,10 @@ public:
         draggingBand = findNearestBand(e.x, e.y);
         if (draggingBand >= 0)
         {
+            // Set active band and notify SampleCard so the filter mode button can update.
+            activeBand = draggingBand;
+            if (onActiveBandChanged) onActiveBandChanged(activeBand);
+
             dragStartX      = (float)e.x;
             dragStartY      = (float)e.y;
             dragStartFreq   = bands[draggingBand].freq;
@@ -165,6 +193,8 @@ private:
     double sampleRate    = 44100.0;
     bool   eqEnabled     = false;
     int    draggingBand  = -1;
+    int    activeBand    = -1;  // last band clicked — filter mode button applies to this
+    int    filterModes[3] = { 2, 2, 2 };  // per-band: 0=LowCut 1=LowShelf 2=Bell 3=Notch 4=HighShelf 5=HighCut
     float  dragStartX    = 0.0f;
     float  dragStartY    = 0.0f;
     float  dragStartFreq   = 500.0f;
@@ -227,6 +257,78 @@ private:
                  (1.0 - al * A) / a0,
                  (-2.0 * cw)    / a0,
                  (1.0 - al / A) / a0 };
+    }
+
+    // Compute biquad coefficients for any of the 6 filter types using Audio EQ Cookbook formulas.
+    BiqCoeffs computeCoeffsForMode(float freq, float gainDb, float q, int mode) const
+    {
+        const double w0    = juce::MathConstants<double>::twoPi * (double)freq / sampleRate;
+        const double sw    = std::sin(w0);
+        const double cw    = std::cos(w0);
+        const double alpha = sw / (2.0 * (double)juce::jmax(q, 0.01f));
+
+        switch (mode)
+        {
+            case 0: // Low Cut — 2nd order highpass
+            {
+                const double a0 = 1.0 + alpha;
+                return { ((1.0 + cw) / 2.0) / a0,
+                         (-(1.0 + cw))      / a0,
+                         ((1.0 + cw) / 2.0) / a0,
+                         (-2.0 * cw)        / a0,
+                         (1.0 - alpha)      / a0 };
+            }
+            case 1: // Low Shelf
+            {
+                const double A   = std::pow(10.0, gainDb / 40.0);
+                const double sqA = std::sqrt(juce::jmax(A, 0.0001));
+                const double arg = (A + 1.0 / A) * (1.0 / (double)juce::jmax(q, 0.01f) - 1.0) + 2.0;
+                const double al  = sw / 2.0 * std::sqrt(juce::jmax(arg, 0.0));
+                const double a0  = (A + 1.0) + (A - 1.0) * cw + 2.0 * sqA * al;
+                if (std::abs(a0) < 1e-30) return { 1, 0, 0, 0, 0 };
+                return { A * ((A + 1.0) - (A - 1.0) * cw + 2.0 * sqA * al) / a0,
+                         2.0 * A * ((A - 1.0) - (A + 1.0) * cw)            / a0,
+                         A * ((A + 1.0) - (A - 1.0) * cw - 2.0 * sqA * al) / a0,
+                         -2.0 * ((A - 1.0) + (A + 1.0) * cw)               / a0,
+                         ((A + 1.0) + (A - 1.0) * cw - 2.0 * sqA * al)    / a0 };
+            }
+            case 2: // Bell (peaking EQ) — existing formula
+                return computePeaking(freq, gainDb, q);
+            case 3: // Notch
+            {
+                const double a0 = 1.0 + alpha;
+                return { 1.0          / a0,
+                         (-2.0 * cw) / a0,
+                         1.0          / a0,
+                         (-2.0 * cw) / a0,
+                         (1.0 - alpha)/ a0 };
+            }
+            case 4: // High Shelf
+            {
+                const double A   = std::pow(10.0, gainDb / 40.0);
+                const double sqA = std::sqrt(juce::jmax(A, 0.0001));
+                const double arg = (A + 1.0 / A) * (1.0 / (double)juce::jmax(q, 0.01f) - 1.0) + 2.0;
+                const double al  = sw / 2.0 * std::sqrt(juce::jmax(arg, 0.0));
+                const double a0  = (A + 1.0) - (A - 1.0) * cw + 2.0 * sqA * al;
+                if (std::abs(a0) < 1e-30) return { 1, 0, 0, 0, 0 };
+                return { A * ((A + 1.0) + (A - 1.0) * cw + 2.0 * sqA * al)  / a0,
+                         -2.0 * A * ((A - 1.0) + (A + 1.0) * cw)            / a0,
+                         A * ((A + 1.0) + (A - 1.0) * cw - 2.0 * sqA * al) / a0,
+                         2.0 * ((A - 1.0) - (A + 1.0) * cw)                 / a0,
+                         ((A + 1.0) - (A - 1.0) * cw - 2.0 * sqA * al)     / a0 };
+            }
+            case 5: // High Cut — 2nd order lowpass
+            {
+                const double a0 = 1.0 + alpha;
+                return { ((1.0 - cw) / 2.0) / a0,
+                         (1.0 - cw)          / a0,
+                         ((1.0 - cw) / 2.0) / a0,
+                         (-2.0 * cw)         / a0,
+                         (1.0 - alpha)       / a0 };
+            }
+            default:
+                return computePeaking(freq, gainDb, q);
+        }
     }
 
     // Magnitude response of one biquad in dB at testFreq
@@ -348,7 +450,7 @@ private:
 
         BiqCoeffs c[3];
         for (int i = 0; i < 3; ++i)
-            c[i] = computePeaking(bands[i].freq, bands[i].gainDb, bands[i].q);
+            c[i] = computeCoeffsForMode(bands[i].freq, bands[i].gainDb, bands[i].q, filterModes[i]);
 
         juce::Path curve;
         bool started = false;
@@ -382,22 +484,31 @@ private:
     {
         const float w = (float)b.getWidth();
         const float h = (float)b.getHeight();
-        const float r = 8.0f;
 
         for (int i = 0; i < 3; ++i)
         {
             float cx = (float)b.getX() + freqToX(bands[i].freq, w);
             float cy = (float)b.getY() + gainToY(bands[i].gainDb, h);
 
+            const bool isActive   = (i == activeBand);
+            const bool isDragging = (i == draggingBand);
+            const float r = isActive ? 10.0f : 8.0f;
+
             // Shadow
             g.setColour(juce::Colour(0x88000000));
             g.fillEllipse(cx - r - 1.0f, cy - r - 1.0f, (r + 1.0f) * 2.0f, (r + 1.0f) * 2.0f);
 
             // Body
-            bool active = (i == draggingBand);
-            juce::Colour col = active ? juce::Colour(0xFF44E8FF) : juce::Colour(0xFF00CFFF);
+            juce::Colour col = isDragging ? juce::Colour(0xFF44E8FF) : juce::Colour(0xFF00CFFF);
             g.setColour(col);
             g.fillEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+
+            // Active band ring — bright white outline to show which band filter mode applies to
+            if (isActive && !isDragging)
+            {
+                g.setColour(juce::Colour(0xCCFFFFFF));
+                g.drawEllipse(cx - r - 1.5f, cy - r - 1.5f, (r + 1.5f) * 2.0f, (r + 1.5f) * 2.0f, 1.5f);
+            }
 
             // Band number
             g.setColour(juce::Colour(0xFF000000));
@@ -421,18 +532,19 @@ private:
             : juce::String((int)f) + "Hz";
         juce::String gainStr = (bands[draggingBand].gainDb >= 0 ? "+" : "")
                              + juce::String(bands[draggingBand].gainDb, 1) + "dB";
-        juce::String text = freqStr + " / " + gainStr;
+        juce::String modeStr = filterModeName(filterModes[draggingBand]);
+        juce::String text = freqStr + " / " + gainStr + " [" + modeStr + "]";
 
         float tx = cx + 10.0f;
         float ty = cy - 18.0f;
-        if (tx + 84.0f > (float)b.getRight())  tx = cx - 94.0f;
-        if (ty < (float)b.getY())              ty = cy + 5.0f;
+        if (tx + 130.0f > (float)b.getRight())  tx = cx - 140.0f;
+        if (ty < (float)b.getY())               ty = cy + 5.0f;
 
         g.setColour(juce::Colour(0xDD000000));
-        g.fillRoundedRectangle(tx - 2.0f, ty - 2.0f, 86.0f, 16.0f, 3.0f);
+        g.fillRoundedRectangle(tx - 2.0f, ty - 2.0f, 132.0f, 16.0f, 3.0f);
         g.setColour(juce::Colour(0xFFCECECE));
         g.setFont(10.0f);
-        g.drawText(text, (int)tx, (int)ty, 84, 12, juce::Justification::left);
+        g.drawText(text, (int)tx, (int)ty, 130, 12, juce::Justification::left);
     }
 };
 
@@ -1104,8 +1216,37 @@ public:
             eqDisplay->setBand(idx, eqBands[idx]);
             fireEqParamsChanged();
         };
+
+        // Update the filter mode button text when the user clicks a different band.
+        eqDisplay->onActiveBandChanged = [this](int bandIdx)
+        {
+            if (bandIdx >= 0 && bandIdx < 3)
+                filterModeButton.setButtonText(EQDisplay::filterModeName(eqFilterModes[bandIdx]));
+        };
+
         addAndMakeVisible(*eqDisplay);
         eqDisplay->setVisible(false);
+
+        // Filter mode selector — cycles through 6 filter types for the active EQ band
+        filterModeButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF333355));
+        filterModeButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        filterModeButton.onClick = [this]
+        {
+            const int band = (eqDisplay != nullptr) ? eqDisplay->getActiveBand() : -1;
+            if (band < 0) return;  // no band selected yet
+
+            // Cycle mode: 0 LowCut → 1 LowShelf → 2 Bell → 3 Notch → 4 HighShelf → 5 HighCut → 0
+            eqFilterModes[band] = (eqFilterModes[band] + 1) % 6;
+            eqDisplay->setFilterMode(band, eqFilterModes[band]);
+            filterModeButton.setButtonText(EQDisplay::filterModeName(eqFilterModes[band]));
+
+            // Notify listeners so MainComponent recomputes audio coefficients and saves state.
+            listeners.call([this](Listener& l) {
+                l.eqFilterModesChanged(eqFilterModes[0], eqFilterModes[1], eqFilterModes[2]);
+            });
+        };
+        addAndMakeVisible(filterModeButton);
+        filterModeButton.setVisible(false);
 
         // 60fps playhead animation timer — cheap when idle (position stays at -1, no repaint)
         playheadTimer.startTimer(16);
@@ -1237,8 +1378,10 @@ public:
             controlsTabButton.setBounds(tabBar.removeFromLeft(80).reduced(1, 2));
             adsrTabButton.setBounds    (tabBar.removeFromLeft(80).reduced(1, 2));
             eqTabButton.setBounds      (tabBar.removeFromLeft(80).reduced(1, 2));
-            // EQ toggle button — right-aligned in the same tab row, 44px wide
+            // EQ on/off button — right-aligned in tab row (44px)
             eqEnableButton.setBounds(tabBar.removeFromRight(44).reduced(1, 2));
+            // Filter mode selector — left of EQ enable button (~108px), only shown on EQ tab
+            filterModeButton.setBounds(tabBar.removeFromRight(108).reduced(1, 2));
         }
         area.removeFromTop(4); // gap below tab bar
 
@@ -1845,6 +1988,8 @@ public:
         // before getSampleState() reads the previously saved values.
         setAdsrParams(false, 0.0f, 0.0f, 1.0f, 0.0f, /*notifyListeners=*/false);
         printf("[ADSR-DBG] setWaveform() silent reset — ADSR defaults applied, no save triggered\n");
+        // Reset EQ filter modes silently — same pattern as ADSR; real values restored by load lambda.
+        setEqFilterModes(2, 2, 2, /*notifyListeners=*/false);
 
         // Reset tune detection state for the new file
         detectedNoteName = "";
@@ -1985,6 +2130,8 @@ public:
                                      float f1, float g1, float q1,
                                      float f2, float g2, float q2,
                                      float f3, float g3, float q3) = 0;
+        // Called when the filter mode changes for any band (0=LowCut 1=LowShelf 2=Bell 3=Notch 4=HighShelf 5=HighCut)
+        virtual void eqFilterModesChanged(int mode1, int mode2, int mode3) = 0;
     };
     
     void addListener(Listener* listener)
@@ -3639,7 +3786,9 @@ void adjustPitchUp()
     EQDisplay::Band eqBands[3] = { {100.0f, 0.0f, 1.0f},
                                    {500.0f, 0.0f, 1.0f},
                                    {8000.0f,0.0f, 1.0f} };
-    juce::TextButton          eqEnableButton { "EQ" };
+    juce::TextButton          eqEnableButton  { "EQ" };
+    juce::TextButton          filterModeButton{ "Bell" };
+    int                       eqFilterModes[3] = { 2, 2, 2 };  // per-band mode, saved per-sample
     std::unique_ptr<EQDisplay> eqDisplay;
 
     //==============================================================================
@@ -3801,7 +3950,8 @@ private:
         // EQ tab
         eqPlaceholderLabel.setVisible(false);  // replaced by eqDisplay
         const bool showEq = (activeTab == 2);
-        eqEnableButton.setVisible(showEq);  // only visible on the EQ tab
+        eqEnableButton.setVisible(showEq);    // only visible on the EQ tab
+        filterModeButton.setVisible(showEq);  // same rule as EQ enable button
         if (eqDisplay != nullptr)
         {
             eqDisplay->setVisible(showEq);
@@ -3927,6 +4077,31 @@ public:
     float getEqBandFreq(int i)    const { return (i>=0&&i<3) ? eqBands[i].freq   : 500.0f; }
     float getEqBandGain(int i)    const { return (i>=0&&i<3) ? eqBands[i].gainDb : 0.0f;   }
     float getEqBandQ(int i)       const { return (i>=0&&i<3) ? eqBands[i].q      : 1.0f;   }
+    int   getEqFilterMode(int i)  const { return (i>=0&&i<3) ? eqFilterModes[i]  : 2;      }
+
+    // Silently restore filter modes (no listener fired) — called from per-sample state load.
+    void setEqFilterModes(int m1, int m2, int m3, bool notifyListeners = true)
+    {
+        eqFilterModes[0] = juce::jlimit(0, 5, m1);
+        eqFilterModes[1] = juce::jlimit(0, 5, m2);
+        eqFilterModes[2] = juce::jlimit(0, 5, m3);
+        if (eqDisplay != nullptr)
+        {
+            eqDisplay->setFilterMode(0, eqFilterModes[0]);
+            eqDisplay->setFilterMode(1, eqFilterModes[1]);
+            eqDisplay->setFilterMode(2, eqFilterModes[2]);
+            // Update button text for the currently active band (if any)
+            const int ab = eqDisplay->getActiveBand();
+            if (ab >= 0 && ab < 3)
+                filterModeButton.setButtonText(EQDisplay::filterModeName(eqFilterModes[ab]));
+        }
+        if (notifyListeners)
+        {
+            listeners.call([this](Listener& l) {
+                l.eqFilterModesChanged(eqFilterModes[0], eqFilterModes[1], eqFilterModes[2]);
+            });
+        }
+    }
 
     // Set EQ sample rate so the frequency-response curve is accurate.
     void setEqSampleRate(double sr)

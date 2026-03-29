@@ -353,12 +353,15 @@ public:
         float  eq1Freq          = 100.0f;
         float  eq1Gain          = 0.0f;
         float  eq1Q             = 1.0f;
+        int    eq1Mode          = 2;     // 0=LowCut 1=LowShelf 2=Bell 3=Notch 4=HighShelf 5=HighCut
         float  eq2Freq          = 500.0f;
         float  eq2Gain          = 0.0f;
         float  eq2Q             = 1.0f;
+        int    eq2Mode          = 2;
         float  eq3Freq          = 8000.0f;
         float  eq3Gain          = 0.0f;
         float  eq3Q             = 1.0f;
+        int    eq3Mode          = 2;
     };
 
     void saveSampleState(const juce::File& file, const SampleState& s)
@@ -383,12 +386,15 @@ public:
         propertiesFile->setValue(k + "_eq1f",      (double)s.eq1Freq);
         propertiesFile->setValue(k + "_eq1g",      (double)s.eq1Gain);
         propertiesFile->setValue(k + "_eq1q",      (double)s.eq1Q);
+        propertiesFile->setValue(k + "_eq1mode",   s.eq1Mode);
         propertiesFile->setValue(k + "_eq2f",      (double)s.eq2Freq);
         propertiesFile->setValue(k + "_eq2g",      (double)s.eq2Gain);
         propertiesFile->setValue(k + "_eq2q",      (double)s.eq2Q);
+        propertiesFile->setValue(k + "_eq2mode",   s.eq2Mode);
         propertiesFile->setValue(k + "_eq3f",      (double)s.eq3Freq);
         propertiesFile->setValue(k + "_eq3g",      (double)s.eq3Gain);
         propertiesFile->setValue(k + "_eq3q",      (double)s.eq3Q);
+        propertiesFile->setValue(k + "_eq3mode",   s.eq3Mode);
         propertiesFile->saveIfNeeded();
     }
 
@@ -416,12 +422,15 @@ public:
         s.eq1Freq             = (float)propertiesFile->getDoubleValue(k + "_eq1f",  100.0);
         s.eq1Gain             = (float)propertiesFile->getDoubleValue(k + "_eq1g",    0.0);
         s.eq1Q                = (float)propertiesFile->getDoubleValue(k + "_eq1q",    1.0);
+        s.eq1Mode             = propertiesFile->getIntValue   (k + "_eq1mode",    2);
         s.eq2Freq             = (float)propertiesFile->getDoubleValue(k + "_eq2f",  500.0);
         s.eq2Gain             = (float)propertiesFile->getDoubleValue(k + "_eq2g",    0.0);
         s.eq2Q                = (float)propertiesFile->getDoubleValue(k + "_eq2q",    1.0);
+        s.eq2Mode             = propertiesFile->getIntValue   (k + "_eq2mode",    2);
         s.eq3Freq             = (float)propertiesFile->getDoubleValue(k + "_eq3f", 8000.0);
         s.eq3Gain             = (float)propertiesFile->getDoubleValue(k + "_eq3g",    0.0);
         s.eq3Q                = (float)propertiesFile->getDoubleValue(k + "_eq3q",    1.0);
+        s.eq3Mode             = propertiesFile->getIntValue   (k + "_eq3mode",    2);
         return s;
     }
 

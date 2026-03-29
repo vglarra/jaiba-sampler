@@ -169,6 +169,7 @@ private:
                          float f1, float g1, float q1,
                          float f2, float g2, float q2,
                          float f3, float g3, float q3) override;
+    void eqFilterModesChanged(int mode1, int mode2, int mode3) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -299,6 +300,7 @@ private:
     };
     EQBandCoeffs        eqCoeffs[3];
     std::atomic<bool>   eqActive   { false };
+    int                 eqFilterModes[3] = { 2, 2, 2 };  // message-thread only; 0-5 per band
 
     // Per-channel filter state — audio thread only, no locking needed.
     double eqZ1[3][2] {};  // [band][channel]
@@ -312,8 +314,9 @@ private:
                 eqZ1[b][ch] = eqZ2[b][ch] = 0.0;
     }
 
-    // Computes peaking EQ biquad coefficients (Audio EQ Cookbook) and stores to eqCoeffs[band].
-    void computeAndStoreEqCoeffs(int band, float freqHz, float gainDb, float q, double sampleRate);
+    // Computes biquad coefficients for the given filter mode and stores to eqCoeffs[band].
+    // mode: 0=LowCut, 1=LowShelf, 2=Bell, 3=Notch, 4=HighShelf, 5=HighCut
+    void computeAndStoreEqCoeffs(int band, float freqHz, float gainDb, float q, int filterMode, double sampleRate);
 
     //==============================================================================
     // FFT spectrum analyzer — lock-free double buffer

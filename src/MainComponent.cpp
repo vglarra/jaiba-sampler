@@ -1622,13 +1622,20 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                                        state.eq2Freq, state.eq2Gain, state.eq2Q,
                                        state.eq3Freq, state.eq3Gain, state.eq3Q,
                                        /*notifyListeners=*/false);
-                // Apply EQ coefficients to the audio engine
+                // Restore EQ filter modes silently
+                eqFilterModes[0] = state.eq1Mode;
+                eqFilterModes[1] = state.eq2Mode;
+                eqFilterModes[2] = state.eq3Mode;
+                sampleCard.setEqFilterModes(state.eq1Mode, state.eq2Mode, state.eq3Mode, /*notify=*/false);
+                // Apply EQ coefficients to the audio engine (with correct per-band filter mode)
                 eqActive.store(state.eqEnabled);
                 const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-                computeAndStoreEqCoeffs(0, state.eq1Freq, state.eq1Gain, state.eq1Q, sr);
-                computeAndStoreEqCoeffs(1, state.eq2Freq, state.eq2Gain, state.eq2Q, sr);
-                computeAndStoreEqCoeffs(2, state.eq3Freq, state.eq3Gain, state.eq3Q, sr);
+                computeAndStoreEqCoeffs(0, state.eq1Freq, state.eq1Gain, state.eq1Q, state.eq1Mode, sr);
+                computeAndStoreEqCoeffs(1, state.eq2Freq, state.eq2Gain, state.eq2Q, state.eq2Mode, sr);
+                computeAndStoreEqCoeffs(2, state.eq3Freq, state.eq3Gain, state.eq3Q, state.eq3Mode, sr);
                 if (state.eqEnabled) resetEqState();
+                printf("[EQ] Restored filter modes: band1=%d  band2=%d  band3=%d\n",
+                       state.eq1Mode, state.eq2Mode, state.eq3Mode);
 
                 printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f  note=%s\n",
                        effectiveStart, effectiveEnd, effectiveVol,
@@ -1642,9 +1649,11 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                 sampleCard.setTransientThreshold(4.0);
                 sampleCard.setDetectedNoteName("", 0.0);
                 sampleCard.setBasePitchOffset(0);
-                // New file: reset EQ to defaults (OFF, all bands flat)
+                // New file: reset EQ to defaults (OFF, all bands flat, all Bell mode)
                 sampleCard.setEqParams(false, 100.0f,0.0f,1.0f, 500.0f,0.0f,1.0f, 8000.0f,0.0f,1.0f,
                                        /*notifyListeners=*/false);
+                eqFilterModes[0] = eqFilterModes[1] = eqFilterModes[2] = 2;
+                sampleCard.setEqFilterModes(2, 2, 2, /*notify=*/false);
                 eqActive.store(false);
                 printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF  thresh=4.0\n");
             }
@@ -2092,23 +2101,81 @@ void MainComponent::activeTabChanged(int tabIndex)
 //==============================================================================
 // EQ helpers
 
-void MainComponent::computeAndStoreEqCoeffs(int band, float freqHz, float gainDb, float q, double sampleRate)
+void MainComponent::computeAndStoreEqCoeffs(int band, float freqHz, float gainDb, float q, int filterMode, double sampleRate)
 {
-    // Audio EQ Cookbook — peaking EQ biquad filter
-    const double A     = std::pow(10.0, (double)gainDb / 40.0);
+    // Audio EQ Cookbook formulas — all 6 filter types.
     const double w0    = juce::MathConstants<double>::twoPi * (double)freqHz / sampleRate;
     const double sinW0 = std::sin(w0);
     const double cosW0 = std::cos(w0);
-    const double alpha = sinW0 / (2.0 * (double)q);
+    const double safeQ = (double)juce::jmax(q, 0.01f);
+    const double alpha = sinW0 / (2.0 * safeQ);
 
-    const double b0 =  1.0 + alpha * A;
-    const double b1 = -2.0 * cosW0;
-    const double b2 =  1.0 - alpha * A;
-    const double a0 =  1.0 + alpha / A;
-    const double a1 = -2.0 * cosW0;
-    const double a2 =  1.0 - alpha / A;
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0, a0 = 1.0, a1 = 0.0, a2 = 0.0;
 
-    // Normalise by a0
+    switch (filterMode)
+    {
+        case 0: // Low Cut — 2nd order highpass
+            b0 = (1.0 + cosW0) / 2.0; b1 = -(1.0 + cosW0); b2 = (1.0 + cosW0) / 2.0;
+            a0 = 1.0 + alpha;          a1 = -2.0 * cosW0;   a2 = 1.0 - alpha;
+            break;
+        case 1: // Low Shelf
+        {
+            const double A   = std::pow(10.0, (double)gainDb / 40.0);
+            const double sqA = std::sqrt(juce::jmax(A, 0.0001));
+            const double arg = (A + 1.0 / A) * (1.0 / safeQ - 1.0) + 2.0;
+            const double al  = sinW0 / 2.0 * std::sqrt(juce::jmax(arg, 0.0));
+            b0 =   A * ((A+1.0) - (A-1.0)*cosW0 + 2.0*sqA*al);
+            b1 = 2.0*A * ((A-1.0) - (A+1.0)*cosW0);
+            b2 =   A * ((A+1.0) - (A-1.0)*cosW0 - 2.0*sqA*al);
+            a0 =       (A+1.0) + (A-1.0)*cosW0 + 2.0*sqA*al;
+            a1 =  -2.0 * ((A-1.0) + (A+1.0)*cosW0);
+            a2 =        (A+1.0) + (A-1.0)*cosW0 - 2.0*sqA*al;
+            break;
+        }
+        case 2: // Bell (peaking EQ) — original formula
+        {
+            const double A = std::pow(10.0, (double)gainDb / 40.0);
+            b0 = 1.0 + alpha*A; b1 = -2.0*cosW0; b2 = 1.0 - alpha*A;
+            a0 = 1.0 + alpha/A; a1 = -2.0*cosW0; a2 = 1.0 - alpha/A;
+            break;
+        }
+        case 3: // Notch
+            b0 = 1.0; b1 = -2.0*cosW0; b2 = 1.0;
+            a0 = 1.0 + alpha; a1 = -2.0*cosW0; a2 = 1.0 - alpha;
+            break;
+        case 4: // High Shelf
+        {
+            const double A   = std::pow(10.0, (double)gainDb / 40.0);
+            const double sqA = std::sqrt(juce::jmax(A, 0.0001));
+            const double arg = (A + 1.0 / A) * (1.0 / safeQ - 1.0) + 2.0;
+            const double al  = sinW0 / 2.0 * std::sqrt(juce::jmax(arg, 0.0));
+            b0 =     A * ((A+1.0) + (A-1.0)*cosW0 + 2.0*sqA*al);
+            b1 = -2.0*A * ((A-1.0) + (A+1.0)*cosW0);
+            b2 =     A * ((A+1.0) + (A-1.0)*cosW0 - 2.0*sqA*al);
+            a0 =        (A+1.0) - (A-1.0)*cosW0 + 2.0*sqA*al;
+            a1 =   2.0 * ((A-1.0) - (A+1.0)*cosW0);
+            a2 =        (A+1.0) - (A-1.0)*cosW0 - 2.0*sqA*al;
+            break;
+        }
+        case 5: // High Cut — 2nd order lowpass
+            b0 = (1.0 - cosW0) / 2.0; b1 = 1.0 - cosW0; b2 = (1.0 - cosW0) / 2.0;
+            a0 = 1.0 + alpha;          a1 = -2.0*cosW0;  a2 = 1.0 - alpha;
+            break;
+        default: // Fallback: Bell
+        {
+            const double A = std::pow(10.0, (double)gainDb / 40.0);
+            b0 = 1.0 + alpha*A; b1 = -2.0*cosW0; b2 = 1.0 - alpha*A;
+            a0 = 1.0 + alpha/A; a1 = -2.0*cosW0; a2 = 1.0 - alpha/A;
+            break;
+        }
+    }
+
+    if (std::abs(a0) < 1e-30) { // Degenerate — pass-through
+        eqCoeffs[band].b0.store(1.0f); eqCoeffs[band].b1.store(0.0f); eqCoeffs[band].b2.store(0.0f);
+        eqCoeffs[band].a1.store(0.0f); eqCoeffs[band].a2.store(0.0f);
+        return;
+    }
+
     eqCoeffs[band].b0.store((float)(b0 / a0));
     eqCoeffs[band].b1.store((float)(b1 / a0));
     eqCoeffs[band].b2.store((float)(b2 / a0));
@@ -2134,16 +2201,37 @@ void MainComponent::eqParamsChanged(bool enabled,
     eqActive.store(enabled);
 
     const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-    computeAndStoreEqCoeffs(0, f1, g1, q1, sr);
-    computeAndStoreEqCoeffs(1, f2, g2, q2, sr);
-    computeAndStoreEqCoeffs(2, f3, g3, q3, sr);
+    // Use stored filter modes so the correct formula is applied for each band.
+    computeAndStoreEqCoeffs(0, f1, g1, q1, eqFilterModes[0], sr);
+    computeAndStoreEqCoeffs(1, f2, g2, q2, eqFilterModes[1], sr);
+    computeAndStoreEqCoeffs(2, f3, g3, q3, eqFilterModes[2], sr);
 
     // Reset filter state to avoid a transient when coefficients change.
     if (enabled) resetEqState();
 
     saveCurrentSampleState();
-    printf("[EQ] %s  band1=%.0fHz/%.1fdB/Q%.2f  band2=%.0fHz/%.1fdB/Q%.2f  band3=%.0fHz/%.1fdB/Q%.2f\n",
-           enabled ? "ON" : "OFF", f1, g1, q1, f2, g2, q2, f3, g3, q3);
+    printf("[EQ] %s  band1=%.0fHz/%.1fdB/Q%.2f(mode%d)  band2=%.0fHz/%.1fdB/Q%.2f(mode%d)  band3=%.0fHz/%.1fdB/Q%.2f(mode%d)\n",
+           enabled ? "ON" : "OFF",
+           f1, g1, q1, eqFilterModes[0],
+           f2, g2, q2, eqFilterModes[1],
+           f3, g3, q3, eqFilterModes[2]);
+}
+
+void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
+{
+    eqFilterModes[0] = mode1;
+    eqFilterModes[1] = mode2;
+    eqFilterModes[2] = mode3;
+
+    const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
+    computeAndStoreEqCoeffs(0, sampleCard.getEqBandFreq(0), sampleCard.getEqBandGain(0), sampleCard.getEqBandQ(0), mode1, sr);
+    computeAndStoreEqCoeffs(1, sampleCard.getEqBandFreq(1), sampleCard.getEqBandGain(1), sampleCard.getEqBandQ(1), mode2, sr);
+    computeAndStoreEqCoeffs(2, sampleCard.getEqBandFreq(2), sampleCard.getEqBandGain(2), sampleCard.getEqBandQ(2), mode3, sr);
+
+    if (eqActive.load()) resetEqState();
+
+    saveCurrentSampleState();
+    printf("[EQ] Filter modes: band1=%d  band2=%d  band3=%d\n", mode1, mode2, mode3);
 }
 
 void MainComponent::oneShotEnabledChanged(bool enabled)
@@ -2615,12 +2703,15 @@ void MainComponent::saveOutgoingSampleState()
     s.eq1Freq             = sampleCard.getEqBandFreq(0);
     s.eq1Gain             = sampleCard.getEqBandGain(0);
     s.eq1Q                = sampleCard.getEqBandQ(0);
+    s.eq1Mode             = eqFilterModes[0];
     s.eq2Freq             = sampleCard.getEqBandFreq(1);
     s.eq2Gain             = sampleCard.getEqBandGain(1);
     s.eq2Q                = sampleCard.getEqBandQ(1);
+    s.eq2Mode             = eqFilterModes[1];
     s.eq3Freq             = sampleCard.getEqBandFreq(2);
     s.eq3Gain             = sampleCard.getEqBandGain(2);
     s.eq3Q                = sampleCard.getEqBandQ(2);
+    s.eq3Mode             = eqFilterModes[2];
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
@@ -2667,12 +2758,15 @@ void MainComponent::saveCurrentSampleState()
     s.eq1Freq             = sampleCard.getEqBandFreq(0);
     s.eq1Gain             = sampleCard.getEqBandGain(0);
     s.eq1Q                = sampleCard.getEqBandQ(0);
+    s.eq1Mode             = eqFilterModes[0];
     s.eq2Freq             = sampleCard.getEqBandFreq(1);
     s.eq2Gain             = sampleCard.getEqBandGain(1);
     s.eq2Q                = sampleCard.getEqBandQ(1);
+    s.eq2Mode             = eqFilterModes[1];
     s.eq3Freq             = sampleCard.getEqBandFreq(2);
     s.eq3Gain             = sampleCard.getEqBandGain(2);
     s.eq3Q                = sampleCard.getEqBandQ(2);
+    s.eq3Mode             = eqFilterModes[2];
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
