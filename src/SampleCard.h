@@ -249,25 +249,31 @@ private:
         const float w = (float)b.getWidth();
         const float h = (float)b.getHeight();
 
-        g.setColour(juce::Colour(0xFF222222));
-
         // Vertical frequency lines
+        g.setColour(juce::Colour(0xFF555555));
         const float vFreqs[] = { 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 };
         for (float f : vFreqs)
             g.drawVerticalLine((int)(b.getX() + freqToX(f, w)), (float)b.getY(), (float)b.getBottom());
 
-        // Horizontal dB lines
+        // Horizontal dB lines — 0dB is brighter and thicker as a reference
         const float dbLines[] = { -12.0f, -6.0f, 0.0f, 6.0f, 12.0f };
         for (float db : dbLines)
         {
-            int y = b.getY() + (int)gainToY(db, h);
-            if (db == 0.0f) g.setColour(juce::Colour(0xFF444444));
-            else            g.setColour(juce::Colour(0xFF222222));
-            g.drawHorizontalLine(y, (float)b.getX(), (float)b.getRight());
+            float y = (float)(b.getY()) + gainToY(db, h);
+            if (db == 0.0f)
+            {
+                g.setColour(juce::Colour(0xFF777777));
+                g.drawLine((float)b.getX(), y, (float)b.getRight(), y, 1.5f);
+            }
+            else
+            {
+                g.setColour(juce::Colour(0xFF444444));
+                g.drawHorizontalLine((int)y, (float)b.getX(), (float)b.getRight());
+            }
         }
 
         // Frequency labels (bottom)
-        g.setColour(juce::Colour(0xFF666666));
+        g.setColour(juce::Colour(0xFFBBBBBB));
         g.setFont(9.0f);
         const float labelFs[]    = { 100.0f, 1000.0f, 10000.0f };
         const char* labelTexts[] = { "100",  "1k",    "10k" };
@@ -279,6 +285,7 @@ private:
         }
 
         // dB labels (left)
+        g.setColour(juce::Colour(0xFFBBBBBB));
         const char* dbTexts[] = { "+12", "+6", "0", "-6", "-12" };
         for (int i = 0; i < 5; ++i)
         {
@@ -1230,6 +1237,8 @@ public:
             controlsTabButton.setBounds(tabBar.removeFromLeft(80).reduced(1, 2));
             adsrTabButton.setBounds    (tabBar.removeFromLeft(80).reduced(1, 2));
             eqTabButton.setBounds      (tabBar.removeFromLeft(80).reduced(1, 2));
+            // EQ toggle button — right-aligned in the same tab row, 44px wide
+            eqEnableButton.setBounds(tabBar.removeFromRight(44).reduced(1, 2));
         }
         area.removeFromTop(4); // gap below tab bar
 
@@ -3792,7 +3801,7 @@ private:
         // EQ tab
         eqPlaceholderLabel.setVisible(false);  // replaced by eqDisplay
         const bool showEq = (activeTab == 2);
-        eqEnableButton.setVisible(showEq);
+        eqEnableButton.setVisible(showEq);  // only visible on the EQ tab
         if (eqDisplay != nullptr)
         {
             eqDisplay->setVisible(showEq);
@@ -3831,20 +3840,12 @@ private:
 
     void layoutEqTabContent(juce::Rectangle<int>& area)
     {
-        // Row A (30px): EQ enable button
-        {
-            auto rowA = area.removeFromTop(30);
-            eqEnableButton.setBounds(rowA.removeFromLeft(80).withSizeKeepingCentre(74, 28));
-        }
-        area.removeFromTop(5); // gap
-
-        // Row B (74px): EQDisplay fills full width
+        // EQ toggle button now lives in the tab bar row — no row needed here.
+        // EQDisplay fills the full available content area.
         if (eqDisplay != nullptr)
-            eqDisplay->setBounds(area.removeFromTop(74).reduced(2, 0));
+            eqDisplay->setBounds(area.reduced(2, 0));
         else
-            area.removeFromTop(74);
-
-        area.removeFromTop(5); // trailing gap — keeps same total height as Controls tab (114px)
+            area.removeFromTop(area.getHeight());
     }
 
     //==============================================================================
