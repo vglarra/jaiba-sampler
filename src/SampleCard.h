@@ -42,7 +42,8 @@ public:
     };
 
     // Wire from MainComponent — fills dest[0..numBins-1] with dB magnitudes.
-    std::function<void(float* dest, int numBins)> getSpectrumCallback;
+    // OPT 4: Returns true only when new FFT data is available; false = skip repaint.
+    std::function<bool(float* dest, int numBins)> getSpectrumCallback;
 
     // Fired on every drag / scroll so MainComponent can update filter coefficients.
     std::function<void(int bandIdx, float freq, float gainDb, float q)> onBandChanged;
@@ -98,13 +99,15 @@ public:
     void startAnimation() { startTimerHz(30); }
     void stopAnimation()  { stopTimer(); }
 
-    // Timer callback — fetch new spectrum and repaint.
+    // OPT 4: Timer callback — only repaint when new FFT data is actually available (30fps max).
     void timerCallback() override
     {
         if (getSpectrumCallback)
         {
-            getSpectrumCallback(spectrumData, kSpecBins);
-            repaint();
+            // getSpectrumCallback returns true only when the FFT worker has produced new data.
+            // This prevents unnecessary repaints (saving UI thread CPU) at a steady 30fps cap.
+            if (getSpectrumCallback(spectrumData, kSpecBins))
+                repaint();
         }
     }
 
@@ -4110,7 +4113,8 @@ public:
     }
 
     // Wire the spectrum data callback from MainComponent → EQDisplay.
-    void setEqSpectrumCallback(std::function<void(float*, int)> cb)
+    // OPT 4: Callback returns bool (true = new data available).
+    void setEqSpectrumCallback(std::function<bool(float*, int)> cb)
     {
         if (eqDisplay != nullptr) eqDisplay->getSpectrumCallback = cb;
     }

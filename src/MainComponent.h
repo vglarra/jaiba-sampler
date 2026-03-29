@@ -292,21 +292,51 @@ private:
 
     //==============================================================================
     // EQ — three-band parametric biquad filters
-    // Coefficients updated atomically from message thread; read once per audio block.
-    struct EQBandCoeffs
+    // OPT 2: Coefficients are computed on the UI thread and stored in a lock-free
+    // double buffer.  Audio thread swaps buffers in nanoseconds — zero coefficient
+    // math on the audio thread.
+    struct EqCoeffDoubleBuffer
     {
-        std::atomic<float> b0 { 1.0f }, b1 { 0.0f }, b2 { 0.0f };
-        std::atomic<float> a1 { 0.0f }, a2 { 0.0f };
+        struct Coeffs { double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0; };
+
+        Coeffs buf[2][3] {};           // [ping-pong index][band 0-2]
+        std::atomic<bool> updated { false };
+        int front = 0;                 // audio-thread owned; never accessed from UI thread
+
+        // UI thread: write all 3 bands to back buffer, then set flag.
+        void writeFromUI(const Coeffs newCoeffs[3]) noexcept
+        {
+            const int back = 1 - front;
+            for (int i = 0; i < 3; ++i) buf[back][i] = newCoeffs[i];
+            updated.store(true, std::memory_order_release);
+        }
+
+        // Audio thread: swap if updated; return pointer to current front band array.
+        const Coeffs* swapIfUpdated() noexcept
+        {
+            if (updated.load(std::memory_order_acquire))
+            {
+                front = 1 - front;
+                updated.store(false, std::memory_order_relaxed);
+            }
+            return buf[front];
+        }
+
+        EqCoeffDoubleBuffer() = default;
+        EqCoeffDoubleBuffer(const EqCoeffDoubleBuffer&) = delete;
+        EqCoeffDoubleBuffer& operator=(const EqCoeffDoubleBuffer&) = delete;
     };
-    EQBandCoeffs        eqCoeffs[3];
-    std::atomic<bool>   eqActive   { false };
-    int                 eqFilterModes[3] = { 2, 2, 2 };  // message-thread only; 0-5 per band
+
+    EqCoeffDoubleBuffer  eqCoeffDB;
+    std::atomic<bool>    eqActive   { false };
+    int                  eqFilterModes[3] = { 2, 2, 2 };  // message-thread only; 0-5 per band
 
     // Per-channel filter state — audio thread only, no locking needed.
     double eqZ1[3][2] {};  // [band][channel]
     double eqZ2[3][2] {};
 
     // Resets filter state (called from prepareToPlay and on EQ toggle).
+    // Safe to call from message thread only when muteOutput=true (audio thread not running).
     void resetEqState()
     {
         for (int b = 0; b < 3; ++b)
@@ -314,9 +344,10 @@ private:
                 eqZ1[b][ch] = eqZ2[b][ch] = 0.0;
     }
 
-    // Computes biquad coefficients for the given filter mode and stores to eqCoeffs[band].
+    // OPT 2: Computes biquad coefficients for one band on the UI thread and returns them.
+    // Caller assembles all 3 bands and calls eqCoeffDB.writeFromUI().
     // mode: 0=LowCut, 1=LowShelf, 2=Bell, 3=Notch, 4=HighShelf, 5=HighCut
-    void computeAndStoreEqCoeffs(int band, float freqHz, float gainDb, float q, int filterMode, double sampleRate);
+    EqCoeffDoubleBuffer::Coeffs computeEqCoeffs(float freqHz, float gainDb, float q, int filterMode, double sampleRate);
 
     //==============================================================================
     // FFT spectrum analyzer — lock-free double buffer
@@ -326,27 +357,52 @@ private:
 
     std::unique_ptr<juce::dsp::FFT> fft;                // initialized in prepareToPlay
 
-    // FIFO accumulates mono samples from the audio thread; when full a FFT frame is computed.
-    float   fftFifo[kFFTSize]  {};
-    int     fftFifoIndex = 0;
+    // OPT 1: Lock-free circular buffer — audio thread writes mono samples here (< 1us);
+    // FFT worker thread reads and processes without touching the audio thread.
+    juce::AbstractFifo fftAbstractFifo { kFFTSize * 2 };
+    float              fftCircularBuffer[kFFTSize * 2] {};
 
     // Hann window applied before FFT to reduce spectral leakage.
     float   fftWindow[kFFTSize] {};
 
-    // Scratch buffer: interleaved real/imag pairs for juce::dsp::FFT.
+    // Scratch buffer — used only by the FFT worker thread (never touched by audio thread).
     float   fftScratch[kFFTSize * 2] {};
 
     // Double-buffered magnitude spectrum (after smoothing).
-    // Audio thread always writes to buffer[1 - specFront]; UI reads from buffer[specFront].
-    float   specBuffers[2][kSpecBins] {};
-    std::atomic<int> specFront { 0 };
+    // FFT worker thread writes to buffer[1 - specFront]; UI reads from buffer[specFront].
+    float             specBuffers[2][kSpecBins] {};
+    std::atomic<int>  specFront     { 0 };
+    std::atomic<bool> hasNewFFTData { false };  // set by FFT thread, cleared by UI timer
 
     // Exponential smoothing factors for spectrum display.
     static constexpr float kSpecSmoothUp   = 0.7f;   // fast attack
     static constexpr float kSpecSmoothDown = 0.3f;   // slower decay
 
+    // OPT 1: Background FFT worker thread — wakes every 33ms, processes one FFT frame.
+    class FftWorkerThread : public juce::Thread
+    {
+    public:
+        FftWorkerThread(MainComponent& o) : juce::Thread("FFT Worker"), owner(o) {}
+        void run() override
+        {
+            while (!threadShouldExit())
+            {
+                wait(33);
+                if (!threadShouldExit())
+                    owner.processFftOnWorkerThread();
+            }
+        }
+    private:
+        MainComponent& owner;
+    };
+    std::unique_ptr<FftWorkerThread> fftThread;
+
+    // Called on the FFT worker thread — reads from fftCircularBuffer, runs FFT, updates specBuffers.
+    void processFftOnWorkerThread();
+
     // Called by EQDisplay's getSpectrumCallback — copies front buffer to dest.
-    void getSpectrumSnapshot(float* dest, int numBins);
+    // Returns true if new FFT data was available (consumed), false if no update since last call.
+    bool getSpectrumSnapshot(float* dest, int numBins);
 
     //==============================================================================
     // Sine wave generation

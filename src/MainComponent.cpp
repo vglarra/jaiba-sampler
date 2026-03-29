@@ -196,6 +196,14 @@ MainComponent::~MainComponent()
     navDebounceTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
+    // OPT 1: Stop FFT worker thread before audio shutdown to prevent use-after-free
+    // on fft/fftCircularBuffer when the audio device is torn down.
+    if (fftThread != nullptr)
+    {
+        fftThread->stopThread(200);
+        fftThread.reset();
+    }
+
     // Kill any active freeze/loop voices before audio shutdown
     muteOutput.store(true);
     for (int i = 0; i < sampler.getNumSounds(); ++i)
@@ -233,26 +241,38 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     midiCollector.reset(sampleRate);
 
     // ── FFT + EQ initialization ───────────────────────────────────────────────────
+    // OPT 1: Stop FFT worker thread before recreating the FFT object to prevent
+    // use-after-free if prepareToPlay is called while the thread is running.
+    if (fftThread != nullptr)
+    {
+        fftThread->stopThread(200);
+        fftThread.reset();
+    }
+
     fft = std::make_unique<juce::dsp::FFT>(kFFTOrder);
 
     // Precompute Hann window — reduces spectral leakage.
     for (int i = 0; i < kFFTSize; ++i)
         fftWindow[i] = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * i / (kFFTSize - 1)));
 
-    // Reset filter state (fresh start; no clicks from stale z1/z2)
+    // Reset filter state and circular buffer (fresh start).
     resetEqState();
-    std::fill(std::begin(fftFifo), std::end(fftFifo), 0.0f);
-    fftFifoIndex = 0;
+    fftAbstractFifo.reset();
+    std::fill(std::begin(fftCircularBuffer), std::end(fftCircularBuffer), 0.0f);
 
     // Inform EQDisplay of the current sample rate so biquad response rendering is correct.
     sampleCard.setEqSampleRate(sampleRate);
 
-    // Wire the lock-free spectrum data path: EQDisplay asks → MainComponent copies front buffer.
-    sampleCard.setEqSpectrumCallback([this](float* dest, int numBins) {
-        getSpectrumSnapshot(dest, numBins);
+    // OPT 4: Wire spectrum callback — returns true only when new FFT data is ready.
+    sampleCard.setEqSpectrumCallback([this](float* dest, int numBins) -> bool {
+        return getSpectrumSnapshot(dest, numBins);
     });
 
-    printf("[EQ] prepareToPlay: sampleRate=%.1f  fftSize=%d\n", sampleRate, kFFTSize);
+    // OPT 1: Start FFT worker thread (wakes every 33ms — 30fps).
+    fftThread = std::make_unique<FftWorkerThread>(*this);
+    fftThread->startThread();
+
+    printf("[EQ] prepareToPlay: sampleRate=%.1f  fftSize=%d  FFT worker thread started\n", sampleRate, kFFTSize);
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
@@ -280,86 +300,81 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     if (gain != 1.0f)
         bufferToFill.buffer->applyGain(gain);
 
-    // ── Parametric EQ (3 biquad bands) ───────────────────────────────────────────
+    // ── Parametric EQ (3 biquad bands) — OPT 2+3: single-pass cascade, double-buffer coeffs ──
     if (eqActive.load())
     {
         const int numSamples  = bufferToFill.numSamples;
         const int numChannels = bufferToFill.buffer->getNumChannels();
 
-        for (int b = 0; b < 3; ++b)
+        // OPT 2: swap in freshly computed coefficients if UI thread wrote them (nanoseconds).
+        const auto* c = eqCoeffDB.swapIfUpdated();
+
+        // OPT 3: single pass — apply all 3 bands per sample (better cache utilization vs.
+        // three separate passes over the buffer).
+        for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
         {
-            // Load coefficients once per block — not per sample.
-            const double b0 = (double)eqCoeffs[b].b0.load();
-            const double b1 = (double)eqCoeffs[b].b1.load();
-            const double b2 = (double)eqCoeffs[b].b2.load();
-            const double a1 = (double)eqCoeffs[b].a1.load();
-            const double a2 = (double)eqCoeffs[b].a2.load();
+            float* data = bufferToFill.buffer->getWritePointer(ch);
+            // Keep all six state variables in registers for the inner loop.
+            double z1_0 = eqZ1[0][ch], z2_0 = eqZ2[0][ch];
+            double z1_1 = eqZ1[1][ch], z2_1 = eqZ2[1][ch];
+            double z1_2 = eqZ1[2][ch], z2_2 = eqZ2[2][ch];
 
-            for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
+            for (int i = 0; i < numSamples; ++i)
             {
-                float* data = bufferToFill.buffer->getWritePointer(ch);
-                double z1 = eqZ1[b][ch];
-                double z2 = eqZ2[b][ch];
-
-                for (int i = 0; i < numSamples; ++i)
-                {
-                    const double x = (double)data[i];
-                    const double y = b0 * x + z1;
-                    z1 = b1 * x - a1 * y + z2;
-                    z2 = b2 * x - a2 * y;
-                    data[i] = (float)y;
-                }
-
-                eqZ1[b][ch] = z1;
-                eqZ2[b][ch] = z2;
+                // Direct Form II Transposed cascade — all 3 bands per sample
+                double x  = static_cast<double>(data[i]);
+                // Band 0
+                double y0 = c[0].b0 * x  + z1_0;
+                z1_0 = c[0].b1 * x  - c[0].a1 * y0 + z2_0;
+                z2_0 = c[0].b2 * x  - c[0].a2 * y0;
+                // Band 1
+                double y1 = c[1].b0 * y0 + z1_1;
+                z1_1 = c[1].b1 * y0 - c[1].a1 * y1 + z2_1;
+                z2_1 = c[1].b2 * y0 - c[1].a2 * y1;
+                // Band 2
+                double y2 = c[2].b0 * y1 + z1_2;
+                z1_2 = c[2].b1 * y1 - c[2].a1 * y2 + z2_2;
+                z2_2 = c[2].b2 * y1 - c[2].a2 * y2;
+                data[i] = static_cast<float>(y2);
             }
+
+            eqZ1[0][ch] = z1_0; eqZ2[0][ch] = z2_0;
+            eqZ1[1][ch] = z1_1; eqZ2[1][ch] = z2_1;
+            eqZ1[2][ch] = z1_2; eqZ2[2][ch] = z2_2;
         }
     }
 
-    // ── FFT spectrum analyzer (post-EQ) ──────────────────────────────────────────
-    if (fft != nullptr)
+    // ── FFT spectrum analyzer (post-EQ) — OPT 1: push to circular buffer only ────
+    // The FFT worker thread reads from fftCircularBuffer every 33ms and does all the
+    // heavy processing there.  Audio thread cost here is < 1 microsecond.
     {
         const int numSamples  = bufferToFill.numSamples;
         const int numChannels = bufferToFill.buffer->getNumChannels();
+        const int toWrite     = juce::jmin(numSamples, fftAbstractFifo.getFreeSpace());
 
-        for (int i = 0; i < numSamples; ++i)
+        if (toWrite > 0)
         {
-            // Mix to mono
-            float mono = 0.0f;
-            for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
-                mono += bufferToFill.buffer->getReadPointer(ch)[i];
-            if (numChannels > 0) mono /= (float)numChannels;
+            int start1, size1, start2, size2;
+            fftAbstractFifo.prepareToWrite(toWrite, start1, size1, start2, size2);
 
-            fftFifo[fftFifoIndex++] = mono;  // store raw; window applied when copying to scratch
-
-            if (fftFifoIndex >= kFFTSize)
+            for (int i = 0; i < size1; ++i)
             {
-                fftFifoIndex = 0;
-
-                // Apply Hann window and copy to scratch
-                for (int k = 0; k < kFFTSize; ++k)
-                {
-                    fftScratch[k * 2]     = fftFifo[k] * fftWindow[k]; // real
-                    fftScratch[k * 2 + 1] = 0.0f;                       // imag
-                }
-
-                fft->performFrequencyOnlyForwardTransform(fftScratch);
-
-                // Write to back buffer with exponential smoothing
-                const int back = 1 - specFront.load();
-                for (int k = 0; k < kSpecBins; ++k)
-                {
-                    const float mag = fftScratch[k] / (float)kFFTSize;
-                    const float db  = juce::Decibels::gainToDecibels(mag, -100.0f);
-                    const float prev = specBuffers[back][k];
-                    specBuffers[back][k] = (db > prev)
-                        ? kSpecSmoothUp   * db + (1.0f - kSpecSmoothUp)   * prev
-                        : kSpecSmoothDown * db + (1.0f - kSpecSmoothDown) * prev;
-                }
-
-                // Flip front/back atomically — UI reads the new front on next timer tick.
-                specFront.store(back);
+                float mono = 0.0f;
+                for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
+                    mono += bufferToFill.buffer->getReadPointer(ch)[i];
+                if (numChannels > 0) mono /= static_cast<float>(numChannels);
+                fftCircularBuffer[start1 + i] = mono;
             }
+            for (int i = 0; i < size2; ++i)
+            {
+                float mono = 0.0f;
+                for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
+                    mono += bufferToFill.buffer->getReadPointer(ch)[size1 + i];
+                if (numChannels > 0) mono /= static_cast<float>(numChannels);
+                fftCircularBuffer[start2 + i] = mono;
+            }
+
+            fftAbstractFifo.finishedWrite(size1 + size2);
         }
     }
 
@@ -1627,13 +1642,18 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                 eqFilterModes[1] = state.eq2Mode;
                 eqFilterModes[2] = state.eq3Mode;
                 sampleCard.setEqFilterModes(state.eq1Mode, state.eq2Mode, state.eq3Mode, /*notify=*/false);
-                // Apply EQ coefficients to the audio engine (with correct per-band filter mode)
+                // OPT 2+5: Compute EQ coefficients on UI thread, write to double buffer.
+                // resetEqState() is safe here because muteOutput=true (audio thread not running).
                 eqActive.store(state.eqEnabled);
-                const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-                computeAndStoreEqCoeffs(0, state.eq1Freq, state.eq1Gain, state.eq1Q, state.eq1Mode, sr);
-                computeAndStoreEqCoeffs(1, state.eq2Freq, state.eq2Gain, state.eq2Q, state.eq2Mode, sr);
-                computeAndStoreEqCoeffs(2, state.eq3Freq, state.eq3Gain, state.eq3Q, state.eq3Mode, sr);
-                if (state.eqEnabled) resetEqState();
+                {
+                    const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
+                    EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+                    newCoeffs[0] = computeEqCoeffs(state.eq1Freq, state.eq1Gain, state.eq1Q, state.eq1Mode, sr);
+                    newCoeffs[1] = computeEqCoeffs(state.eq2Freq, state.eq2Gain, state.eq2Q, state.eq2Mode, sr);
+                    newCoeffs[2] = computeEqCoeffs(state.eq3Freq, state.eq3Gain, state.eq3Q, state.eq3Mode, sr);
+                    eqCoeffDB.writeFromUI(newCoeffs);
+                }
+                resetEqState();  // OPT 5: always reset filter state on sample load (muteOutput=true)
                 printf("[EQ] Restored filter modes: band1=%d  band2=%d  band3=%d\n",
                        state.eq1Mode, state.eq2Mode, state.eq3Mode);
 
@@ -1655,6 +1675,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                 eqFilterModes[0] = eqFilterModes[1] = eqFilterModes[2] = 2;
                 sampleCard.setEqFilterModes(2, 2, 2, /*notify=*/false);
                 eqActive.store(false);
+                resetEqState();  // OPT 5: reset filter state so old sample state doesn't bleed in
                 printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF  thresh=4.0\n");
             }
         }
@@ -2101,7 +2122,10 @@ void MainComponent::activeTabChanged(int tabIndex)
 //==============================================================================
 // EQ helpers
 
-void MainComponent::computeAndStoreEqCoeffs(int band, float freqHz, float gainDb, float q, int filterMode, double sampleRate)
+// OPT 2: Compute biquad coefficients for one band on the UI thread.
+// Returns normalized Coeffs; caller assembles all 3 bands and calls eqCoeffDB.writeFromUI().
+MainComponent::EqCoeffDoubleBuffer::Coeffs MainComponent::computeEqCoeffs(
+    float freqHz, float gainDb, float q, int filterMode, double sampleRate)
 {
     // Audio EQ Cookbook formulas — all 6 filter types.
     const double w0    = juce::MathConstants<double>::twoPi * (double)freqHz / sampleRate;
@@ -2132,7 +2156,7 @@ void MainComponent::computeAndStoreEqCoeffs(int band, float freqHz, float gainDb
             a2 =        (A+1.0) + (A-1.0)*cosW0 - 2.0*sqA*al;
             break;
         }
-        case 2: // Bell (peaking EQ) — original formula
+        case 2: // Bell (peaking EQ)
         {
             const double A = std::pow(10.0, (double)gainDb / 40.0);
             b0 = 1.0 + alpha*A; b1 = -2.0*cosW0; b2 = 1.0 - alpha*A;
@@ -2170,27 +2194,69 @@ void MainComponent::computeAndStoreEqCoeffs(int band, float freqHz, float gainDb
         }
     }
 
-    if (std::abs(a0) < 1e-30) { // Degenerate — pass-through
-        eqCoeffs[band].b0.store(1.0f); eqCoeffs[band].b1.store(0.0f); eqCoeffs[band].b2.store(0.0f);
-        eqCoeffs[band].a1.store(0.0f); eqCoeffs[band].a2.store(0.0f);
-        return;
-    }
+    if (std::abs(a0) < 1e-30)   // Degenerate — pass-through
+        return EqCoeffDoubleBuffer::Coeffs {};  // default: b0=1, rest=0 (pass-through)
 
-    eqCoeffs[band].b0.store((float)(b0 / a0));
-    eqCoeffs[band].b1.store((float)(b1 / a0));
-    eqCoeffs[band].b2.store((float)(b2 / a0));
-    eqCoeffs[band].a1.store((float)(a1 / a0));
-    eqCoeffs[band].a2.store((float)(a2 / a0));
+    return EqCoeffDoubleBuffer::Coeffs {
+        b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
+    };
 }
 
-void MainComponent::getSpectrumSnapshot(float* dest, int numBins)
+// OPT 1: FFT worker thread body — called every 33ms from FftWorkerThread::run().
+// All FFT math happens here, completely off the audio thread.
+void MainComponent::processFftOnWorkerThread()
 {
-    const int front = specFront.load();
+    if (fft == nullptr) return;
+    if (fftAbstractFifo.getNumReady() < kFFTSize) return;
+
+    int start1, size1, start2, size2;
+    fftAbstractFifo.prepareToRead(kFFTSize, start1, size1, start2, size2);
+
+    // Build windowed interleaved real/imag frame in scratch buffer.
+    int dst = 0;
+    for (int i = 0; i < size1; ++i, ++dst)
+    {
+        fftScratch[dst * 2]     = fftCircularBuffer[start1 + i] * fftWindow[dst];
+        fftScratch[dst * 2 + 1] = 0.0f;
+    }
+    for (int i = 0; i < size2; ++i, ++dst)
+    {
+        fftScratch[dst * 2]     = fftCircularBuffer[start2 + i] * fftWindow[dst];
+        fftScratch[dst * 2 + 1] = 0.0f;
+    }
+    fftAbstractFifo.finishedRead(size1 + size2);
+
+    fft->performFrequencyOnlyForwardTransform(fftScratch);
+
+    // Write to back buffer with exponential smoothing, then flip.
+    const int back = 1 - specFront.load(std::memory_order_relaxed);
+    for (int k = 0; k < kSpecBins; ++k)
+    {
+        const float mag  = fftScratch[k] / static_cast<float>(kFFTSize);
+        const float db   = juce::Decibels::gainToDecibels(mag, -100.0f);
+        const float prev = specBuffers[back][k];
+        specBuffers[back][k] = (db > prev)
+            ? kSpecSmoothUp   * db + (1.0f - kSpecSmoothUp)   * prev
+            : kSpecSmoothDown * db + (1.0f - kSpecSmoothDown) * prev;
+    }
+    specFront.store(back, std::memory_order_release);
+    hasNewFFTData.store(true, std::memory_order_release);
+}
+
+// OPT 4: Returns true only when new FFT data is available — called by EQDisplay timer.
+// Clears the hasNewFFTData flag so subsequent calls return false until the next FFT frame.
+bool MainComponent::getSpectrumSnapshot(float* dest, int numBins)
+{
+    if (!hasNewFFTData.load(std::memory_order_acquire))
+        return false;
+
+    hasNewFFTData.store(false, std::memory_order_relaxed);
+    const int front = specFront.load(std::memory_order_acquire);
     const int count = juce::jmin(numBins, kSpecBins);
     std::memcpy(dest, specBuffers[front], sizeof(float) * count);
-    // Zero any extra bins the caller asked for beyond what we have
     if (numBins > kSpecBins)
         std::memset(dest + kSpecBins, 0, sizeof(float) * (numBins - kSpecBins));
+    return true;
 }
 
 void MainComponent::eqParamsChanged(bool enabled,
@@ -2200,11 +2266,13 @@ void MainComponent::eqParamsChanged(bool enabled,
 {
     eqActive.store(enabled);
 
+    // OPT 2: Compute all 3 bands on the UI thread, write to double buffer in one shot.
     const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-    // Use stored filter modes so the correct formula is applied for each band.
-    computeAndStoreEqCoeffs(0, f1, g1, q1, eqFilterModes[0], sr);
-    computeAndStoreEqCoeffs(1, f2, g2, q2, eqFilterModes[1], sr);
-    computeAndStoreEqCoeffs(2, f3, g3, q3, eqFilterModes[2], sr);
+    EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+    newCoeffs[0] = computeEqCoeffs(f1, g1, q1, eqFilterModes[0], sr);
+    newCoeffs[1] = computeEqCoeffs(f2, g2, q2, eqFilterModes[1], sr);
+    newCoeffs[2] = computeEqCoeffs(f3, g3, q3, eqFilterModes[2], sr);
+    eqCoeffDB.writeFromUI(newCoeffs);
 
     // Reset filter state to avoid a transient when coefficients change.
     if (enabled) resetEqState();
@@ -2223,10 +2291,13 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
     eqFilterModes[1] = mode2;
     eqFilterModes[2] = mode3;
 
+    // OPT 2: Compute all 3 bands on UI thread, write to double buffer in one shot.
     const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-    computeAndStoreEqCoeffs(0, sampleCard.getEqBandFreq(0), sampleCard.getEqBandGain(0), sampleCard.getEqBandQ(0), mode1, sr);
-    computeAndStoreEqCoeffs(1, sampleCard.getEqBandFreq(1), sampleCard.getEqBandGain(1), sampleCard.getEqBandQ(1), mode2, sr);
-    computeAndStoreEqCoeffs(2, sampleCard.getEqBandFreq(2), sampleCard.getEqBandGain(2), sampleCard.getEqBandQ(2), mode3, sr);
+    EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+    newCoeffs[0] = computeEqCoeffs(sampleCard.getEqBandFreq(0), sampleCard.getEqBandGain(0), sampleCard.getEqBandQ(0), mode1, sr);
+    newCoeffs[1] = computeEqCoeffs(sampleCard.getEqBandFreq(1), sampleCard.getEqBandGain(1), sampleCard.getEqBandQ(1), mode2, sr);
+    newCoeffs[2] = computeEqCoeffs(sampleCard.getEqBandFreq(2), sampleCard.getEqBandGain(2), sampleCard.getEqBandQ(2), mode3, sr);
+    eqCoeffDB.writeFromUI(newCoeffs);
 
     if (eqActive.load()) resetEqState();
 
