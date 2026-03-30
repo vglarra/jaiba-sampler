@@ -8,30 +8,41 @@ class ConfigurationManager
 public:
     ConfigurationManager()
     {
-        // Set up the properties file
         juce::PropertiesFile::Options options;
         options.applicationName = "JaivaSampler";
         options.filenameSuffix = ".settings";
         options.folderName = "JaivaSampler";
         options.osxLibrarySubFolder = "Application Support";
-        // Default is 3000ms — means saveIfNeeded() skips the write if called within 3s
-        // of the last save.  Set to 0 so every saveIfNeeded() call writes to disk immediately.
-        options.millisecondsBeforeSaving = 0;
+        // Large value — we control all flushes explicitly via flush().
+        // saveIfNeeded() calls inside setters are intentionally removed.
+        options.millisecondsBeforeSaving = 60000;
 
         propertiesFile = std::make_unique<juce::PropertiesFile>(options);
     }
-    
+
     ~ConfigurationManager()
     {
-        propertiesFile->saveIfNeeded();
+        propertiesFile->save();   // Final flush on shutdown
     }
-    
+
+    // Flush all pending in-memory changes to disk — call this once after a batch of setValue() calls.
+    void flush()
+    {
+        propertiesFile->save();
+    }
+
+    // Legacy alias kept for existing call sites in MainComponent.cpp
+    void saveNow() { flush(); }
+
+    //==============================================================================
+    // All setters below are in-memory only — they do NOT flush to disk.
+    // Call flush() (or saveNow()) once after a batch of saves.
+
     void saveLastDirectory(const juce::File& directory)
     {
         propertiesFile->setValue("lastDirectory", directory.getFullPathName());
-        propertiesFile->saveIfNeeded();
     }
-    
+
     juce::File getLastDirectory()
     {
         juce::String path = propertiesFile->getValue("lastDirectory");
@@ -43,13 +54,12 @@ public:
         }
         return juce::File::getSpecialLocation(juce::File::userHomeDirectory);
     }
-    
+
     void saveLastSample(const juce::File& sample)
     {
         propertiesFile->setValue("lastSample", sample.getFullPathName());
-        propertiesFile->saveIfNeeded();
     }
-    
+
     juce::File getLastSample()
     {
         juce::String path = propertiesFile->getValue("lastSample");
@@ -61,37 +71,27 @@ public:
         }
         return juce::File();
     }
-    
+
     void saveMidiSettings(int midiNote, int midiChannel, const juce::String& midiDevice)
     {
-        propertiesFile->setValue("midiNote", midiNote);
+        propertiesFile->setValue("midiNote",    midiNote);
         propertiesFile->setValue("midiChannel", midiChannel);
-        propertiesFile->setValue("midiDevice", midiDevice);
-        propertiesFile->saveIfNeeded();
+        propertiesFile->setValue("midiDevice",  midiDevice);
     }
-    
+
     void savePitchOffset(int pitchOffsetCents)
     {
         propertiesFile->setValue("pitchOffsetCents", pitchOffsetCents);
-        propertiesFile->saveIfNeeded();  // writes immediately because millisecondsBeforeSaving=0
-    }
-
-    // Force a full flush to disk — call from destructor and any critical save points.
-    void saveNow()
-    {
-        propertiesFile->save();
     }
 
     void saveVolume(float volume)
     {
         propertiesFile->setValue("volume", (double)volume);
-        propertiesFile->saveIfNeeded();
     }
 
     void saveStartPoint(double startPointSeconds)
     {
         propertiesFile->setValue("startPointSeconds", startPointSeconds);
-        propertiesFile->saveIfNeeded();
     }
 
     double getStartPoint()
@@ -102,30 +102,26 @@ public:
     void saveEndPoint(double endPointSeconds)
     {
         propertiesFile->setValue("endPointSeconds", endPointSeconds);
-        propertiesFile->saveIfNeeded();
     }
 
-    // Returns -1.0 if not saved (sentinel meaning "use full sample length")
     double getEndPoint()
     {
         return propertiesFile->getDoubleValue("endPointSeconds", -1.0);
     }
-    
+
     void saveMasterVolume(float volume)
     {
         propertiesFile->setValue("masterVolume", (double)volume);
-        propertiesFile->saveIfNeeded();
     }
 
     float getMasterVolume()
     {
-        return (float)propertiesFile->getDoubleValue("masterVolume", 0.7); // Default 70%
+        return (float)propertiesFile->getDoubleValue("masterVolume", 0.7);
     }
 
     void saveLoopEnabled(bool loopEnabled)
     {
         propertiesFile->setValue("loopEnabled", loopEnabled);
-        propertiesFile->saveIfNeeded();
     }
 
     bool getLoopEnabled()
@@ -136,7 +132,6 @@ public:
     void saveGridSnapEnabled(bool enabled)
     {
         propertiesFile->setValue("gridSnapEnabled", enabled);
-        propertiesFile->saveIfNeeded();
     }
 
     bool getGridSnapEnabled()
@@ -147,41 +142,36 @@ public:
     void saveGridResolutionIndex(int index)
     {
         propertiesFile->setValue("gridResolutionIndex", index);
-        propertiesFile->saveIfNeeded();
     }
 
     int getGridResolutionIndex()
     {
-        return propertiesFile->getIntValue("gridResolutionIndex", 5); // default 1s
+        return propertiesFile->getIntValue("gridResolutionIndex", 5);
     }
 
     void saveOneShotEnabled(bool enabled)
     {
         propertiesFile->setValue("oneShotEnabled", enabled);
-        propertiesFile->saveIfNeeded();
     }
 
     bool getOneShotEnabled()
     {
-        return propertiesFile->getBoolValue("oneShotEnabled", false); // default OFF
+        return propertiesFile->getBoolValue("oneShotEnabled", false);
     }
 
     void saveReverseEnabled(bool enabled)
     {
         propertiesFile->setValue("reverseEnabled", enabled);
-        propertiesFile->saveIfNeeded();
     }
 
     bool getReverseEnabled()
     {
-        return propertiesFile->getBoolValue("reverseEnabled", false); // default OFF
+        return propertiesFile->getBoolValue("reverseEnabled", false);
     }
 
-    // Base tuning frequency — key 'baseTuningHz' (default 440.0 Hz, range 400–480)
     void saveBaseTuningHz(double hz)
     {
         propertiesFile->setValue("baseTuningHz", hz);
-        propertiesFile->saveIfNeeded();
     }
 
     double getBaseTuningHz()
@@ -189,11 +179,9 @@ public:
         return propertiesFile->getDoubleValue("baseTuningHz", 440.0);
     }
 
-    // Microtonal pitch step size — key 'pitchStepCents' (default 100 = 1 semitone)
     void savePitchStepCents(int cents)
     {
         propertiesFile->setValue("pitchStepCents", cents);
-        propertiesFile->saveIfNeeded();
     }
 
     int getPitchStepCents()
@@ -201,23 +189,19 @@ public:
         return propertiesFile->getIntValue("pitchStepCents", 100);
     }
 
-    // FIX 3: transient detection on/off — key 'transientDetectionEnabled'
     void saveTransientDetectionEnabled(bool enabled)
     {
         propertiesFile->setValue("transientDetectionEnabled", enabled);
-        propertiesFile->saveIfNeeded();
     }
 
     bool getTransientDetectionEnabled()
     {
-        return propertiesFile->getBoolValue("transientDetectionEnabled", true); // default ON
+        return propertiesFile->getBoolValue("transientDetectionEnabled", true);
     }
 
-    // Active tab index — key 'activeTab' (default 0 = Controls)
     void saveActiveTab(int tabIndex)
     {
         propertiesFile->setValue("activeTab", tabIndex);
-        propertiesFile->saveIfNeeded();
     }
 
     int getActiveTab()
@@ -225,24 +209,19 @@ public:
         return propertiesFile->getIntValue("activeTab", 0);
     }
 
-    // FIX 2: user-selected resolution in milliseconds — key 'gridResolution'
-    // Returns -1.0 if the user has never manually selected a resolution.
     void saveGridResolutionMs(double ms)
     {
         propertiesFile->setValue("gridResolution", ms);
-        propertiesFile->saveIfNeeded();
     }
 
     double getGridResolutionMs()
     {
-        return propertiesFile->getDoubleValue("gridResolution", -1.0); // -1 = never set
+        return propertiesFile->getDoubleValue("gridResolution", -1.0);
     }
 
-    // Waveform zoom state — keys 'zoomLevel' (multiplier) and 'zoomScrollPosition' (normalized 0-1)
     void saveZoomLevel(float zoomLevel)
     {
         propertiesFile->setValue("zoomLevel", (double)zoomLevel);
-        propertiesFile->saveIfNeeded();
     }
 
     float getZoomLevel()
@@ -253,7 +232,6 @@ public:
     void saveZoomScrollPosition(float normalizedScroll)
     {
         propertiesFile->setValue("zoomScrollPosition", (double)normalizedScroll);
-        propertiesFile->saveIfNeeded();
     }
 
     float getZoomScrollPosition()
@@ -261,34 +239,36 @@ public:
         return (float)propertiesFile->getDoubleValue("zoomScrollPosition", 0.0);
     }
 
-    // NEW: Save audio device settings
-    void saveAudioSettings(int bufferSize, double sampleRate, const juce::String& deviceType, const juce::String& outputDeviceName)
+    void saveAudioSettings(int bufferSize, double sampleRate,
+                           const juce::String& deviceType,
+                           const juce::String& outputDeviceName)
     {
-        propertiesFile->setValue("audioBufferSize", bufferSize);
-        propertiesFile->setValue("audioSampleRate", sampleRate);
-        propertiesFile->setValue("audioDeviceType", deviceType);
+        propertiesFile->setValue("audioBufferSize",   bufferSize);
+        propertiesFile->setValue("audioSampleRate",   sampleRate);
+        propertiesFile->setValue("audioDeviceType",   deviceType);
         propertiesFile->setValue("audioOutputDevice", outputDeviceName);
-        propertiesFile->saveIfNeeded();
+        // Audio settings are saved only when the device actually changes,
+        // so flush immediately here (rare event, acceptable latency).
+        flush();
     }
-    
+
     int getMidiNote()
     {
-        return propertiesFile->getIntValue("midiNote", 60); // Default to middle C
+        return propertiesFile->getIntValue("midiNote", 60);
     }
-    
+
     int getMidiChannel()
     {
-        return propertiesFile->getIntValue("midiChannel", 1); // Default to channel 1
+        return propertiesFile->getIntValue("midiChannel", 1);
     }
-    
+
     juce::String getMidiDevice()
     {
         return propertiesFile->getValue("midiDevice");
     }
-    
+
     int getPitchOffset()
     {
-        // New key stores cents directly; fall back to old semitone key × 100 for migration
         if (propertiesFile->containsKey("pitchOffsetCents"))
             return propertiesFile->getIntValue("pitchOffsetCents", 0);
         int semitones = propertiesFile->getIntValue("pitchOffset", 0);
@@ -297,30 +277,29 @@ public:
 
     float getVolume()
     {
-        return (float)propertiesFile->getDoubleValue("volume", 1.0); // Default to full volume
+        return (float)propertiesFile->getDoubleValue("volume", 1.0);
     }
-    
-    // NEW: Get audio settings
+
     int getAudioBufferSize()
     {
-        return propertiesFile->getIntValue("audioBufferSize", 512); // Default to 512
+        return propertiesFile->getIntValue("audioBufferSize", 512);
     }
-    
+
     double getAudioSampleRate()
     {
-        return propertiesFile->getDoubleValue("audioSampleRate", 44100.0); // Default to 44.1kHz
+        return propertiesFile->getDoubleValue("audioSampleRate", 44100.0);
     }
-    
+
     juce::String getAudioDeviceType()
     {
         return propertiesFile->getValue("audioDeviceType");
     }
-    
+
     juce::String getAudioOutputDevice()
     {
         return propertiesFile->getValue("audioOutputDevice");
     }
-    
+
     juce::String getSettingsFilePath() const
     {
         return propertiesFile->getFile().getFullPathName();
@@ -328,60 +307,47 @@ public:
 
     //==============================================================================
     // Per-sample state — each sample file has its own independently saved values.
-    // Key is a hex hash of the absolute file path (safe for use as XML attribute name).
-    // Per-sample state — start/end points, volume, loop only.
-    // Pitch is NOT per-sample — it is a single global session value (see savePitchOffset/getPitchOffset).
     struct SampleState
     {
-        double startPoint       = 0.0;
-        double endPoint         = -1.0;  // sentinel: -1.0 = full length
-        float  volume           = 1.0f;
-        bool   loopEnabled      = false;
-        double transientThreshold = 4.0; // RMS multiplier for transient detection
-        juce::String detectedNoteName;   // e.g. "D3" — empty if never tuned
-        double detectedFreqHz   = 0.0;   // detected frequency in Hz
-        int    basePitchOffset  = 0;     // hidden tune correction; user pitch 0 = this note
-        bool   exists           = false; // false = no saved state found for this file
-        // ADSR envelope per sample
-        bool   adsrEnabled      = false;
-        float  adsrAttackMs     = 0.0f;
-        float  adsrDecayMs      = 0.0f;
-        float  adsrSustain      = 1.0f;
-        float  adsrReleaseMs    = 0.0f;
-        // Parametric EQ per sample (3 bands)
-        bool   eqEnabled        = false;
-        float  eq1Freq          = 100.0f;
-        float  eq1Gain          = 0.0f;
-        float  eq1Q             = 1.0f;
-        int    eq1Mode          = 2;     // 0=LowCut 1=LowShelf 2=Bell 3=Notch 4=HighShelf 5=HighCut
-        float  eq2Freq          = 500.0f;
-        float  eq2Gain          = 0.0f;
-        float  eq2Q             = 1.0f;
-        int    eq2Mode          = 2;
-        float  eq3Freq          = 8000.0f;
-        float  eq3Gain          = 0.0f;
-        float  eq3Q             = 1.0f;
-        int    eq3Mode          = 2;
+        double startPoint         = 0.0;
+        double endPoint           = -1.0;
+        float  volume             = 1.0f;
+        bool   loopEnabled        = false;
+        double transientThreshold = 4.0;
+        juce::String detectedNoteName;
+        double detectedFreqHz     = 0.0;
+        int    basePitchOffset    = 0;
+        bool   exists             = false;
+        // ADSR
+        bool   adsrEnabled        = false;
+        float  adsrAttackMs       = 0.0f;
+        float  adsrDecayMs        = 0.0f;
+        float  adsrSustain        = 1.0f;
+        float  adsrReleaseMs      = 0.0f;
+        // EQ (3 bands)
+        bool   eqEnabled          = false;
+        float  eq1Freq = 100.0f,  eq1Gain = 0.0f, eq1Q = 1.0f; int eq1Mode = 2;
+        float  eq2Freq = 500.0f,  eq2Gain = 0.0f, eq2Q = 1.0f; int eq2Mode = 2;
+        float  eq3Freq = 8000.0f, eq3Gain = 0.0f, eq3Q = 1.0f; int eq3Mode = 2;
     };
 
+    // Store per-sample values in memory only. Call flush() after this if you want an immediate write.
     void saveSampleState(const juce::File& file, const SampleState& s)
     {
         auto k = sampleKey(file);
-        propertiesFile->setValue(k + "_start",    s.startPoint);
-        propertiesFile->setValue(k + "_end",      s.endPoint);
-        propertiesFile->setValue(k + "_vol",      (double)s.volume);
-        propertiesFile->setValue(k + "_loop",     s.loopEnabled);
-        propertiesFile->setValue(k + "_thresh",   s.transientThreshold);
-        propertiesFile->setValue(k + "_notename",   s.detectedNoteName);
+        propertiesFile->setValue(k + "_start",     s.startPoint);
+        propertiesFile->setValue(k + "_end",       s.endPoint);
+        propertiesFile->setValue(k + "_vol",       (double)s.volume);
+        propertiesFile->setValue(k + "_loop",      s.loopEnabled);
+        propertiesFile->setValue(k + "_thresh",    s.transientThreshold);
+        propertiesFile->setValue(k + "_notename",  s.detectedNoteName);
         propertiesFile->setValue(k + "_notehz",    s.detectedFreqHz);
         propertiesFile->setValue(k + "_basepitch", s.basePitchOffset);
-        // ADSR per sample
         propertiesFile->setValue(k + "_adsren",    s.adsrEnabled);
         propertiesFile->setValue(k + "_adsratk",   (double)s.adsrAttackMs);
         propertiesFile->setValue(k + "_adsrdcy",   (double)s.adsrDecayMs);
         propertiesFile->setValue(k + "_adsrsus",   (double)s.adsrSustain);
         propertiesFile->setValue(k + "_adsrrel",   (double)s.adsrReleaseMs);
-        // EQ per sample
         propertiesFile->setValue(k + "_eqen",      s.eqEnabled);
         propertiesFile->setValue(k + "_eq1f",      (double)s.eq1Freq);
         propertiesFile->setValue(k + "_eq1g",      (double)s.eq1Gain);
@@ -395,48 +361,44 @@ public:
         propertiesFile->setValue(k + "_eq3g",      (double)s.eq3Gain);
         propertiesFile->setValue(k + "_eq3q",      (double)s.eq3Q);
         propertiesFile->setValue(k + "_eq3mode",   s.eq3Mode);
-        propertiesFile->saveIfNeeded();
+        // No flush here — caller decides when to flush.
     }
 
     SampleState getSampleState(const juce::File& file) const
     {
         auto k = sampleKey(file);
         SampleState s;
-        s.exists              = propertiesFile->containsKey(k + "_start");
-        s.startPoint          = propertiesFile->getDoubleValue(k + "_start",    0.0);
-        s.endPoint            = propertiesFile->getDoubleValue(k + "_end",      -1.0);
-        s.volume              = (float)propertiesFile->getDoubleValue(k + "_vol",     1.0);
-        s.loopEnabled         = propertiesFile->getBoolValue  (k + "_loop",     false);
-        s.transientThreshold  = propertiesFile->getDoubleValue(k + "_thresh",   4.0);
-        s.detectedNoteName    = propertiesFile->getValue      (k + "_notename",   "");
-        s.detectedFreqHz      = propertiesFile->getDoubleValue(k + "_notehz",   0.0);
-        s.basePitchOffset     = propertiesFile->getIntValue   (k + "_basepitch", 0);
-        // ADSR per sample
-        s.adsrEnabled         = propertiesFile->getBoolValue  (k + "_adsren",    false);
-        s.adsrAttackMs        = (float)propertiesFile->getDoubleValue(k + "_adsratk", 0.0);
-        s.adsrDecayMs         = (float)propertiesFile->getDoubleValue(k + "_adsrdcy", 0.0);
-        s.adsrSustain         = (float)propertiesFile->getDoubleValue(k + "_adsrsus", 1.0);
-        s.adsrReleaseMs       = (float)propertiesFile->getDoubleValue(k + "_adsrrel", 0.0);
-        // EQ per sample
-        s.eqEnabled           = propertiesFile->getBoolValue  (k + "_eqen",      false);
-        s.eq1Freq             = (float)propertiesFile->getDoubleValue(k + "_eq1f",  100.0);
-        s.eq1Gain             = (float)propertiesFile->getDoubleValue(k + "_eq1g",    0.0);
-        s.eq1Q                = (float)propertiesFile->getDoubleValue(k + "_eq1q",    1.0);
-        s.eq1Mode             = propertiesFile->getIntValue   (k + "_eq1mode",    2);
-        s.eq2Freq             = (float)propertiesFile->getDoubleValue(k + "_eq2f",  500.0);
-        s.eq2Gain             = (float)propertiesFile->getDoubleValue(k + "_eq2g",    0.0);
-        s.eq2Q                = (float)propertiesFile->getDoubleValue(k + "_eq2q",    1.0);
-        s.eq2Mode             = propertiesFile->getIntValue   (k + "_eq2mode",    2);
-        s.eq3Freq             = (float)propertiesFile->getDoubleValue(k + "_eq3f", 8000.0);
-        s.eq3Gain             = (float)propertiesFile->getDoubleValue(k + "_eq3g",    0.0);
-        s.eq3Q                = (float)propertiesFile->getDoubleValue(k + "_eq3q",    1.0);
-        s.eq3Mode             = propertiesFile->getIntValue   (k + "_eq3mode",    2);
+        s.exists             = propertiesFile->containsKey(k + "_start");
+        s.startPoint         = propertiesFile->getDoubleValue(k + "_start",    0.0);
+        s.endPoint           = propertiesFile->getDoubleValue(k + "_end",      -1.0);
+        s.volume             = (float)propertiesFile->getDoubleValue(k + "_vol",    1.0);
+        s.loopEnabled        = propertiesFile->getBoolValue  (k + "_loop",     false);
+        s.transientThreshold = propertiesFile->getDoubleValue(k + "_thresh",   4.0);
+        s.detectedNoteName   = propertiesFile->getValue      (k + "_notename", "");
+        s.detectedFreqHz     = propertiesFile->getDoubleValue(k + "_notehz",   0.0);
+        s.basePitchOffset    = propertiesFile->getIntValue   (k + "_basepitch", 0);
+        s.adsrEnabled        = propertiesFile->getBoolValue  (k + "_adsren",   false);
+        s.adsrAttackMs       = (float)propertiesFile->getDoubleValue(k + "_adsratk", 0.0);
+        s.adsrDecayMs        = (float)propertiesFile->getDoubleValue(k + "_adsrdcy", 0.0);
+        s.adsrSustain        = (float)propertiesFile->getDoubleValue(k + "_adsrsus", 1.0);
+        s.adsrReleaseMs      = (float)propertiesFile->getDoubleValue(k + "_adsrrel", 0.0);
+        s.eqEnabled          = propertiesFile->getBoolValue  (k + "_eqen",     false);
+        s.eq1Freq            = (float)propertiesFile->getDoubleValue(k + "_eq1f",  100.0);
+        s.eq1Gain            = (float)propertiesFile->getDoubleValue(k + "_eq1g",    0.0);
+        s.eq1Q               = (float)propertiesFile->getDoubleValue(k + "_eq1q",    1.0);
+        s.eq1Mode            = propertiesFile->getIntValue   (k + "_eq1mode",   2);
+        s.eq2Freq            = (float)propertiesFile->getDoubleValue(k + "_eq2f",  500.0);
+        s.eq2Gain            = (float)propertiesFile->getDoubleValue(k + "_eq2g",    0.0);
+        s.eq2Q               = (float)propertiesFile->getDoubleValue(k + "_eq2q",    1.0);
+        s.eq2Mode            = propertiesFile->getIntValue   (k + "_eq2mode",   2);
+        s.eq3Freq            = (float)propertiesFile->getDoubleValue(k + "_eq3f", 8000.0);
+        s.eq3Gain            = (float)propertiesFile->getDoubleValue(k + "_eq3g",    0.0);
+        s.eq3Q               = (float)propertiesFile->getDoubleValue(k + "_eq3q",    1.0);
+        s.eq3Mode            = propertiesFile->getIntValue   (k + "_eq3mode",   2);
         return s;
     }
 
 private:
-    // Encode file path as a safe XML attribute key by hashing the full path.
-    // Prefix "p" ensures it never starts with a digit (XML attribute requirement).
     juce::String sampleKey(const juce::File& file) const
     {
         return "p" + juce::String::toHexString(file.getFullPathName().hashCode64());
@@ -444,5 +406,3 @@ private:
 
     std::unique_ptr<juce::PropertiesFile> propertiesFile;
 };
-
-

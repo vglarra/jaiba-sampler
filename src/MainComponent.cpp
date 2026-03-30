@@ -183,12 +183,17 @@ MainComponent::MainComponent()
     // Load last session (sample, MIDI settings, directory)
     loadLastSession();
     
+    // Start heartbeat — prints every 100ms on its own thread so we can see
+    // exactly which intervals the message thread is blocked during sample loads.
+    heartbeatThread.startThread(juce::Thread::Priority::low);
+
     printf("DEBUG: MainComponent constructor completed\n");
     fflush(stdout);
 }
 
 MainComponent::~MainComponent()
 {
+    heartbeatThread.stopThread(500);
     masterVolumeKnob.setLookAndFeel(nullptr);
     cpuTimer.stopTimer();
     navSaveTimer.stopTimer();
@@ -1463,6 +1468,9 @@ void MainComponent::navigateToFile(int index)
 
     // Record navigation start time for latency measurement
     navStartTimeMs = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
+    printf("[LOAD-TIMING] navigateToFile started for '%s'\n",
+           folderAudioFiles[index].getFileName().toRawUTF8());
+    fflush(stdout);
 
     // Step 1 — Save current sample state to disk BEFORE anything changes.
     // Must be synchronous here so the card still holds the true values.
@@ -1504,6 +1512,11 @@ void MainComponent::navigateToFile(int index)
 void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, bool resetZoom, bool deferTransients)
 {
     // ── Background thread: read audio data ────────────────────────────────────────
+    const juce::int64 tBgStart = (juce::int64)juce::Time::getMillisecondCounter();
+    printf("[LOAD-TIMING] background job started for '%s'\n",
+           file.getFileName().toRawUTF8());
+    fflush(stdout);
+
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
 
     if (reader == nullptr)
@@ -1520,7 +1533,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
     auto* sample = new MappedSample();
     sample->file   = file;
     sample->name   = file.getFileName();
-    int currentNote = sampleCard.getMidiNote();   // safe to read here (atomic-backed)
+    int currentNote = sampleCard.getMidiNote();
     sample->rootNote = currentNote;
     sample->lowNote  = currentNote;
     sample->highNote = currentNote;
@@ -1541,8 +1554,55 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
     }
     sample->audioData = std::move(buffer);
 
+    printf("[LOAD-TIMING] file read complete: %lldms\n",
+           (juce::int64)juce::Time::getMillisecondCounter() - tBgStart);
+    fflush(stdout);
+
+    // ── Pre-compute waveform peaks on background thread ───────────────────────────
+    // This eliminates all disk I/O from WaveformComponent::paint() — the bottleneck
+    // that was causing the 7-second message-thread freeze on every sample load.
+    const juce::int64 tPeakStart = (juce::int64)juce::Time::getMillisecondCounter();
+    const int    peakNumCh  = (int)reader->numChannels;
+    const juce::int64 peakNSamples = reader->lengthInSamples;
+    const double peakSR     = reader->sampleRate;
+
+    auto peaks = std::make_unique<WaveformPeakBin[]>(kWaveformPeakBins);
+    {
+        const float* left  = sample->audioData->getReadPointer(0);
+        const float* right = (peakNumCh > 1) ? sample->audioData->getReadPointer(1) : left;
+        for (int bin = 0; bin < kWaveformPeakBins; ++bin)
+        {
+            const juce::int64 sStart = (juce::int64)((double)bin       / kWaveformPeakBins * peakNSamples);
+            const juce::int64 sEnd   = (juce::int64)((double)(bin + 1) / kWaveformPeakBins * peakNSamples);
+            const juce::int64 safeEnd = juce::jmin(sEnd, peakNSamples);
+
+            WaveformPeakBin& pb = peaks[bin];
+            pb.minL = pb.minR = 1.0f;
+            pb.maxL = pb.maxR = -1.0f;
+
+            for (juce::int64 s = sStart; s < safeEnd; ++s)
+            {
+                pb.minL = juce::jmin(pb.minL, left[s]);
+                pb.maxL = juce::jmax(pb.maxL, left[s]);
+                pb.minR = juce::jmin(pb.minR, right[s]);
+                pb.maxR = juce::jmax(pb.maxR, right[s]);
+            }
+        }
+    }
+    printf("[LOAD-TIMING] peak computation done: %lldms  (%lld samples → %d bins)\n",
+           (juce::int64)juce::Time::getMillisecondCounter() - tPeakStart,
+           peakNSamples, kWaveformPeakBins);
+    fflush(stdout);
+
     // ── Message thread: stop audio, restore state, rebuild sampler ────────────────
-    juce::MessageManager::callAsync([this, sample, file, autoPlay, resetZoom, deferTransients]() {
+    juce::MessageManager::callAsync([this, sample, file, autoPlay, resetZoom, deferTransients,
+                                      peaks = std::move(peaks), peakNumCh, peakNSamples, peakSR,
+                                      tBgStart]() mutable {
+
+        const juce::int64 tMsgStart = (juce::int64)juce::Time::getMillisecondCounter();
+        printf("[LOAD-TIMING] callAsync lambda started: %lldms after bg job\n",
+               tMsgStart - tBgStart);
+        fflush(stdout);
 
         // ── Step 2: Stop all audio completely ─────────────────────────────────────
         muteOutput.store(true);   // audio thread bails immediately
@@ -1585,10 +1645,23 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         }
 
         sampleCard.setSampleName(file.getFileName());
+
+        // Deliver pre-computed peaks BEFORE setWaveform() so the very first repaint
+        // uses the peak data — zero disk I/O in paint() from this point forward.
+        printf("[LOAD-TIMING] setting waveform peaks + waveform: %lldms\n",
+               (juce::int64)juce::Time::getMillisecondCounter() - tMsgStart);
+        sampleCard.setWaveformPeaks(std::move(peaks), peakNumCh, peakNSamples, peakSR);
+
+        // Pass sample metadata already read on the background thread — this avoids
+        // a second createReaderFor() call on the message thread (was the 7s freeze for MP3).
         // During navigation (deferTransients=true) skip the blocking detectTransients()
         // call — the deferred timer will run it 800ms after navigation stops.
-        sampleCard.setWaveform(file, /*skipTransients=*/deferTransients);
+        sampleCard.setWaveform(file, /*skipTransients=*/deferTransients,
+                               /*knownTotalSamples=*/peakNSamples,
+                               /*knownSampleRate=*/peakSR);
         sampleCard.setDuration(sample->lengthInSamples / sample->sampleRate);
+        printf("[LOAD-TIMING] waveform set: %lldms\n",
+               (juce::int64)juce::Time::getMillisecondCounter() - tMsgStart);
 
         sample->rootNote = sampleCard.getMidiNote();
         sample->lowNote  = sample->rootNote;
@@ -1710,7 +1783,11 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         // Freeze is ALWAYS off — never persisted, reset already done above
 
         // ── Build sampler sounds with fully resolved state ─────────────────────────
+        printf("[LOAD-TIMING] updateSamplerSounds start: %lldms\n",
+               (juce::int64)juce::Time::getMillisecondCounter() - tMsgStart);
         updateSamplerSounds();
+        printf("[LOAD-TIMING] updateSamplerSounds done: %lldms\n",
+               (juce::int64)juce::Time::getMillisecondCounter() - tMsgStart);
 
         // Propagate current one-shot state to the freshly built sound(s).
         {
@@ -1783,6 +1860,8 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         }
 
         printf("[PERSIST] --- Load complete: %s ---\n", file.getFileName().toRawUTF8());
+        printf("[LOAD-TIMING] total message-thread work: %lldms\n",
+               (juce::int64)juce::Time::getMillisecondCounter() - tMsgStart);
         fflush(stdout);
 
         // Optional preview note
@@ -2385,12 +2464,104 @@ void MainComponent::checkOneShotTailDone()
 
 void MainComponent::flushNavigationSave()
 {
-    // Opt 2: Called once, 500ms after the last Prev/Next press.
-    // Writes the authoritative on-disk record for the sample that is now current.
-    printf("[NAV-SAVE] Deferred save firing — writing state for current sample\n");
-    saveCurrentSampleState();
-    saveCurrentSession();
+    // Called once, 500ms after the last Prev/Next press.
+    // Snapshot all saveable state on the message thread (fast, memory-only reads),
+    // then hand the disk write to a background thread so the message thread never blocks.
+
+    if (configManager == nullptr) return;
+
+    const auto tSnap = (juce::int64)juce::Time::getMillisecondCounter();
+    printf("[SAVE-TIMING] flushNavigationSave started — snapshotting state\n");
     fflush(stdout);
+
+    // ── Build snapshot on message thread ─────────────────────────────────────────
+    struct SaveSnap
+    {
+        int          midiNote, midiChannel, pitchOffsetCents;
+        juce::String midiDevice;
+        float        volume, masterVolume;
+        bool         loopEnabled;
+        bool         hasSample;
+        juce::File   sampleFile;
+        double       startPoint, endPoint;
+        ConfigurationManager::SampleState sampleState;
+    };
+
+    auto snap = std::make_shared<SaveSnap>();
+    snap->midiNote         = sampleCard.getMidiNote();
+    snap->midiChannel      = sampleCard.getMidiChannel();
+    snap->midiDevice       = currentMidiDeviceName;
+    snap->pitchOffsetCents = sampleCard.getPitchOffset();
+    snap->volume           = sampleCard.getVolume();
+    snap->masterVolume     = masterVolumeGain.load();
+    snap->loopEnabled      = sampleCard.isLoopEnabled();
+    snap->hasSample        = false;
+
+    {
+        juce::ScopedLock lock(sampleLock);
+        if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+        {
+            auto* sample      = samples[selectedSampleIndex];
+            snap->hasSample   = true;
+            snap->sampleFile  = sample->file;
+            snap->startPoint  = sample->startPointSeconds;
+            snap->endPoint    = sample->endPointSeconds;
+
+            auto& s = snap->sampleState;
+            s.startPoint         = sample->startPointSeconds;
+            s.endPoint           = sample->endPointSeconds;
+            s.volume             = sampleCard.getVolume();
+            s.loopEnabled        = sampleCard.isLoopEnabled();
+            s.transientThreshold = sampleCard.getTransientThreshold();
+            s.detectedNoteName   = sampleCard.getDetectedNoteName();
+            s.detectedFreqHz     = sampleCard.getDetectedFreqHz();
+            s.basePitchOffset    = sampleCard.getBasePitchOffset();
+            s.adsrEnabled        = sampleCard.isAdsrEnabled();
+            s.adsrAttackMs       = sampleCard.getAdsrAttackMs();
+            s.adsrDecayMs        = sampleCard.getAdsrDecayMs();
+            s.adsrSustain        = sampleCard.getAdsrSustain();
+            s.adsrReleaseMs      = sampleCard.getAdsrReleaseMs();
+            s.eqEnabled          = sampleCard.isEqEnabled();
+            s.eq1Freq  = sampleCard.getEqBandFreq(0); s.eq1Gain = sampleCard.getEqBandGain(0);
+            s.eq1Q     = sampleCard.getEqBandQ(0);    s.eq1Mode = eqFilterModes[0];
+            s.eq2Freq  = sampleCard.getEqBandFreq(1); s.eq2Gain = sampleCard.getEqBandGain(1);
+            s.eq2Q     = sampleCard.getEqBandQ(1);    s.eq2Mode = eqFilterModes[1];
+            s.eq3Freq  = sampleCard.getEqBandFreq(2); s.eq3Gain = sampleCard.getEqBandGain(2);
+            s.eq3Q     = sampleCard.getEqBandQ(2);    s.eq3Mode = eqFilterModes[2];
+        }
+    }
+
+    printf("[SAVE-TIMING] snapshot complete in %lldms — background save job started — message thread free\n",
+           (juce::int64)juce::Time::getMillisecondCounter() - tSnap);
+    fflush(stdout);
+
+    // ── All disk I/O on background thread ────────────────────────────────────────
+    backgroundThreads.addJob([this, snap]()
+    {
+        const auto t0 = (juce::int64)juce::Time::getMillisecondCounter();
+        printf("[SAVE-TIMING] background save started\n");
+        fflush(stdout);
+
+        configManager->saveMidiSettings(snap->midiNote, snap->midiChannel, snap->midiDevice);
+        configManager->savePitchOffset(snap->pitchOffsetCents);
+        configManager->saveVolume(snap->volume);
+        configManager->saveMasterVolume(snap->masterVolume);
+        configManager->saveLoopEnabled(snap->loopEnabled);
+
+        if (snap->hasSample)
+        {
+            configManager->saveLastSample(snap->sampleFile);
+            configManager->saveStartPoint(snap->startPoint);
+            configManager->saveEndPoint(snap->endPoint);
+            configManager->saveSampleState(snap->sampleFile, snap->sampleState);
+        }
+
+        configManager->flush();   // ONE disk write for everything above
+
+        printf("[SAVE-TIMING] background save complete: %lldms\n",
+               (juce::int64)juce::Time::getMillisecondCounter() - t0);
+        fflush(stdout);
+    });
 }
 
 void MainComponent::runDeferredTransientDetection()
@@ -2841,6 +3012,7 @@ void MainComponent::saveCurrentSampleState()
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
+    configManager->flush();   // ONE disk write for the entire sample state batch
     printf("[ADSR SAVE] adsrEnabled=%s  atk=%.0fms  dcy=%.0fms  sus=%.0f%%  rel=%.0fms  →  %s\n",
            s.adsrEnabled ? "true" : "false",
            s.adsrAttackMs, s.adsrDecayMs, s.adsrSustain * 100.0f, s.adsrReleaseMs,
@@ -2855,36 +3027,31 @@ void MainComponent::saveCurrentSampleState()
 
 void MainComponent::saveCurrentSession()
 {
-    // Always save MIDI settings
+    // Always save MIDI settings (in-memory only — flush at end)
     configManager->saveMidiSettings(
         sampleCard.getMidiNote(),
         sampleCard.getMidiChannel(),
         currentMidiDeviceName
     );
 
-    // Always save pitch, volume, and loop state (valid even without a loaded sample)
     configManager->savePitchOffset(sampleCard.getPitchOffset());
     configManager->saveVolume(sampleCard.getVolume());
     configManager->saveLoopEnabled(sampleCard.isLoopEnabled());
+    // NOTE: saveAudioSettings() intentionally NOT called here — audio device settings
+    // never change during normal session events. They are saved only in audioDeviceChanged().
 
-    // Save audio settings
-    saveAudioSettings();
-
-    // Save sample-specific values only when a sample is loaded
     if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
     {
         auto* sample = samples[selectedSampleIndex];
         configManager->saveLastSample(sample->file);
-
-        // Flat-key saves (legacy fallback for startup restore when no per-sample key exists)
         configManager->saveStartPoint(sample->startPointSeconds);
         configManager->saveEndPoint(sample->endPointSeconds);
-
-        // Per-sample keyed save — authoritative source for this file's state
+        // saveCurrentSampleState() does the per-sample write AND the single flush.
         saveCurrentSampleState();
     }
     else
     {
+        configManager->flush();   // flush global keys even with no sample loaded
         printf("Session saved (no sample) → %s\n", configManager->getSettingsFilePath().toRawUTF8());
     }
 }

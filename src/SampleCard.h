@@ -553,6 +553,16 @@ private:
 
 
 // ===========================================================================
+// Pre-computed waveform peak data — one bin covers totalSamples / kWaveformPeakBins samples.
+// Computed on the audio-loading background thread so WaveformComponent::paint() has
+// zero disk I/O, eliminating the multi-second message-thread freeze.
+struct WaveformPeakBin {
+    float minL = 0.0f, maxL = 0.0f;
+    float minR = 0.0f, maxR = 0.0f;
+};
+static constexpr int kWaveformPeakBins = 8192;
+
+// ===========================================================================
 
 class SampleCard : public juce::Component
 {
@@ -1278,6 +1288,16 @@ public:
         waveformViewport.setViewPosition(0, 0);
     }
 
+    // Deliver pre-computed peak data to WaveformComponent.
+    // Call this BEFORE setWaveform() inside the callAsync lambda so paint() has
+    // data ready on the very first repaint — no disk I/O on the message thread.
+    void setWaveformPeaks(std::unique_ptr<WaveformPeakBin[]> peaks,
+                          int numCh, juce::int64 numSamples, double sampleRate)
+    {
+        if (waveformComponent != nullptr)
+            waveformComponent->setAudioPeaks(std::move(peaks), numCh, numSamples, sampleRate);
+    }
+
     // Show "Loading..." in the waveform area immediately on button press — before
     // the background thread finishes reading the file. Cleared by setWaveform().
     void showLoadingState()
@@ -1984,7 +2004,10 @@ public:
         
     // skipTransients=true during rapid navigation: skip detectTransients() here and
     // let the deferred timer in MainComponent run it 800ms after navigation stops.
-    void setWaveform(const juce::File& audioFile, bool skipTransients = false)
+    // knownTotalSamples / knownSampleRate — pass values already obtained on the background
+    // thread to avoid creating a reader on the message thread (which blocks for ~7s on MP3).
+    void setWaveform(const juce::File& audioFile, bool skipTransients = false,
+                     juce::int64 knownTotalSamples = 0, double knownSampleRate = 0.0)
     {
         // Reset ADSR silently — notifyListeners=false prevents saveCurrentSampleState() from
         // firing here, which would clobber the PropertiesFile in-memory store with defaults
@@ -2005,16 +2028,30 @@ public:
 
         // CRITICAL FIX #1: Store file FIRST
         currentAudioFile = audioFile;
-        
+
         if (audioFile.existsAsFile())
         {
-            std::unique_ptr<juce::AudioFormatReader> reader(
-                formatManager.createReaderFor(audioFile));
-            
-            if (reader != nullptr)
+            // If sample metadata was already read on the background thread, use it directly —
+            // avoids calling createReaderFor() on the message thread (blocks ~7s for MP3).
+            const bool haveMetadata = (knownTotalSamples > 0 && knownSampleRate > 0.0);
+            if (haveMetadata)
             {
-                originalLengthInSamples = reader->lengthInSamples;
-                originalSampleRate = reader->sampleRate;
+                originalLengthInSamples = knownTotalSamples;
+                originalSampleRate      = knownSampleRate;
+            }
+
+            // Only create a reader if we don't already have the metadata.
+            std::unique_ptr<juce::AudioFormatReader> reader;
+            if (!haveMetadata)
+                reader.reset(formatManager.createReaderFor(audioFile));
+
+            if (haveMetadata || reader != nullptr)
+            {
+                if (!haveMetadata)
+                {
+                    originalLengthInSamples = reader->lengthInSamples;
+                    originalSampleRate = reader->sampleRate;
+                }
                 
                 // CRITICAL FIX #2: Reset scroll position BEFORE anything else
                 // Reset zoom on new sample load
@@ -2331,11 +2368,14 @@ public:
                 {
                     currentAudioFile = newFile;
 
-                    // CRITICAL FIX: Clear ALL cached data, not just the reader
+                    // Invalidate pre-computed peaks — new peaks arrive via setAudioPeaks()
+                    peaksReady.store(false);
+
+                    // Clear legacy reader cache (kept for detectTransients compatibility)
                     cachedReader.reset();
-                    cachedTotalLength = 0;      // CLEAR THIS!
-                    cachedNumChannels = 0;      // CLEAR THIS!
-                    lastFile = juce::File();    // Force cache regeneration on next paint()
+                    cachedTotalLength = 0;
+                    cachedNumChannels = 0;
+                    lastFile = juce::File();
                 }
 
                 repaint();  // Always repaint so the loading overlay is cleared
@@ -2378,60 +2418,42 @@ public:
                     g.drawText("No waveform", bounds, juce::Justification::centred, true);
                     return;
                 }
-                
-                // ===== CRITICAL FIX #1: Regenerate reader if cache is invalid =====
-                if (currentAudioFile != lastFile || cachedReader == nullptr || cachedTotalLength <= 0)
+
+                // Use pre-computed peaks — zero disk I/O on the message thread.
+                // Peaks are built on the background thread before callAsync and set via
+                // setAudioPeaks(). Until they arrive paint() shows a brief placeholder.
+                if (!peaksReady.load())
                 {
-                    cachedReader.reset(formatManager.createReaderFor(currentAudioFile));
-                    lastFile = currentAudioFile;
-                    
-                    if (cachedReader != nullptr)
-                    {
-                        cachedTotalLength = cachedReader->lengthInSamples;
-                        cachedNumChannels = cachedReader->numChannels;
-                        printf("WaveformComponent: NEW READER for %s (%lld samples, %d ch)\n",
-                            currentAudioFile.getFileName().toRawUTF8(),
-                            cachedTotalLength, cachedNumChannels);
-                    }
-                    else
-                    {
-                        printf("WaveformComponent: FAILED to create reader for %s\n",
-                            currentAudioFile.getFileName().toRawUTF8());
-                    }
-                }
-                
-                if (cachedReader == nullptr || cachedTotalLength <= 0)
-                {
-                    g.setColour(juce::Colour(0xFF888888));
-                    g.setFont(juce::Font(14.0f, juce::Font::italic));
-                    g.drawText("Cannot read audio file", bounds, juce::Justification::centred, true);
+                    g.setColour(juce::Colour(0xFFD0D0D0));
+                    g.fillRect(bounds);
+                    g.setColour(juce::Colour(0xFF555555));
+                    g.setFont(juce::Font(13.0f, juce::Font::italic));
+                    g.drawText("Building waveform...", bounds, juce::Justification::centred, true);
                     return;
                 }
-                
+
                 // Split inner area: top strip = time ruler, remaining = waveform
                 const int rulerHeight = 16;
                 auto innerBounds = bounds.reduced(2);
                 if (innerBounds.isEmpty())
                     return;
 
-                // Original duration for time ruler (use reader sample rate)
-                double originalDuration = 0.0;
-                if (cachedReader != nullptr && cachedReader->sampleRate > 0)
-                    originalDuration = (double)cachedTotalLength / cachedReader->sampleRate;
+                // Dimensions derived from pre-computed peak metadata (no file read)
+                const double originalDuration = (peakSampleRate > 0.0)
+                    ? (double)peakTotalSamples / peakSampleRate : 0.0;
 
-                auto rulerBounds = innerBounds.removeFromTop(rulerHeight);
-                auto waveformBounds = innerBounds;  // remaining area below ruler
+                auto rulerBounds    = innerBounds.removeFromTop(rulerHeight);
+                auto waveformBounds = innerBounds;
 
-                int renderWidth = waveformBounds.getWidth();
+                int renderWidth  = waveformBounds.getWidth();
                 int renderHeight = waveformBounds.getHeight();
-                int renderTop = waveformBounds.getY();
+                int renderTop    = waveformBounds.getY();
                 int renderBottom = waveformBounds.getBottom();
                 int renderCenter = waveformBounds.getCentreY();
-                
-                // Use double for totalLength to preserve precision
-                double totalLength = static_cast<double>(cachedTotalLength);
-                int numChannels = cachedNumChannels;
-                
+
+                double totalLength = static_cast<double>(peakTotalSamples);
+                int    numChannels = peakNumChannels;
+
                 if (totalLength <= 0 || numChannels <= 0)
                 {
                     g.setColour(juce::Colour(0xFF888888));
@@ -2454,7 +2476,7 @@ public:
                     samplesPerPixel = totalLength / renderWidth;
 
                     printf("EXPANDED: pitch=%d, expansion=%.2fx, renderWidth=%d, samplesPerPixel=%.4f, totalSamples=%lld\n",
-                        pitchOffset, expansionFactor, renderWidth, samplesPerPixel, cachedTotalLength);
+                        pitchOffset, expansionFactor, renderWidth, samplesPerPixel, peakTotalSamples);
                 }
                 else if (pitchOffset > 0) // Pitch UP - COMPRESSED view
                 {
@@ -2466,10 +2488,6 @@ public:
                 {
                     samplesPerPixel = totalLength / renderWidth;
                 }
-                
-                // Buffer for reading audio data
-                int bufferSize = 4096;
-                juce::AudioBuffer<float> tempBuffer(numChannels, bufferSize);
                 
                 // ===== DRAW MAIN WAVEFORM =====
                 if (numChannels > 1)
@@ -2483,82 +2501,34 @@ public:
                     int rightTop = renderTop + halfHeight;
                     int rightBottom = renderBottom;
                     
+                    // Use pre-computed peaks — array lookup only, no disk I/O
                     for (int x = 0; x < renderWidth; ++x)
                     {
-                        double pixelStartSample = x * samplesPerPixel;
-                        double pixelEndSample = pixelStartSample + samplesPerPixel;
-                        
-                        if (pixelStartSample >= totalLength)
+                        if ((double)x * samplesPerPixel >= totalLength)
                             break;
-                        
-                        pixelEndSample = juce::jmin(pixelEndSample, totalLength);
-                        
-                        // ===== CRITICAL FIX #3: Ensure at least 1 sample is read =====
-                        double sampleRange = pixelEndSample - pixelStartSample;
-                        int numSamples = juce::jmax(1, static_cast<int>(std::ceil(sampleRange)));
 
-                        // Ensure we don't read past the end of the file
-                        if (pixelStartSample + numSamples > totalLength)
-                            numSamples = static_cast<int>(totalLength - pixelStartSample);
+                        float leftMin, leftMax, rightMin, rightMax;
+                        getPeaksForPixel(x, samplesPerPixel, leftMin, leftMax, rightMin, rightMax);
 
-                        // Cap to buffer size — at high pitch-up the compression factor
-                        // makes samplesPerPixel very large; capping is safe because we
-                        // only need a min/max representative sample for each pixel.
-                        numSamples = juce::jmin(numSamples, bufferSize);
-
-                        if (numSamples <= 0)
-                            continue;
-
-                        // Read audio data
-                        bool readSuccess = cachedReader->read(&tempBuffer, 0, numSamples,
-                                                            static_cast<juce::int64>(pixelStartSample),
-                                                            true, true);
-                        
-                        if (!readSuccess)
-                            continue;
-                        
-                        float leftMin = 1.0f, leftMax = -1.0f;
-                        float rightMin = 1.0f, rightMax = -1.0f;
-                        
-                        for (int s = 0; s < numSamples; ++s)
-                        {
-                            float leftVal = tempBuffer.getSample(0, s);
-                            leftMin = std::min(leftMin, leftVal);
-                            leftMax = std::max(leftMax, leftVal);
-                            
-                            if (numChannels > 1)
-                            {
-                                float rightVal = tempBuffer.getSample(1, s);
-                                rightMin = std::min(rightMin, rightVal);
-                                rightMax = std::max(rightMax, rightVal);
-                            }
-                        }
-                        
                         float xPos = waveformBounds.getX() + x;
-                        
+
                         // Left channel
-                        float leftCenterY = leftTop + halfHeight * 0.5f;
+                        float leftCenterY    = leftTop + halfHeight * 0.5f;
                         float leftHalfHeight = halfHeight * 0.5f;
-                        float leftYMin = leftCenterY - (leftMin * leftHalfHeight);
-                        float leftYMax = leftCenterY - (leftMax * leftHalfHeight);
-                        float leftYTop = std::min(leftYMin, leftYMax);
-                        float leftYBottom = std::max(leftYMin, leftYMax);
-                        leftYTop = juce::jlimit((float)leftTop + 1.0f, (float)leftBottom - 1.0f, leftYTop);
-                        leftYBottom = juce::jlimit((float)leftTop + 1.0f, (float)leftBottom - 1.0f, leftYBottom);
-                        
+                        float leftYTop    = juce::jlimit((float)leftTop + 1.0f, (float)leftBottom - 1.0f,
+                                                          leftCenterY - leftMax * leftHalfHeight);
+                        float leftYBottom = juce::jlimit((float)leftTop + 1.0f, (float)leftBottom - 1.0f,
+                                                          leftCenterY - leftMin * leftHalfHeight);
                         leftPath.startNewSubPath(xPos, leftYTop);
                         leftPath.lineTo(xPos, leftYBottom);
-                        
+
                         // Right channel
-                        float rightCenterY = rightTop + halfHeight * 0.5f;
+                        float rightCenterY    = rightTop + halfHeight * 0.5f;
                         float rightHalfHeight = halfHeight * 0.5f;
-                        float rightYMin = rightCenterY - (rightMin * rightHalfHeight);
-                        float rightYMax = rightCenterY - (rightMax * rightHalfHeight);
-                        float rightYTop = std::min(rightYMin, rightYMax);
-                        float rightYBottom = std::max(rightYMin, rightYMax);
-                        rightYTop = juce::jlimit((float)rightTop + 1.0f, (float)rightBottom - 1.0f, rightYTop);
-                        rightYBottom = juce::jlimit((float)rightTop + 1.0f, (float)rightBottom - 1.0f, rightYBottom);
-                        
+                        float rightYTop    = juce::jlimit((float)rightTop + 1.0f, (float)rightBottom - 1.0f,
+                                                           rightCenterY - rightMax * rightHalfHeight);
+                        float rightYBottom = juce::jlimit((float)rightTop + 1.0f, (float)rightBottom - 1.0f,
+                                                           rightCenterY - rightMin * rightHalfHeight);
                         rightPath.startNewSubPath(xPos, rightYTop);
                         rightPath.lineTo(xPos, rightYBottom);
                     }
@@ -2595,63 +2565,24 @@ public:
                 }
                 else
                 {
-                    // MONO - draw single waveform
+                    // MONO - draw single waveform using pre-computed peaks
                     juce::Path waveformPath;
 
                     for (int x = 0; x < renderWidth; ++x)
                     {
-                        double pixelStartSample = x * samplesPerPixel;
-                        double pixelEndSample = pixelStartSample + samplesPerPixel;
-
-                        if (pixelStartSample >= totalLength)
+                        if ((double)x * samplesPerPixel >= totalLength)
                             break;
 
-                        pixelEndSample = juce::jmin(pixelEndSample, totalLength);
+                        float minVal, maxVal, dummyR1, dummyR2;
+                        getPeaksForPixel(x, samplesPerPixel, minVal, maxVal, dummyR1, dummyR2);
 
-                        // ===== CRITICAL FIX #3: Ensure at least 1 sample is read =====
-                        double sampleRange = pixelEndSample - pixelStartSample;
-                        int numSamples = juce::jmax(1, static_cast<int>(std::ceil(sampleRange)));
-
-                        if (pixelStartSample + numSamples > totalLength)
-                            numSamples = static_cast<int>(totalLength - pixelStartSample);
-
-                        // Cap to buffer size — prevents overflow at high pitch-up compression
-                        numSamples = juce::jmin(numSamples, bufferSize);
-
-                        if (numSamples <= 0)
-                            continue;
-
-                        bool readSuccess = cachedReader->read(&tempBuffer, 0, numSamples,
-                                                            static_cast<juce::int64>(pixelStartSample),
-                                                            true, true);
-
-                        if (!readSuccess)
-                            continue;
-
-                        float minVal = 1.0f;
-                        float maxVal = -1.0f;
-
-                        for (int s = 0; s < numSamples; ++s)
-                        {
-                            for (int ch = 0; ch < numChannels; ++ch)
-                            {
-                                float val = tempBuffer.getSample(ch, s);
-                                minVal = std::min(minVal, val);
-                                maxVal = std::max(maxVal, val);
-                            }
-                        }
-
-                        float xPos = waveformBounds.getX() + x;
-                        float centerY = renderTop + renderHeight * 0.5f;
-                        float halfHeight = renderHeight * 0.5f;
-                        float yMin = centerY - (minVal * halfHeight);
-                        float yMax = centerY - (maxVal * halfHeight);
-                        float yTop = std::min(yMin, yMax);
-                        float yBottom = std::max(yMin, yMax);
-                        yTop = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yTop);
-                        yBottom = juce::jlimit(renderTop + 1.0f, renderBottom - 1.0f, yBottom);
-
-                        // Draw vertical bar from min to max for each pixel (full waveform)
+                        float xPos      = waveformBounds.getX() + x;
+                        float centerY   = renderTop + renderHeight * 0.5f;
+                        float halfHt    = renderHeight * 0.5f;
+                        float yTop      = juce::jlimit((float)renderTop + 1.0f, (float)renderBottom - 1.0f,
+                                                        centerY - maxVal * halfHt);
+                        float yBottom   = juce::jlimit((float)renderTop + 1.0f, (float)renderBottom - 1.0f,
+                                                        centerY - minVal * halfHt);
                         waveformPath.startNewSubPath(xPos, yTop);
                         waveformPath.lineTo(xPos, yBottom);
                     }
@@ -2952,6 +2883,20 @@ public:
 
             void setScrollOffset(int scrollX) { viewScrollX = scrollX; }
 
+            // Set pre-computed peak data (computed on background thread before callAsync).
+            // After this call paint() has everything it needs — zero disk I/O on message thread.
+            void setAudioPeaks(std::unique_ptr<WaveformPeakBin[]> peaks,
+                               int numCh, juce::int64 numSamples, double sampleRate)
+            {
+                peakBinData      = std::move(peaks);
+                peakNumChannels  = numCh;
+                peakTotalSamples = numSamples;
+                peakSampleRate   = sampleRate;
+                peaksReady.store(true);
+                printf("[LOAD-TIMING] setAudioPeaks() — %d ch  %lld samples  %.1f Hz  peaks ready\n",
+                       numCh, numSamples, sampleRate);
+            }
+
             // Called by SampleCard's 60fps PlayheadTimer.
             // normalizedPos is the audio playback position mapped to [0,1] over the full sample.
             // Pass -1 to hide the playhead (no note playing).
@@ -3172,6 +3117,37 @@ public:
             float  adsrDecayMs    = 0.0f;
             float  adsrSustain    = 1.0f;
             float  adsrReleaseMs  = 0.0f;
+
+            // Pre-computed peak data — set by setAudioPeaks(), used by paint()
+            std::unique_ptr<WaveformPeakBin[]> peakBinData;
+            std::atomic<bool> peaksReady { false };
+            juce::int64 peakTotalSamples = 0;
+            int         peakNumChannels  = 0;
+            double      peakSampleRate   = 44100.0;
+
+            // Look up min/max for display pixel x at the given samplesPerPixel ratio.
+            // Spans one or more bins; returns symmetric values if only one channel stored.
+            void getPeaksForPixel(int x, double samplesPerPixel,
+                                  float& minL, float& maxL,
+                                  float& minR, float& maxR) const noexcept
+            {
+                const double invTotal = (peakTotalSamples > 0)
+                                        ? (double)kWaveformPeakBins / (double)peakTotalSamples
+                                        : 0.0;
+                const int b0 = juce::jlimit(0, kWaveformPeakBins - 1,
+                                             (int)(x * samplesPerPixel * invTotal));
+                const int b1 = juce::jlimit(b0 + 1, kWaveformPeakBins,
+                                             (int)((x + 1) * samplesPerPixel * invTotal) + 1);
+                minL = minR = 1.0f;
+                maxL = maxR = -1.0f;
+                for (int b = b0; b < b1; ++b)
+                {
+                    minL = juce::jmin(minL, peakBinData[b].minL);
+                    maxL = juce::jmax(maxL, peakBinData[b].maxL);
+                    minR = juce::jmin(minR, peakBinData[b].minR);
+                    maxR = juce::jmax(maxR, peakBinData[b].maxR);
+                }
+            }
 
             JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WaveformComponent)
         };

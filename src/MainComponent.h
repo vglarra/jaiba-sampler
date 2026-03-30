@@ -533,6 +533,30 @@ private:
     NavDebounceTimer navDebounceTimer { *this };
     void fireDebounceNavigation();
 
+    //==============================================================================
+    // Heartbeat thread — prints every 100ms on its own OS thread.
+    // During a message-thread freeze the heartbeat keeps printing, confirming
+    // that the process is alive and pinpointing which operation caused the hang.
+    class HeartbeatThread : public juce::Thread
+    {
+    public:
+        HeartbeatThread() : juce::Thread("UI Heartbeat") {}
+        void run() override
+        {
+            while (!threadShouldExit())
+            {
+                wait(100);
+                if (!threadShouldExit())
+                {
+                    printf("[HEARTBEAT] %lld\n",
+                           (long long)juce::Time::getMillisecondCounter());
+                    fflush(stdout);
+                }
+            }
+        }
+    };
+    HeartbeatThread heartbeatThread;
+
     // Called once after scanCurrentFolderForAudioFiles() completes (lazy scan on first Prev/Next).
     std::function<void()> postScanAction;
 
