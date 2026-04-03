@@ -201,6 +201,7 @@ MainComponent::~MainComponent()
     navDebounceTimer.stopTimer();
     pitchSaveTimer.stopTimer();
     eqSaveTimer.stopTimer();
+    markerSaveTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // OPT 1: Stop FFT worker thread before audio shutdown to prevent use-after-free
@@ -2051,6 +2052,8 @@ void MainComponent::volumeChanged(float volume)
 
 void MainComponent::startPointChanged(double startPointSeconds)
 {
+    const juce::int64 t0 = juce::Time::getMillisecondCounter();
+
     double sampleRate = 0.0;
     {
         juce::ScopedLock lock(sampleLock);
@@ -2077,14 +2080,20 @@ void MainComponent::startPointChanged(double startPointSeconds)
     }
 
     if (configManager != nullptr)
-        configManager->saveStartPoint(startPointSeconds);
+        configManager->saveStartPoint(startPointSeconds);  // in-memory only, no flush
 
-    saveCurrentSampleState();
-    printf("Start point set to: %.3f s\n", startPointSeconds);
+    markerSaveTimer.startTimer(400);  // one disk write 400ms after last movement
+
+    const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
+    printf("[MARKER-TIMING] Start position updated atomically: %lldms — no sound rebuild  (%.3fs)\n",
+           (long long)elapsed, startPointSeconds);
+    fflush(stdout);
 }
 
 void MainComponent::endPointChanged(double endPointSeconds)
 {
+    const juce::int64 t0 = juce::Time::getMillisecondCounter();
+
     double sampleRate     = 0.0;
     juce::int64 bufLen    = 0;
     {
@@ -2118,10 +2127,14 @@ void MainComponent::endPointChanged(double endPointSeconds)
     }
 
     if (configManager != nullptr)
-        configManager->saveEndPoint(endPointSeconds);
+        configManager->saveEndPoint(endPointSeconds);  // in-memory only, no flush
 
-    saveCurrentSampleState();
-    printf("End point set to: %.3f s\n", endPointSeconds);
+    markerSaveTimer.startTimer(400);  // one disk write 400ms after last movement
+
+    const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
+    printf("[MARKER-TIMING] End position updated atomically: %lldms — no sound rebuild  (%.3fs)\n",
+           (long long)elapsed, endPointSeconds);
+    fflush(stdout);
 }
 
 void MainComponent::loopEnabledChanged(bool isLooping)

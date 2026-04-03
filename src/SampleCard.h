@@ -2859,20 +2859,64 @@ public:
                 repaint();
             }
 
-            // Set start marker position (0.0 = start, 1.0 = end)
+            // Set start marker position (0.0 = start, 1.0 = end).
+            // Uses dirty-region repaint (only the affected vertical strip) when ADSR overlay
+            // is inactive, so the message thread stays free during continuous knob drag.
+            // Falls back to full repaint when ADSR overlay is on (its shape spans the region).
             void setStartMarker(float normalized)
             {
-                startMarkerNormalized = juce::jlimit(0.0f, endMarkerNormalized - 0.001f, normalized);
-                repaint();
+                const float newNorm = juce::jlimit(0.0f, endMarkerNormalized - 0.001f, normalized);
+                if (newNorm == startMarkerNormalized) return;
+
+                if (adsrOverlayEnabled)
+                {
+                    startMarkerNormalized = newNorm;
+                    repaint();
+                    return;
+                }
+
+                auto fullBounds  = getLocalBounds();
+                auto innerBounds = fullBounds.reduced(2);
+                const float actualWidth = getActualWaveformWidth(innerBounds.getWidth());
+                const int margin = 3;
+                const int oldX = innerBounds.getX() + (int)(startMarkerNormalized * actualWidth);
+                const int newX = innerBounds.getX() + (int)(newNorm * actualWidth);
+                startMarkerNormalized = newNorm;
+
+                // Union of old and new strips — covers loop-highlight left-edge change too
+                const int x1 = juce::jmin(oldX, newX) - margin;
+                const int x2 = juce::jmax(oldX, newX) + margin + 2;
+                repaint(x1, fullBounds.getY(), x2 - x1, fullBounds.getHeight());
             }
 
             float getStartMarker() const { return startMarkerNormalized; }
 
-            // Set end marker position (0.0 = start, 1.0 = end)
+            // Set end marker position (0.0 = start, 1.0 = end).
+            // Same dirty-region optimisation as setStartMarker.
             void setEndMarker(float normalized)
             {
-                endMarkerNormalized = juce::jlimit(startMarkerNormalized + 0.001f, 1.0f, normalized);
-                repaint();
+                const float newNorm = juce::jlimit(startMarkerNormalized + 0.001f, 1.0f, normalized);
+                if (newNorm == endMarkerNormalized) return;
+
+                if (adsrOverlayEnabled)
+                {
+                    endMarkerNormalized = newNorm;
+                    repaint();
+                    return;
+                }
+
+                auto fullBounds  = getLocalBounds();
+                auto innerBounds = fullBounds.reduced(2);
+                const float actualWidth = getActualWaveformWidth(innerBounds.getWidth());
+                const int margin = 3;
+                const int oldX = innerBounds.getX() + (int)(endMarkerNormalized * actualWidth);
+                const int newX = innerBounds.getX() + (int)(newNorm * actualWidth);
+                endMarkerNormalized = newNorm;
+
+                // Union of old and new strips — covers loop-highlight right-edge change too
+                const int x1 = juce::jmin(oldX, newX) - margin;
+                const int x2 = juce::jmax(oldX, newX) + margin + 2;
+                repaint(x1, fullBounds.getY(), x2 - x1, fullBounds.getHeight());
             }
 
             float getEndMarker() const { return endMarkerNormalized; }
@@ -3071,21 +3115,46 @@ public:
                 float actualWidth = getActualWaveformWidth(bounds.getWidth());
                 float rawNorm = (mouseX - bounds.getX()) / actualWidth;
 
-                const float minGap = 0.001f;
+                const float minGap  = 0.001f;
+                const int   margin  = 3;
 
                 if (currentDragTarget == DragTarget::Start)
                 {
                     float newNorm = juce::jlimit(0.0f, endMarkerNormalized - minGap, rawNorm);
-                    startMarkerNormalized = newNorm;
-                    repaint();
+                    if (adsrOverlayEnabled)
+                    {
+                        startMarkerNormalized = newNorm;
+                        repaint();
+                    }
+                    else
+                    {
+                        const int oldX = bounds.getX() + (int)(startMarkerNormalized * actualWidth);
+                        const int newX = bounds.getX() + (int)(newNorm * actualWidth);
+                        startMarkerNormalized = newNorm;
+                        const int x1 = juce::jmin(oldX, newX) - margin;
+                        const int x2 = juce::jmax(oldX, newX) + margin + 2;
+                        repaint(x1, 0, x2 - x1, getHeight());
+                    }
                     if (onMarkerDragged)
                         onMarkerDragged(newNorm);
                 }
                 else if (currentDragTarget == DragTarget::End)
                 {
                     float newNorm = juce::jlimit(startMarkerNormalized + minGap, 1.0f, rawNorm);
-                    endMarkerNormalized = newNorm;
-                    repaint();
+                    if (adsrOverlayEnabled)
+                    {
+                        endMarkerNormalized = newNorm;
+                        repaint();
+                    }
+                    else
+                    {
+                        const int oldX = bounds.getX() + (int)(endMarkerNormalized * actualWidth);
+                        const int newX = bounds.getX() + (int)(newNorm * actualWidth);
+                        endMarkerNormalized = newNorm;
+                        const int x1 = juce::jmin(oldX, newX) - margin;
+                        const int x2 = juce::jmax(oldX, newX) + margin + 2;
+                        repaint(x1, 0, x2 - x1, getHeight());
+                    }
                     if (onEndMarkerDragged)
                         onEndMarkerDragged(newNorm);
                 }

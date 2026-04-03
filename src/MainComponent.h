@@ -537,6 +537,19 @@ private:
     };
     EqSaveTimer eqSaveTimer { *this };
 
+    // Deferred marker save — fires 400ms after the last Start/End knob or waveform drag.
+    // The atomic sound update in startPointChanged/endPointChanged is instant; only the
+    // disk flush is deferred.  One write fires after the user stops dragging.
+    class MarkerSaveTimer : public juce::Timer
+    {
+    public:
+        MarkerSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    MarkerSaveTimer markerSaveTimer { *this };
+
     // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
     juce::int64 navStartTimeMs = 0;
 
