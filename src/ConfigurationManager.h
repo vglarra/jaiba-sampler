@@ -329,6 +329,9 @@ public:
         float  eq1Freq = 100.0f,  eq1Gain = 0.0f, eq1Q = 1.0f; int eq1Mode = 2;
         float  eq2Freq = 500.0f,  eq2Gain = 0.0f, eq2Q = 1.0f; int eq2Mode = 2;
         float  eq3Freq = 8000.0f, eq3Gain = 0.0f, eq3Q = 1.0f; int eq3Mode = 2;
+        // Normalize
+        bool  normEnabled  = false;
+        float normTargetDb = -6.0f;
     };
 
     // Store per-sample values in memory only. Call flush() after this if you want an immediate write.
@@ -361,6 +364,8 @@ public:
         propertiesFile->setValue(k + "_eq3g",      (double)s.eq3Gain);
         propertiesFile->setValue(k + "_eq3q",      (double)s.eq3Q);
         propertiesFile->setValue(k + "_eq3mode",   s.eq3Mode);
+        propertiesFile->setValue(k + "_normen",    s.normEnabled);
+        propertiesFile->setValue(k + "_normtarget",(double)s.normTargetDb);
         // No flush here — caller decides when to flush.
     }
 
@@ -395,6 +400,8 @@ public:
         s.eq3Gain            = (float)propertiesFile->getDoubleValue(k + "_eq3g",    0.0);
         s.eq3Q               = (float)propertiesFile->getDoubleValue(k + "_eq3q",    1.0);
         s.eq3Mode            = propertiesFile->getIntValue   (k + "_eq3mode",   2);
+        s.normEnabled        = propertiesFile->getBoolValue  (k + "_normen",    false);
+        s.normTargetDb       = (float)propertiesFile->getDoubleValue(k + "_normtarget", -6.0);
         return s;
     }
 

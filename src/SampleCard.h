@@ -1294,6 +1294,47 @@ public:
         addAndMakeVisible(filterModeButton);
         filterModeButton.setVisible(false);
 
+        // ===== NORMALIZE CONTROLS =====
+        // Three mutually-exclusive target dB buttons (default: -6 active)
+        auto setupNormTargetBtn = [](juce::TextButton& btn)
+        {
+            btn.setClickingTogglesState(false);
+            btn.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+            btn.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        };
+        setupNormTargetBtn(normTargetMinus12Button);
+        setupNormTargetBtn(normTargetMinus6Button);
+        setupNormTargetBtn(normTargetZeroButton);
+        normTargetMinus12Button.onClick = [this] { setNormTarget(-12.0f); };
+        normTargetMinus6Button.onClick  = [this] { setNormTarget(-6.0f);  };
+        normTargetZeroButton.onClick    = [this] { setNormTarget(0.0f);   };
+        addAndMakeVisible(normTargetMinus12Button); normTargetMinus12Button.setVisible(false);
+        addAndMakeVisible(normTargetMinus6Button);  normTargetMinus6Button.setVisible(false);
+        addAndMakeVisible(normTargetZeroButton);    normTargetZeroButton.setVisible(false);
+        updateNormTargetButtonColors();  // highlight default (-6)
+
+        normButton.setClickingTogglesState(true);
+        normButton.setToggleState(false, juce::dontSendNotification);
+        normButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+        normButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFF00FF88));
+        normButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+        normButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+        normButton.onClick = [this]
+        {
+            normEnabled = normButton.getToggleState();
+            if (!normEnabled) { normAppliedGainDb = 0.0f; updateNormGainLabel(); }
+            listeners.call([this](Listener& l) { l.normChanged(normEnabled, normTargetDb); });
+        };
+        addAndMakeVisible(normButton);
+        normButton.setVisible(false);
+
+        normGainLabel.setText("", juce::dontSendNotification);
+        normGainLabel.setFont(juce::Font(10.0f));
+        normGainLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
+        normGainLabel.setJustificationType(juce::Justification::centred);
+        addAndMakeVisible(normGainLabel);
+        normGainLabel.setVisible(false);
+
         // 60fps playhead animation timer — cheap when idle (position stays at -1, no repaint)
         playheadTimer.startTimer(16);
     }
@@ -1438,6 +1479,13 @@ public:
             eqEnableButton.setBounds(tabBar.removeFromRight(44).reduced(1, 2));
             // Filter mode selector — left of EQ enable button (~108px), only shown on EQ tab
             filterModeButton.setBounds(tabBar.removeFromRight(108).reduced(1, 2));
+            // Normalize controls — left of filter mode button; only shown on EQ tab
+            // Layout (right→left removal): gainLabel | Norm | 0 | -6 | -12
+            normGainLabel.setBounds           (tabBar.removeFromRight(52).reduced(1, 2));
+            normButton.setBounds              (tabBar.removeFromRight(42).reduced(1, 2));
+            normTargetZeroButton.setBounds    (tabBar.removeFromRight(30).reduced(1, 2));
+            normTargetMinus6Button.setBounds  (tabBar.removeFromRight(30).reduced(1, 2));
+            normTargetMinus12Button.setBounds (tabBar.removeFromRight(36).reduced(1, 2));
         }
         area.removeFromTop(4); // gap below tab bar
 
@@ -2049,6 +2097,8 @@ public:
         printf("[ADSR-DBG] setWaveform() silent reset — ADSR defaults applied, no save triggered\n");
         // Reset EQ filter modes silently — same pattern as ADSR; real values restored by load lambda.
         setEqFilterModes(2, 2, 2, /*notifyListeners=*/false);
+        // Reset normalize silently — real values restored by load lambda.
+        setNormParams(false, -6.0f, /*notifyListeners=*/false);
 
         // Reset tune detection state for the new file
         detectedNoteName = "";
@@ -2205,6 +2255,8 @@ public:
                                      float f3, float g3, float q3) = 0;
         // Called when the filter mode changes for any band (0=LowCut 1=LowShelf 2=Bell 3=Notch 4=HighShelf 5=HighCut)
         virtual void eqFilterModesChanged(int mode1, int mode2, int mode3) = 0;
+        // Called when Norm toggle or target dB changes.
+        virtual void normChanged(bool enabled, float targetDb) = 0;
     };
     
     void addListener(Listener* listener)
@@ -3872,6 +3924,17 @@ void adjustPitchUp()
     int                       eqFilterModes[3] = { 2, 2, 2 };  // per-band mode, saved per-sample
     std::unique_ptr<EQDisplay> eqDisplay;
 
+    // ===== NORMALIZE CONTROLS =====
+    bool  normEnabled       = false;
+    float normTargetDb      = -6.0f;
+    float normAppliedGainDb = 0.0f;  // set by MainComponent after peak computation
+
+    juce::TextButton normTargetMinus12Button { "-12" };
+    juce::TextButton normTargetMinus6Button  { "-6"  };
+    juce::TextButton normTargetZeroButton    { "0"   };
+    juce::TextButton normButton              { "Norm" };
+    juce::Label      normGainLabel;
+
     //==============================================================================
     // Transient detection enable/disable
 
@@ -4033,6 +4096,11 @@ private:
         const bool showEq = (activeTab == 2);
         eqEnableButton.setVisible(showEq);    // only visible on the EQ tab
         filterModeButton.setVisible(showEq);  // same rule as EQ enable button
+        normTargetMinus12Button.setVisible(showEq);
+        normTargetMinus6Button.setVisible(showEq);
+        normTargetZeroButton.setVisible(showEq);
+        normButton.setVisible(showEq);
+        normGainLabel.setVisible(showEq);
         if (eqDisplay != nullptr)
         {
             eqDisplay->setVisible(showEq);
@@ -4153,6 +4221,30 @@ public:
     float getAdsrReleaseMs() const { return adsrReleaseMs; }
     int   getActiveTabIndex() const { return activeTab; }
 
+    // ===== NORMALIZE public API =====
+    bool  isNormEnabled()        const { return normEnabled; }
+    float getNormTargetDb()      const { return normTargetDb; }
+    float getNormAppliedGainDb() const { return normAppliedGainDb; }
+
+    // Called by MainComponent after computing the peak-based gain. Updates display label.
+    void setNormGainDisplay(float gainDb)
+    {
+        normAppliedGainDb = gainDb;
+        updateNormGainLabel();
+    }
+
+    // Silently restore norm state — notifyListeners=false for load restores.
+    void setNormParams(bool enabled, float targetDb, bool notifyListeners = true)
+    {
+        normEnabled  = enabled;
+        normTargetDb = targetDb;
+        normButton.setToggleState(enabled, juce::dontSendNotification);
+        updateNormTargetButtonColors();
+        if (!enabled) { normAppliedGainDb = 0.0f; updateNormGainLabel(); }
+        if (notifyListeners)
+            listeners.call([this](Listener& l) { l.normChanged(normEnabled, normTargetDb); });
+    }
+
     // ===== EQ public API =====
     bool  isEqEnabled()           const { return eqEnabled; }
     // Returns true while the user is actively dragging a control point in the EQ display.
@@ -4232,6 +4324,57 @@ private:
                          : juce::Colour(0xFF886000);  // dim amber
         oneShotButton.setColour(juce::TextButton::buttonOnColourId, c);
         oneShotButton.repaint();
+    }
+
+    //==============================================================================
+    // Normalize helpers
+
+    // Update mutually-exclusive target button highlight.
+    void updateNormTargetButtonColors()
+    {
+        const auto activeColor = juce::Colour(0xFFFFE000); // bright yellow
+        const auto activeTxt   = juce::Colour(0xFF111111);
+        const auto inactiveC   = juce::Colour(0xFF4A4A4A);
+        const auto inactiveTxt = juce::Colour(0xFFCECECE);
+
+        struct { juce::TextButton* btn; float db; } items[] = {
+            { &normTargetMinus12Button, -12.0f },
+            { &normTargetMinus6Button,  -6.0f  },
+            { &normTargetZeroButton,     0.0f  },
+        };
+        for (auto& item : items)
+        {
+            const bool active = (normTargetDb == item.db);
+            item.btn->setColour(juce::TextButton::buttonColourId,  active ? activeColor : inactiveC);
+            item.btn->setColour(juce::TextButton::textColourOffId, active ? activeTxt   : inactiveTxt);
+        }
+    }
+
+    // Set a new normalization target and re-trigger computation if Norm is ON.
+    void setNormTarget(float targetDb)
+    {
+        normTargetDb = targetDb;
+        updateNormTargetButtonColors();
+        if (normEnabled)
+            listeners.call([this](Listener& l) { l.normChanged(normEnabled, normTargetDb); });
+    }
+
+    // Refresh the gain display label text.
+    void updateNormGainLabel()
+    {
+        if (!normEnabled || normAppliedGainDb == 0.0f)
+        {
+            normGainLabel.setText("", juce::dontSendNotification);
+        }
+        else
+        {
+            juce::String text;
+            if (normAppliedGainDb >= 0.0f)
+                text = "+" + juce::String(normAppliedGainDb, 1) + "dB";
+            else
+                text = juce::String(normAppliedGainDb, 1) + "dB";
+            normGainLabel.setText(text, juce::dontSendNotification);
+        }
     }
 
     //==============================================================================

@@ -303,6 +303,13 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     
     sampler.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
 
+    // Apply normalization gain (non-destructive, before per-pad volume)
+    {
+        float ng = normGain.load();
+        if (ng != 1.0f)
+            bufferToFill.buffer->applyGain(ng);
+    }
+
     // Apply volume gain
     float gain = volumeGain.load();
     if (gain != 1.0f)
@@ -1733,6 +1740,20 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                 printf("[EQ] Restored filter modes: band1=%d  band2=%d  band3=%d\n",
                        state.eq1Mode, state.eq2Mode, state.eq3Mode);
 
+                // Restore normalize state silently, then recompute gain if enabled.
+                sampleCard.setNormParams(state.normEnabled, state.normTargetDb, /*notifyListeners=*/false);
+                if (state.normEnabled)
+                {
+                    const float gain   = computeNormGainFromAudio(state.normTargetDb);
+                    normGain.store(gain);
+                    const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
+                    sampleCard.setNormGainDisplay(gainDb);
+                }
+                else
+                {
+                    normGain.store(1.0f);
+                }
+
                 printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f  note=%s\n",
                        effectiveStart, effectiveEnd, effectiveVol,
                        effectiveLoop ? "ON" : "OFF",
@@ -1752,6 +1773,9 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                 sampleCard.setEqFilterModes(2, 2, 2, /*notify=*/false);
                 eqActive.store(false);
                 resetEqState();  // OPT 5: reset filter state so old sample state doesn't bleed in
+                // New file: reset normalize to defaults (OFF, target -6dB)
+                sampleCard.setNormParams(false, -6.0f, /*notifyListeners=*/false);
+                normGain.store(1.0f);
                 printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF  thresh=4.0\n");
             }
         }
@@ -2427,6 +2451,57 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
     printf("[EQ] Filter modes: band1=%d  band2=%d  band3=%d\n", mode1, mode2, mode3);
 }
 
+float MainComponent::computeNormGainFromAudio(float targetDb) const
+{
+    juce::ScopedLock lock(sampleLock);
+    if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size()) return 1.0f;
+    const auto* sample = samples[selectedSampleIndex];
+    if (sample == nullptr || !sample->isValid()) return 1.0f;
+
+    const auto& buf = *sample->audioData;
+    const int totalSamples = buf.getNumSamples();
+    if (totalSamples == 0) return 1.0f;
+
+    const double sr = sample->sampleRate > 0.0 ? sample->sampleRate : 44100.0;
+    const int startSamp = (int)(sample->startPointSeconds * sr);
+    const int endSamp   = (sample->endPointSeconds > 0.0)
+                          ? (int)(sample->endPointSeconds * sr)
+                          : totalSamples;
+    const int s0 = juce::jlimit(0, totalSamples - 1, startSamp);
+    const int s1 = juce::jlimit(s0 + 1, totalSamples, endSamp);
+
+    float peak = 0.0f;
+    for (int ch = 0; ch < buf.getNumChannels(); ++ch)
+    {
+        const float* data = buf.getReadPointer(ch);
+        for (int i = s0; i < s1; ++i)
+            peak = juce::jmax(peak, std::abs(data[i]));
+    }
+
+    if (peak <= 1e-7f) return 1.0f;
+    const float targetLinear = std::pow(10.0f, targetDb / 20.0f);
+    return targetLinear / peak;
+}
+
+void MainComponent::normChanged(bool enabled, float targetDb)
+{
+    if (enabled)
+    {
+        const float gain   = computeNormGainFromAudio(targetDb);
+        normGain.store(gain);
+        const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
+        sampleCard.setNormGainDisplay(gainDb);
+        printf("[NORM] ON  target=%.0fdB  peak-gain=%.3f  display=%+.1fdB\n", targetDb, gain, gainDb);
+    }
+    else
+    {
+        normGain.store(1.0f);
+        sampleCard.setNormGainDisplay(0.0f);
+        printf("[NORM] OFF\n");
+    }
+    saveCurrentSampleState();
+}
+
 void MainComponent::oneShotEnabledChanged(bool enabled)
 {
     // Propagate to all live sounds atomically — no rebuild needed.
@@ -2997,6 +3072,8 @@ void MainComponent::saveOutgoingSampleState()
     s.eq3Gain             = sampleCard.getEqBandGain(2);
     s.eq3Q                = sampleCard.getEqBandQ(2);
     s.eq3Mode             = eqFilterModes[2];
+    s.normEnabled         = sampleCard.isNormEnabled();
+    s.normTargetDb        = sampleCard.getNormTargetDb();
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
@@ -3052,6 +3129,8 @@ void MainComponent::saveCurrentSampleState()
     s.eq3Gain             = sampleCard.getEqBandGain(2);
     s.eq3Q                = sampleCard.getEqBandQ(2);
     s.eq3Mode             = eqFilterModes[2];
+    s.normEnabled         = sampleCard.isNormEnabled();
+    s.normTargetDb        = sampleCard.getNormTargetDb();
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);

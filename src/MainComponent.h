@@ -112,6 +112,10 @@ private:
     void performPanicReset();
 
     //==============================================================================
+    // Normalize — compute peak-based gain from audio buffer within start/end range.
+    float computeNormGainFromAudio(float targetDb) const;
+
+    //==============================================================================
     // Playhead — called 60fps from SampleCard's PlayheadTimer.
     // Iterates voices, reads playheadPositionAtomic / totalSamplesAtomic (both atomic),
     // returns normalized [0,1] position or -1.0 when no voice is active.
@@ -170,6 +174,7 @@ private:
                          float f2, float g2, float q2,
                          float f3, float g3, float q3) override;
     void eqFilterModesChanged(int mode1, int mode2, int mode3) override;
+    void normChanged(bool enabled, float targetDb) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -285,6 +290,7 @@ private:
     // Volume
     std::atomic<float> volumeGain { 1.0f };
     std::atomic<float> masterVolumeGain { 0.7f };
+    std::atomic<float> normGain { 1.0f };   // non-destructive normalize multiplier (before vol knob)
     std::atomic<bool>  loopEnabled { false };
     // Set true during sample-change to silence the audio thread immediately.
     // Audio thread checks this at the top of getNextAudioBlock and returns a zeroed buffer.
