@@ -556,6 +556,30 @@ private:
     };
     MarkerSaveTimer markerSaveTimer { *this };
 
+    // Deferred volume save — fires 400ms after the last Vol knob change.
+    // The atomic store in volumeChanged() is instant; only the disk flush is deferred.
+    class VolSaveTimer : public juce::Timer
+    {
+    public:
+        VolSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    VolSaveTimer volSaveTimer { *this };
+
+    // Deferred ADSR save — fires 400ms after the last ADSR knob drag ends.
+    // Atomic propagation to sounds is instant; only the disk flush is deferred.
+    class AdsrSaveTimer : public juce::Timer
+    {
+    public:
+        AdsrSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    AdsrSaveTimer adsrSaveTimer { *this };
+
     // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
     juce::int64 navStartTimeMs = 0;
 

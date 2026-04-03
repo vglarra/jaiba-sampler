@@ -202,6 +202,8 @@ MainComponent::~MainComponent()
     pitchSaveTimer.stopTimer();
     eqSaveTimer.stopTimer();
     markerSaveTimer.stopTimer();
+    volSaveTimer.stopTimer();
+    adsrSaveTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // OPT 1: Stop FFT worker thread before audio shutdown to prevent use-after-free
@@ -2068,10 +2070,14 @@ void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
 
 void MainComponent::volumeChanged(float volume)
 {
+    auto t0 = juce::Time::getMillisecondCounterHiRes();
     volumeGain.store(volume);
     if (configManager != nullptr)
-        configManager->saveVolume(volume);
-    saveCurrentSampleState();
+        configManager->saveVolume(volume);  // in-memory setValue only, no flush
+    volSaveTimer.startTimer(400);           // one disk write fires 400ms after dragging stops
+    printf("[KNOB-TIMING] Vol updated atomically: %.0fms — no rebuild  (vol=%.2f)\n",
+           juce::Time::getMillisecondCounterHiRes() - t0, volume);
+    fflush(stdout);
 }
 
 void MainComponent::startPointChanged(double startPointSeconds)
@@ -2220,7 +2226,8 @@ void MainComponent::pitchStepCentsChanged(int cents)
 
 void MainComponent::adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs)
 {
-    // Propagate to all live sounds atomically — takes effect on the next noteOn.
+    auto t0 = juce::Time::getMillisecondCounterHiRes();
+    // Propagate to all live sounds atomically — takes effect within one audio block.
     for (int i = 0; i < sampler.getNumSounds(); ++i)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
         {
@@ -2230,9 +2237,20 @@ void MainComponent::adsrParamsChanged(bool enabled, float attackMs, float decayM
             sound->customAdsrSustain.store(sustain);
             sound->customAdsrReleaseMs.store(releaseMs);
         }
-    saveCurrentSampleState();
-    printf("[ADSR] %s  atk=%.0fms  dcy=%.0fms  sus=%.2f  rel=%.0fms\n",
-           enabled ? "ON" : "OFF", attackMs, decayMs, sustain, releaseMs);
+    double elapsed = juce::Time::getMillisecondCounterHiRes() - t0;
+    if (sampleCard.isAdsrDragging())
+    {
+        adsrSaveTimer.startTimer(400);  // one disk write fires 400ms after drag stops
+        printf("[KNOB-TIMING] ADSR updated atomically: %.0fms — save deferred (dragging)  %s atk=%.0f dcy=%.0f sus=%.2f rel=%.0f\n",
+               elapsed, enabled ? "ON" : "OFF", attackMs, decayMs, sustain, releaseMs);
+    }
+    else
+    {
+        saveCurrentSampleState();  // toggle or program change — save immediately
+        printf("[KNOB-TIMING] ADSR updated atomically: %.0fms — saved immediately  %s atk=%.0f dcy=%.0f sus=%.2f rel=%.0f\n",
+               elapsed, enabled ? "ON" : "OFF", attackMs, decayMs, sustain, releaseMs);
+    }
+    fflush(stdout);
 }
 
 void MainComponent::activeTabChanged(int tabIndex)

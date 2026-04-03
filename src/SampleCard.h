@@ -776,6 +776,8 @@ public:
         volumeKnob.onValueChange = [this] {
             listeners.call([this](Listener& l) { l.volumeChanged((float)volumeKnob.getValue()); });
         };
+        volumeKnob.onDragStart = [this] { isVolKnobDragging = true; };
+        volumeKnob.onDragEnd   = [this] { isVolKnobDragging = false; };
         addAndMakeVisible(volumeKnob);
 
         volumeLabel.setText("Vol", juce::dontSendNotification);
@@ -1178,12 +1180,22 @@ public:
             lbl.setVisible(false);
         };
 
-        initAdsrKnob(adsrAtkKnob, 0.0, 500.0, 0.0,  "Attack (0-500ms)");
-        initAdsrKnob(adsrDcyKnob, 0.0, 500.0, 0.0,  "Decay (0-500ms)");
-        initAdsrKnob(adsrSusKnob, 0.0, 1.0,   1.0,  "Sustain level (0.0-1.0)");
-        initAdsrKnob(adsrRelKnob, 0.0, 2000.0, 0.0, "Release (0-2000ms)");
-        // Sus knob has finer resolution
-        adsrSusKnob.setRange(0.0, 1.0, 0.01);
+        initAdsrKnob(adsrAtkKnob, 0.0, 500.0, 0.0,  "Attack (0-500ms)  |  Shift = fine  |  DblClick = reset");
+        initAdsrKnob(adsrDcyKnob, 0.0, 500.0, 0.0,  "Decay (0-500ms)  |  Shift = fine  |  DblClick = reset");
+        initAdsrKnob(adsrSusKnob, 0.0, 1.0,   1.0,  "Sustain (0-100%)  |  Shift = fine  |  DblClick = reset");
+        initAdsrKnob(adsrRelKnob, 0.0, 2000.0, 0.0, "Release (0-2000ms)  |  Shift = fine  |  DblClick = reset");
+        // Sus knob — fine resolution for smooth drag
+        adsrSusKnob.setRange(0.0, 1.0, 0.001);
+
+        // Per-knob drag sensitivity: units per pixel (normal drag).
+        // Shift key divides by 10 for ultra-fine control.
+        // Atk/Dcy: 1 px = 1 ms  → 500 px for full 500 ms range
+        // Sus:     1 px = 0.2%  → 500 px for full 0–100% range
+        // Rel:     1 px = 2 ms  → 1000 px for full 2000 ms range
+        adsrAtkKnob.sensitivityNormal = 1.0;    adsrAtkKnob.defaultValue = 0.0;
+        adsrDcyKnob.sensitivityNormal = 1.0;    adsrDcyKnob.defaultValue = 0.0;
+        adsrSusKnob.sensitivityNormal = 0.002;  adsrSusKnob.defaultValue = 1.0;
+        adsrRelKnob.sensitivityNormal = 2.0;    adsrRelKnob.defaultValue = 0.0;
 
         initAdsrLabel(adsrAtkLabel, "Atk");
         initAdsrLabel(adsrDcyLabel, "Dcy");
@@ -1215,6 +1227,19 @@ public:
             adsrReleaseMs = (float)adsrRelKnob.getValue();
             updateAdsrValueDisplays();
         };
+
+        // Drag start/end callbacks — set isAdsrKnobDragging flag so MainComponent
+        // defers disk save during drag (one write fires 400ms after drag ends).
+        // Note: overlay repaints in real time on every value change (no suppression).
+        auto wireAdsrDrag = [this](juce::Slider& knob)
+        {
+            knob.onDragStart = [this] { isAdsrKnobDragging = true; };
+            knob.onDragEnd   = [this] { isAdsrKnobDragging = false; };
+        };
+        wireAdsrDrag(adsrAtkKnob);
+        wireAdsrDrag(adsrDcyKnob);
+        wireAdsrDrag(adsrSusKnob);
+        wireAdsrDrag(adsrRelKnob);
 
         updateAdsrControlsState();
 
@@ -3064,6 +3089,9 @@ public:
 
             // ADSR envelope overlay — drawn as semi-transparent fuchsia shape over the waveform.
             // Uses startMarkerNormalized / endMarkerNormalized already stored in this component.
+            // Dirty-region repaint: only repaints the start-to-end marker area so the full
+            // waveform peak rendering is clipped to that region — fast enough for real-time
+            // drag updates without needing to suppress repaints during knob drag.
             void setAdsrOverlay(bool enabled, float atkMs, float dcyMs, float sus, float relMs)
             {
                 adsrOverlayEnabled = enabled;
@@ -3071,7 +3099,20 @@ public:
                 adsrDecayMs   = dcyMs;
                 adsrSustain   = sus;
                 adsrReleaseMs = relMs;
-                repaint();
+                // When enabled state changes, do a full repaint to clear/show the shape.
+                // During drag (enabled stays true), use dirty region for performance.
+                if (enabled && getWidth() > 4)
+                {
+                    float renderW = (float)(getWidth() - 4);
+                    float actualW = getActualWaveformWidth((int)renderW);
+                    int x1 = juce::jmax(0,          (int)(2.0f + startMarkerNormalized * actualW) - 4);
+                    int x2 = juce::jmin(getWidth(),  (int)(2.0f + endMarkerNormalized   * actualW) + 4);
+                    repaint(x1, 0, x2 - x1, getHeight());
+                }
+                else
+                {
+                    repaint();  // full repaint when disabling to clear the overlay
+                }
             }
 
             // Callbacks: invoked when user drags either marker
@@ -3900,17 +3941,74 @@ void adjustPitchUp()
     juce::Label      eqPlaceholderLabel;
 
     // ===== ADSR ENVELOPE CONTROLS =====
-    bool   adsrEnabled    = false;
-    float  adsrAttackMs   = 0.0f;
-    float  adsrDecayMs    = 0.0f;
-    float  adsrSustain    = 1.0f;
-    float  adsrReleaseMs  = 0.0f;
+    bool   adsrEnabled       = false;
+    float  adsrAttackMs      = 0.0f;
+    float  adsrDecayMs       = 0.0f;
+    float  adsrSustain       = 1.0f;
+    float  adsrReleaseMs     = 0.0f;
+    bool   isAdsrKnobDragging = false;  // true while any ADSR knob is being dragged
+    bool   isVolKnobDragging  = false;  // true while the Vol knob is being dragged
+
+    // Custom rotary knob with linear pixel-delta drag and configurable sensitivity.
+    // Overrides JUCE's default rotary drag with predictable ms-per-pixel behaviour.
+    // Shift key divides sensitivity by 10 for fine control.
+    // Double-click resets to defaultValue.
+    class AdsrKnob : public juce::Slider
+    {
+    public:
+        double sensitivityNormal = 1.0;   // units per pixel (ms/px or fraction/px)
+        double defaultValue      = 0.0;   // reset value on double-click
+
+        AdsrKnob() : juce::Slider(juce::Slider::RotaryHorizontalVerticalDrag,
+                                   juce::Slider::NoTextBox) {}
+
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            if (e.mods.isLeftButtonDown())
+            {
+                dragStartY     = e.getScreenPosition().y;
+                dragStartValue = getValue();
+                isDraggingNow  = true;
+                if (onDragStart) onDragStart();   // notifies SampleCard::isAdsrKnobDragging
+            }
+        }
+
+        void mouseDrag(const juce::MouseEvent& e) override
+        {
+            if (isDraggingNow)
+            {
+                double sens   = e.mods.isShiftDown() ? sensitivityNormal * 0.1 : sensitivityNormal;
+                double newVal = juce::jlimit(getMinimum(), getMaximum(),
+                                             dragStartValue + (double)(dragStartY - e.getScreenPosition().y) * sens);
+                setValue(newVal, juce::sendNotificationSync);
+            }
+        }
+
+        void mouseUp(const juce::MouseEvent&) override
+        {
+            if (isDraggingNow)
+            {
+                isDraggingNow = false;
+                if (onDragEnd) onDragEnd();       // notifies SampleCard::isAdsrKnobDragging = false
+            }
+        }
+
+        void mouseDoubleClick(const juce::MouseEvent&) override
+        {
+            setValue(defaultValue, juce::sendNotificationSync);
+        }
+
+    private:
+        int    dragStartY     = 0;
+        double dragStartValue = 0.0;
+        bool   isDraggingNow  = false;
+    };
 
     juce::TextButton adsrEnableButton { "Env" };
-    juce::Slider     adsrAtkKnob;
-    juce::Slider     adsrDcyKnob;
-    juce::Slider     adsrSusKnob;
-    juce::Slider     adsrRelKnob;
+    AdsrKnob         adsrAtkKnob;
+    AdsrKnob         adsrDcyKnob;
+    AdsrKnob         adsrSusKnob;
+    AdsrKnob         adsrRelKnob;
     juce::Label      adsrAtkLabel, adsrDcyLabel, adsrSusLabel, adsrRelLabel;
     juce::Label      adsrAtkValueLabel, adsrDcyValueLabel, adsrSusValueLabel, adsrRelValueLabel;
 
@@ -4180,6 +4278,8 @@ public:
         adsrDcyValueLabel.setText(juce::String((int)std::round(adsrDecayMs))   + "ms",  juce::dontSendNotification);
         adsrSusValueLabel.setText(juce::String((int)std::round(adsrSustain * 100.0f)) + "%", juce::dontSendNotification);
         adsrRelValueLabel.setText(juce::String((int)std::round(adsrReleaseMs)) + "ms",  juce::dontSendNotification);
+        // Always update the waveform ADSR overlay — setAdsrOverlay uses dirty-region
+        // repaint (start-to-end marker region only) so this is fast even during drag.
         if (waveformComponent != nullptr)
             waveformComponent->setAdsrOverlay(adsrEnabled, adsrAttackMs, adsrDecayMs, adsrSustain, adsrReleaseMs);
         if (notifyListeners)
@@ -4250,6 +4350,11 @@ public:
     // Returns true while the user is actively dragging a control point in the EQ display.
     // Used by MainComponent::eqParamsChanged() to skip resetEqState() and defer disk saves.
     bool  isEqDisplayDragging()   const { return eqDisplay != nullptr && eqDisplay->isEqDragging(); }
+    // Returns true while any ADSR knob is being dragged (mouse button held).
+    // Used by MainComponent::adsrParamsChanged() to defer disk saves during drag.
+    bool  isAdsrDragging()        const { return isAdsrKnobDragging; }
+    // Returns true while the Vol knob is being dragged (reserved for future use).
+    bool  isVolDragging()         const { return isVolKnobDragging; }
     float getEqBandFreq(int i)    const { return (i>=0&&i<3) ? eqBands[i].freq   : 500.0f; }
     float getEqBandGain(int i)    const { return (i>=0&&i<3) ? eqBands[i].gainDb : 0.0f;   }
     float getEqBandQ(int i)       const { return (i>=0&&i<3) ? eqBands[i].q      : 1.0f;   }
