@@ -199,6 +199,8 @@ MainComponent::~MainComponent()
     navSaveTimer.stopTimer();
     transientDetectionTimer.stopTimer();
     navDebounceTimer.stopTimer();
+    pitchSaveTimer.stopTimer();
+    eqSaveTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // OPT 1: Stop FFT worker thread before audio shutdown to prevent use-after-free
@@ -2007,6 +2009,8 @@ void MainComponent::learningModeChanged(bool isLearning)
 
 void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
 {
+    const juce::int64 t0 = juce::Time::getMillisecondCounter();
+
     // userPitchOffsetCents: user relative offset in CENTS (not semitones).
     // basePitchOffset: whole semitones from Tune auto-correction → multiply ×100 to get cents.
     const int totalCents = userPitchOffsetCents + sampleCard.getBasePitchOffset() * 100;
@@ -2018,19 +2022,22 @@ void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
             samples[selectedSampleIndex]->pitchOffset = totalCents;
     }
 
-    // Push TOTAL (in cents) to all live sounds atomically — no rebuild, no note cutoff
+    // Push TOTAL (in cents) to all live sounds atomically — no rebuild, no note cutoff.
+    // Audio thread picks up the new value on the next block (~6ms) — no delay.
     for (int i = 0; i < sampler.getNumSounds(); ++i)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
             sound->pitchOffsetAtomic.store(totalCents);
 
-    // Save only the USER offset globally (in cents) — base is saved per-sample
+    // In-memory save only (no disk flush) — deferred 300ms timer handles the flush.
     if (configManager != nullptr)
-    {
-        configManager->savePitchOffset(userPitchOffsetCents);
-        printf("[PITCH] user=%+d cents  base=%+d st  total=%+d cents  saved_user=%+d cents\n",
-               userPitchOffsetCents, sampleCard.getBasePitchOffset(), totalCents, userPitchOffsetCents);
-    }
-    saveCurrentSampleState();
+        configManager->savePitchOffset(userPitchOffsetCents);  // in-memory setValue only
+
+    // Restart debounce timer — one disk write fires 300ms after the last pitch change.
+    pitchSaveTimer.startTimer(300);
+
+    const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
+    printf("[PITCH-TIMING] Pitch change applied atomically: %lldms — no sound rebuild  (user=%+d cents  total=%+d cents)\n",
+           (long long)elapsed, userPitchOffsetCents, totalCents);
     fflush(stdout);
 }
 
@@ -2343,6 +2350,8 @@ void MainComponent::eqParamsChanged(bool enabled,
                                      float f2, float g2, float q2,
                                      float f3, float g3, float q3)
 {
+    const juce::int64 t0 = juce::Time::getMillisecondCounter();
+
     eqActive.store(enabled);
 
     // OPT 2: Compute all 3 bands on the UI thread, write to double buffer in one shot.
@@ -2351,13 +2360,34 @@ void MainComponent::eqParamsChanged(bool enabled,
     newCoeffs[0] = computeEqCoeffs(f1, g1, q1, eqFilterModes[0], sr);
     newCoeffs[1] = computeEqCoeffs(f2, g2, q2, eqFilterModes[1], sr);
     newCoeffs[2] = computeEqCoeffs(f3, g3, q3, eqFilterModes[2], sr);
+
+    const juce::int64 tCoeffs = juce::Time::getMillisecondCounter();
     eqCoeffDB.writeFromUI(newCoeffs);
+    const juce::int64 tWrite = juce::Time::getMillisecondCounter();
 
-    // Reset filter state to avoid a transient when coefficients change.
-    if (enabled) resetEqState();
+    // Skip resetEqState() during drag — calling it on every pixel zeroes the filter memory
+    // and causes an audible click each time. Only reset on the final mouseUp event or
+    // when toggling the EQ on/off (not a drag).
+    const bool isDragging = sampleCard.isEqDisplayDragging();
+    if (enabled && !isDragging)
+        resetEqState();
 
-    saveCurrentSampleState();
-    printf("[EQ] %s  band1=%.0fHz/%.1fdB/Q%.2f(mode%d)  band2=%.0fHz/%.1fdB/Q%.2f(mode%d)  band3=%.0fHz/%.1fdB/Q%.2f(mode%d)\n",
+    // During drag: restart debounced timer — one disk flush fires 400ms after drag stops.
+    // When not dragging (EQ toggle, mode change, final mouseUp): save immediately.
+    if (isDragging)
+    {
+        eqSaveTimer.startTimer(400);
+    }
+    else
+    {
+        eqSaveTimer.stopTimer();
+        saveCurrentSampleState();
+    }
+
+    printf("[EQ-TIMING] coeffs computed: %lldms  buffer written: %lldms  dragging=%s  %s  "
+           "band1=%.0fHz/%.1fdB/Q%.2f(mode%d)  band2=%.0fHz/%.1fdB/Q%.2f(mode%d)  band3=%.0fHz/%.1fdB/Q%.2f(mode%d)\n",
+           (long long)(tCoeffs - t0), (long long)(tWrite - tCoeffs),
+           isDragging ? "YES" : "NO",
            enabled ? "ON" : "OFF",
            f1, g1, q1, eqFilterModes[0],
            f2, g2, q2, eqFilterModes[1],

@@ -513,6 +513,30 @@ private:
     };
     TransientDetectionTimer transientDetectionTimer { *this };
 
+    // Deferred pitch save — fires 300ms after the last pitch Up/Down press.
+    // Keeps the message thread free during rapid button presses; one disk write when idle.
+    class PitchSaveTimer : public juce::Timer
+    {
+    public:
+        PitchSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    PitchSaveTimer pitchSaveTimer { *this };
+
+    // Deferred EQ save — fires 400ms after the last EQ drag event ends.
+    // Prevents flooding disk with saves during control point dragging.
+    class EqSaveTimer : public juce::Timer
+    {
+    public:
+        EqSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    EqSaveTimer eqSaveTimer { *this };
+
     // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
     juce::int64 navStartTimeMs = 0;
 

@@ -100,8 +100,12 @@ public:
     void stopAnimation()  { stopTimer(); }
 
     // OPT 4: Timer callback — only repaint when new FFT data is actually available (30fps max).
+    // During an active drag the spectrum is paused — only the EQ curve needs redrawing,
+    // and that happens immediately from mouseDrag via repaint().
     void timerCallback() override
     {
+        if (eqIsDragging) return;   // spectrum paused during drag — curve updated via mouseDrag
+
         if (getSpectrumCallback)
         {
             // getSpectrumCallback returns true only when the FFT worker has produced new data.
@@ -110,6 +114,8 @@ public:
                 repaint();
         }
     }
+
+    bool isEqDragging() const { return eqIsDragging; }
 
     // -----------------------------------------------------------------------
     void paint(juce::Graphics& g) override
@@ -132,6 +138,10 @@ public:
         draggingBand = findNearestBand(e.x, e.y);
         if (draggingBand >= 0)
         {
+            eqIsDragging = true;
+            lastDragPixelX = e.x;
+            lastDragPixelY = e.y;
+
             // Set active band and notify SampleCard so the filter mode button can update.
             activeBand = draggingBand;
             if (onActiveBandChanged) onActiveBandChanged(activeBand);
@@ -146,6 +156,14 @@ public:
     void mouseDrag(const juce::MouseEvent& e) override
     {
         if (draggingBand < 0) return;
+
+        // Throttle: skip if the pointer hasn't moved at least 1 pixel since last update.
+        // JUCE can fire mouseDrag at 200+ Hz — most events carry identical coordinates.
+        if (std::abs(e.x - lastDragPixelX) < 1 && std::abs(e.y - lastDragPixelY) < 1)
+            return;
+        lastDragPixelX = e.x;
+        lastDragPixelY = e.y;
+
         const float w = (float)getWidth();
         const float h = (float)getHeight();
         float newFreq   = xToFreq((float)e.x, w);
@@ -169,7 +187,14 @@ public:
         repaint();
     }
 
-    void mouseUp(const juce::MouseEvent&) override { draggingBand = -1; repaint(); }
+    void mouseUp(const juce::MouseEvent&) override
+    {
+        draggingBand   = -1;
+        eqIsDragging   = false;
+        lastDragPixelX = -9999;
+        lastDragPixelY = -9999;
+        repaint();  // final repaint including spectrum
+    }
 
     void mouseWheelMove(const juce::MouseEvent& e,
                         const juce::MouseWheelDetails& d) override
@@ -202,6 +227,14 @@ private:
     float  dragStartY    = 0.0f;
     float  dragStartFreq   = 500.0f;
     float  dragStartGainDb = 0.0f;
+
+    // Drag optimisation state.
+    // eqIsDragging: true while mouse button is held on a control point.
+    //   → timerCallback skips spectrum fetch so FFT updates don't compete with drag repaints.
+    // lastDragPixelX/Y: previous mouse position; mouseDrag skips processing if < 1px moved.
+    bool eqIsDragging  = false;
+    int  lastDragPixelX = -9999;
+    int  lastDragPixelY = -9999;
 
     // -----------------------------------------------------------------------
     // Log-frequency ↔ pixel x  (20 Hz … 20 kHz, full width)
@@ -4053,6 +4086,9 @@ public:
 
     // ===== EQ public API =====
     bool  isEqEnabled()           const { return eqEnabled; }
+    // Returns true while the user is actively dragging a control point in the EQ display.
+    // Used by MainComponent::eqParamsChanged() to skip resetEqState() and defer disk saves.
+    bool  isEqDisplayDragging()   const { return eqDisplay != nullptr && eqDisplay->isEqDragging(); }
     float getEqBandFreq(int i)    const { return (i>=0&&i<3) ? eqBands[i].freq   : 500.0f; }
     float getEqBandGain(int i)    const { return (i>=0&&i<3) ? eqBands[i].gainDb : 0.0f;   }
     float getEqBandQ(int i)       const { return (i>=0&&i<3) ? eqBands[i].q      : 1.0f;   }
