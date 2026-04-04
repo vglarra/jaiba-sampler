@@ -580,6 +580,30 @@ private:
     };
     AdsrSaveTimer adsrSaveTimer { *this };
 
+    // Deferred normalize save — fires 400ms after the last Norm target button click.
+    // Peak scan is instant (or async for large files); only the disk flush is deferred.
+    class NormSaveTimer : public juce::Timer
+    {
+    public:
+        NormSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    NormSaveTimer normSaveTimer { *this };
+
+    // Deferred filter-mode save — fires 400ms after the last filter mode button click.
+    // Coefficient recompute is instant (UI thread math); only the disk flush is deferred.
+    class FilterModeSaveTimer : public juce::Timer
+    {
+    public:
+        FilterModeSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    FilterModeSaveTimer filterModeSaveTimer { *this };
+
     // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
     juce::int64 navStartTimeMs = 0;
 

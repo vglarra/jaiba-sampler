@@ -1500,7 +1500,10 @@ public:
             controlsTabButton.setBounds(tabBar.removeFromLeft(80).reduced(1, 2));
             adsrTabButton.setBounds    (tabBar.removeFromLeft(80).reduced(1, 2));
             eqTabButton.setBounds      (tabBar.removeFromLeft(80).reduced(1, 2));
-            // EQ on/off button — right-aligned in tab row (44px)
+            // ADSR and EQ on/off buttons share the same right-aligned slot (44px).
+            // Only one is ever visible at a time — updateTabVisibility() enforces this.
+            auto rightToggleSlot = tabBar.withLeft(tabBar.getRight() - 44);
+            adsrEnableButton.setBounds(rightToggleSlot.reduced(1, 2));
             eqEnableButton.setBounds(tabBar.removeFromRight(44).reduced(1, 2));
             // Filter mode selector — left of EQ enable button (~108px), only shown on EQ tab
             filterModeButton.setBounds(tabBar.removeFromRight(108).reduced(1, 2));
@@ -4179,15 +4182,16 @@ private:
             &volumeKnob, &volumeLabel})
             c->setVisible(showCtrl);
 
-        // ADSR tab
+        // ADSR tab content (knobs only — Env toggle lives in the tab bar)
         const bool showAdsr = (activeTab == 1);
         for (auto* c : std::initializer_list<juce::Component*>{
-            &adsrEnableButton,
             &adsrAtkKnob, &adsrAtkLabel, &adsrAtkValueLabel,
             &adsrDcyKnob, &adsrDcyLabel, &adsrDcyValueLabel,
             &adsrSusKnob, &adsrSusLabel, &adsrSusValueLabel,
             &adsrRelKnob, &adsrRelLabel, &adsrRelValueLabel})
             c->setVisible(showAdsr);
+        // Env toggle: tab-bar button, visible only when ADSR tab is active
+        adsrEnableButton.setVisible(showAdsr);
 
         // EQ tab
         eqPlaceholderLabel.setVisible(false);  // replaced by eqDisplay
@@ -4209,14 +4213,8 @@ private:
 
     void layoutAdsrTabContent(juce::Rectangle<int>& area)
     {
-        // Row A (44px): Env toggle button
-        {
-            auto rowA = area.removeFromTop(44);
-            adsrEnableButton.setBounds(rowA.removeFromLeft(100).withSizeKeepingCentre(90, 30));
-        }
-        area.removeFromTop(5);
-
-        // Row B (60px): 4 ADSR knobs
+        // Env toggle button now lives in the tab bar row — no row needed here.
+        // Row B (60px): 4 ADSR knobs — fills the full content area directly.
         auto rowB = area.removeFromTop(60);
         const int labelH = 13;
 

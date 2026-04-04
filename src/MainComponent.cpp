@@ -204,6 +204,8 @@ MainComponent::~MainComponent()
     markerSaveTimer.stopTimer();
     volSaveTimer.stopTimer();
     adsrSaveTimer.stopTimer();
+    normSaveTimer.stopTimer();
+    filterModeSaveTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // OPT 1: Stop FFT worker thread before audio shutdown to prevent use-after-free
@@ -2451,11 +2453,15 @@ void MainComponent::eqParamsChanged(bool enabled,
 
 void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
 {
+    const auto t0 = juce::Time::getMillisecondCounter();
+    printf("[FILTER-TIMING] Filter mode changed: mode1=%d mode2=%d mode3=%d\n", mode1, mode2, mode3);
+
     eqFilterModes[0] = mode1;
     eqFilterModes[1] = mode2;
     eqFilterModes[2] = mode3;
 
-    // OPT 2: Compute all 3 bands on UI thread, write to double buffer in one shot.
+    // Compute all 3 bands on UI thread, write to double buffer atomically.
+    // Audio thread picks up new coefficients on the very next callback — no rebuild, no note cutoff.
     const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
     EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
     newCoeffs[0] = computeEqCoeffs(sampleCard.getEqBandFreq(0), sampleCard.getEqBandGain(0), sampleCard.getEqBandQ(0), mode1, sr);
@@ -2463,10 +2469,22 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
     newCoeffs[2] = computeEqCoeffs(sampleCard.getEqBandFreq(2), sampleCard.getEqBandGain(2), sampleCard.getEqBandQ(2), mode3, sr);
     eqCoeffDB.writeFromUI(newCoeffs);
 
+    const auto tCoeffs = juce::Time::getMillisecondCounter();
+    printf("[FILTER-TIMING] coefficients recalculated: %lldms\n", (long long)(tCoeffs - t0));
+
     if (eqActive.load()) resetEqState();
 
-    saveCurrentSampleState();
-    printf("[EQ] Filter modes: band1=%d  band2=%d  band3=%d\n", mode1, mode2, mode3);
+    // NO updateSamplerSounds() — coefficients written atomically above.
+    printf("[FILTER-TIMING] updateSamplerSounds called: 0ms — SKIPPED (atomic coefficient swap)\n");
+
+    // Defer disk save — one write fires 400ms after the click.
+    filterModeSaveTimer.startTimer(400);
+
+    const auto tDone = juce::Time::getMillisecondCounter();
+    printf("[FILTER-TIMING] saveCurrentSampleState called: deferred 400ms\n");
+    printf("[FILTER-TIMING] total handler time: %lldms  (save deferred)\n", (long long)(tDone - t0));
+    printf("[FILTER-TIMING] filter coefficients updated atomically: 0ms — no rebuild\n");
+    fflush(stdout);
 }
 
 float MainComponent::computeNormGainFromAudio(float targetDb) const
@@ -2503,21 +2521,86 @@ float MainComponent::computeNormGainFromAudio(float targetDb) const
 
 void MainComponent::normChanged(bool enabled, float targetDb)
 {
-    if (enabled)
+    const auto t0 = juce::Time::getMillisecondCounter();
+    printf("[NORM-TIMING] Normalize target changed: value=%.0fdB  enabled=%s\n", targetDb, enabled ? "YES" : "NO");
+
+    if (!enabled)
     {
+        normGain.store(1.0f);
+        sampleCard.setNormGainDisplay(0.0f);
+        printf("[NORM-TIMING] normGain recalculated: 0ms  (disabled — gain=1.0)\n");
+        printf("[NORM-TIMING] updateSamplerSounds called: 0ms — SKIPPED (atomic normGain store)\n");
+        normSaveTimer.startTimer(400);
+        printf("[NORM-TIMING] saveCurrentSampleState called: deferred 400ms\n");
+        printf("[NORM-TIMING] total handler time: %lldms  (save deferred)\n",
+               (long long)(juce::Time::getMillisecondCounter() - t0));
+        printf("[NORM-TIMING] normGain updated atomically: 0ms — no rebuild\n");
+        fflush(stdout);
+        return;
+    }
+
+    // For enabled: check how many samples need scanning to decide sync vs async.
+    int scanSamples = 0;
+    {
+        juce::ScopedLock lock(sampleLock);
+        if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+            if (const auto* s = samples[selectedSampleIndex]; s != nullptr && s->audioData != nullptr)
+                scanSamples = s->audioData->getNumSamples();
+    }
+
+    constexpr int kBgScanThreshold = 100000;
+
+    if (scanSamples <= kBgScanThreshold || scanSamples == 0)
+    {
+        // Small sample — scan on message thread, fast enough.
         const float gain   = computeNormGainFromAudio(targetDb);
         normGain.store(gain);
         const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
         sampleCard.setNormGainDisplay(gainDb);
-        printf("[NORM] ON  target=%.0fdB  peak-gain=%.3f  display=%+.1fdB\n", targetDb, gain, gainDb);
+
+        const auto tGain = juce::Time::getMillisecondCounter();
+        printf("[NORM-TIMING] normGain recalculated: %lldms  (sync, %d samples)\n",
+               (long long)(tGain - t0), scanSamples);
+        printf("[NORM-TIMING] updateSamplerSounds called: 0ms — SKIPPED (atomic normGain store)\n");
+        printf("[NORM-TIMING] normGain updated atomically: 0ms — no rebuild  target=%.0fdB  gain=%+.1fdB\n",
+               targetDb, gainDb);
+
+        normSaveTimer.startTimer(400);
+        const auto tDone = juce::Time::getMillisecondCounter();
+        printf("[NORM-TIMING] saveCurrentSampleState called: deferred 400ms\n");
+        printf("[NORM-TIMING] total handler time: %lldms  (save deferred)\n", (long long)(tDone - t0));
     }
     else
     {
-        normGain.store(1.0f);
-        sampleCard.setNormGainDisplay(0.0f);
-        printf("[NORM] OFF\n");
+        // Large sample — show Scanning... label, run peak scan on background thread.
+        sampleCard.setNormGainDisplay(0.0f);  // clear stale display while scanning
+        printf("[NORM-TIMING] normGain recalculated: async (background scan, %d samples)\n", scanSamples);
+        printf("[NORM-TIMING] updateSamplerSounds called: 0ms — SKIPPED\n");
+
+        const float capturedTarget = targetDb;
+        backgroundThreads.addJob([this, capturedTarget]()
+        {
+            const auto tBg = juce::Time::getMillisecondCounter();
+            const float gain   = computeNormGainFromAudio(capturedTarget);
+            const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
+            const auto tScan = juce::Time::getMillisecondCounter();
+            printf("[NORM-TIMING] normGain recalculated (bg): %lldms\n", (long long)(tScan - tBg));
+
+            juce::MessageManager::callAsync([this, gain, gainDb]()
+            {
+                normGain.store(gain);
+                sampleCard.setNormGainDisplay(gainDb);
+                normSaveTimer.startTimer(400);
+                printf("[NORM-TIMING] normGain applied from bg thread  gain=%+.1fdB  save deferred 400ms\n", gainDb);
+                fflush(stdout);
+            });
+        });
+
+        const auto tDone = juce::Time::getMillisecondCounter();
+        printf("[NORM-TIMING] total handler time: %lldms  (bg scan dispatched)\n", (long long)(tDone - t0));
     }
-    saveCurrentSampleState();
+
+    fflush(stdout);
 }
 
 void MainComponent::oneShotEnabledChanged(bool enabled)
