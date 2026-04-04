@@ -1405,6 +1405,46 @@ public:
         addAndMakeVisible(filterModeButton);
         filterModeButton.setVisible(false);
 
+        // EQ Reset button — resets all bands to flat defaults, leaves EQ on/off and Norm unchanged.
+        eqResetButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+        eqResetButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        eqResetButton.setTooltip("Reset all EQ bands to flat defaults (100/500/8000 Hz, 0dB, Bell)");
+        eqResetButton.onClick = [this]
+        {
+            // Reset band parameters to defaults — leave eqEnabled and norm unchanged.
+            eqBands[0] = { 100.0f,  0.0f, 1.0f };
+            eqBands[1] = { 500.0f,  0.0f, 1.0f };
+            eqBands[2] = { 8000.0f, 0.0f, 1.0f };
+            eqFilterModes[0] = eqFilterModes[1] = eqFilterModes[2] = 2; // Bell
+
+            if (eqDisplay != nullptr)
+            {
+                eqDisplay->setBands(eqBands);
+                eqDisplay->setFilterMode(0, 2);
+                eqDisplay->setFilterMode(1, 2);
+                eqDisplay->setFilterMode(2, 2);
+            }
+            // Update filter mode button to show Bell for the active band.
+            filterModeButton.setButtonText("Bell");
+
+            // Notify MainComponent to recompute EQ coefficients and save (deferred via eqSaveTimer).
+            listeners.call([this](Listener& l) {
+                l.eqFilterModesChanged(2, 2, 2);
+            });
+            fireEqParamsChanged();
+
+            // Brief white flash to confirm reset was applied.
+            eqResetButton.setColour(juce::TextButton::buttonColourId,  juce::Colours::white);
+            eqResetButton.setColour(juce::TextButton::textColourOffId, juce::Colours::black);
+            juce::Timer::callAfterDelay(150, [this]
+            {
+                eqResetButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+                eqResetButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            });
+        };
+        addAndMakeVisible(eqResetButton);
+        eqResetButton.setVisible(false);
+
         // ===== NORMALIZE CONTROLS =====
         // Three mutually-exclusive target dB buttons (default: -6 active)
         auto setupNormTargetBtn = [](juce::TextButton& btn)
@@ -1614,6 +1654,8 @@ public:
             normTargetZeroButton.setBounds    (tabBar.removeFromRight(30).reduced(1, 2));
             normTargetMinus6Button.setBounds  (tabBar.removeFromRight(30).reduced(1, 2));
             normTargetMinus12Button.setBounds (tabBar.removeFromRight(36).reduced(1, 2));
+            // EQ Reset — leftmost of the EQ controls group, right-adjacent to -12 button.
+            eqResetButton.setBounds           (tabBar.removeFromRight(52).reduced(1, 2));
         }
         area.removeFromTop(4); // gap below tab bar
 
@@ -4275,6 +4317,7 @@ void adjustPitchUp()
                                    {8000.0f,0.0f, 1.0f} };
     juce::TextButton          eqEnableButton  { "EQ" };
     juce::TextButton          filterModeButton{ "Bell" };
+    juce::TextButton          eqResetButton   { "Reset" };
     int                       eqFilterModes[3] = { 2, 2, 2 };  // per-band mode, saved per-sample
     std::unique_ptr<EQDisplay> eqDisplay;
 
@@ -4596,6 +4639,7 @@ private:
         const bool showEq = (activeTab == 2);
         eqEnableButton.setVisible(showEq);    // only visible on the EQ tab
         filterModeButton.setVisible(showEq);  // same rule as EQ enable button
+        eqResetButton.setVisible(showEq);     // same rule
         normTargetMinus12Button.setVisible(showEq);
         normTargetMinus6Button.setVisible(showEq);
         normTargetZeroButton.setVisible(showEq);
