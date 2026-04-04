@@ -934,6 +934,12 @@ public:
             bool isOn = loopButton.getToggleState();
             if (waveformComponent != nullptr)
                 waveformComponent->setLoopHighlight(isOn);
+            // If Loop is turned OFF while Bounce is ON, turn Bounce OFF too.
+            if (!isOn && bounceEnabledState) {
+                bounceEnabledState = false;
+                bounceButton.setToggleState(false, juce::dontSendNotification);
+                listeners.call([](Listener& l) { l.bounceEnabledChanged(false); });
+            }
             listeners.call([isOn](Listener& l) { l.loopEnabledChanged(isOn); });
         };
         addAndMakeVisible(loopButton);
@@ -1002,9 +1008,44 @@ public:
         reverseButton.setTooltip("Reverse: play sample backwards from End to Start");
         reverseButton.onClick = [this] {
             reverseEnabledState = reverseButton.getToggleState();
+            // Mutually exclusive with Bounce: turning Rev ON turns Bnc OFF.
+            if (reverseEnabledState && bounceEnabledState) {
+                bounceEnabledState = false;
+                bounceButton.setToggleState(false, juce::dontSendNotification);
+                listeners.call([](Listener& l) { l.bounceEnabledChanged(false); });
+            }
             listeners.call([this](Listener& l) { l.reverseEnabledChanged(reverseEnabledState); });
         };
         addAndMakeVisible(reverseButton);
+
+        // Bounce (ping-pong) playback button — mutually exclusive with Rev
+        bounceButton.setClickingTogglesState(true);
+        bounceButton.setToggleState(false, juce::dontSendNotification);
+        bounceButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+        bounceButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFCC44FF)); // bright purple
+        bounceButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+        bounceButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+        bounceButton.setTooltip("Bounce: ping-pong loop between Start and End markers (requires Loop)");
+        bounceButton.onClick = [this] {
+            bounceEnabledState = bounceButton.getToggleState();
+            if (bounceEnabledState) {
+                // Mutually exclusive with Rev: turning Bnc ON turns Rev OFF.
+                if (reverseEnabledState) {
+                    reverseEnabledState = false;
+                    reverseButton.setToggleState(false, juce::dontSendNotification);
+                    listeners.call([](Listener& l) { l.reverseEnabledChanged(false); });
+                }
+                // Bounce requires Loop: auto-enable Loop if it isn't already on.
+                if (!loopButton.getToggleState()) {
+                    loopButton.setToggleState(true, juce::dontSendNotification);
+                    if (waveformComponent != nullptr)
+                        waveformComponent->setLoopHighlight(true);
+                    listeners.call([](Listener& l) { l.loopEnabledChanged(true); });
+                }
+            }
+            listeners.call([this](Listener& l) { l.bounceEnabledChanged(bounceEnabledState); });
+        };
+        addAndMakeVisible(bounceButton);
 
         // Trim button — orange-red to indicate a new-file-creating (irreversible) action
         trimButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFFE84A1A));
@@ -1659,14 +1700,9 @@ public:
             reverseButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
         {
-            // Grid snap button
+            // Bnc (bounce/ping-pong) button — right of Rev
             auto col = row1.removeFromLeft(62);
-            gridSnapButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        {
-            // Grid resolution cycling button (compact, right of Grid)
-            auto col = row1.removeFromLeft(52);
-            gridResolutionButton.setBounds(col.withSizeKeepingCentre(50, kBtnH));
+            bounceButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
 
         // 4px gap between rows (matches tab-bar gap)
@@ -1719,6 +1755,16 @@ public:
             sensLabel.setBounds(col.removeFromLeft(30).withSizeKeepingCentre(28, kBtnH));
             sensKnob.setBounds(col.removeFromLeft(20).withSizeKeepingCentre(kBtnH, kBtnH));
             sensValueLabel.setBounds(col.withSizeKeepingCentre(33, kBtnH));
+        }
+        {
+            // Grid snap button — moved here from Row 1
+            auto col = row2.removeFromLeft(62);
+            gridSnapButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
+        }
+        {
+            // Grid resolution cycling button — moved here from Row 1
+            auto col = row2.removeFromLeft(52);
+            gridResolutionButton.setBounds(col.withSizeKeepingCentre(50, kBtnH));
         }
         // Vol knob is now in the top row — skip its row2 layout
 
@@ -1925,6 +1971,21 @@ public:
     {
         reverseEnabledState = enabled;
         reverseButton.setToggleState(enabled, juce::dontSendNotification);
+    }
+
+    bool isBounceEnabled() const { return bounceEnabledState; }
+
+    // Quietly restore bounce state on startup — does NOT fire listener.
+    void setBounceEnabled(bool enabled)
+    {
+        bounceEnabledState = enabled;
+        bounceButton.setToggleState(enabled, juce::dontSendNotification);
+    }
+
+    void resetBounce()
+    {
+        bounceEnabledState = false;
+        bounceButton.setToggleState(false, juce::dontSendNotification);
     }
 
     // Called by MainComponent when a note-off arrives while oneshot is active (tail started),
@@ -2384,6 +2445,7 @@ public:
         virtual void transientDetectionEnabledChanged(bool enabled) = 0;
         virtual void oneShotEnabledChanged(bool enabled) = 0;
         virtual void reverseEnabledChanged(bool enabled) = 0;
+        virtual void bounceEnabledChanged(bool enabled) = 0;
         virtual void pitchStepCentsChanged(int cents) = 0;
         virtual void adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs) = 0;
         virtual void activeTabChanged(int tabIndex) = 0;
@@ -3053,11 +3115,34 @@ public:
                     g.drawLine(phX, (float)waveformBounds.getY(),
                                phX, (float)waveformBounds.getBottom(), 1.5f);
 
-                    // Small downward triangle at the top of the ruler (easy to spot)
+                    // Arrow indicator: directional left/right in bounce mode, downward otherwise.
                     juce::Path phTri;
-                    phTri.addTriangle(phX - 3.0f, (float)rulerBounds.getY(),
-                                      phX + 3.0f, (float)rulerBounds.getY(),
-                                      phX,        (float)rulerBounds.getY() + 6.0f);
+                    if (playheadBounceMode)
+                    {
+                        // Directional triangle pointing in the current travel direction.
+                        const float ry = (float)rulerBounds.getY() + 1.0f;
+                        if (playheadDir >= 0)
+                        {
+                            // Right-pointing arrow ▶
+                            phTri.addTriangle(phX,        ry,
+                                              phX,        ry + 8.0f,
+                                              phX + 6.0f, ry + 4.0f);
+                        }
+                        else
+                        {
+                            // Left-pointing arrow ◀
+                            phTri.addTriangle(phX,        ry,
+                                              phX,        ry + 8.0f,
+                                              phX - 6.0f, ry + 4.0f);
+                        }
+                    }
+                    else
+                    {
+                        // Default: small downward triangle at the top of the ruler
+                        phTri.addTriangle(phX - 3.0f, (float)rulerBounds.getY(),
+                                          phX + 3.0f, (float)rulerBounds.getY(),
+                                          phX,        (float)rulerBounds.getY() + 6.0f);
+                    }
                     g.fillPath(phTri);
                 }
             }
@@ -3182,6 +3267,24 @@ public:
                 peaksReady.store(true);
                 printf("[LOAD-TIMING] setAudioPeaks() — %d ch  %lld samples  %.1f Hz  peaks ready\n",
                        numCh, numSamples, sampleRate);
+            }
+
+            // Called by SampleCard's updatePlayhead() before setPlayheadPosition().
+            // Stores bounce mode and direction so paint() draws the correct arrow.
+            // Triggers a repaint of the playhead strip when direction changes.
+            void setPlayheadBounceAndDirection(int dir, bool bounceActive)
+            {
+                const bool dirChanged    = (dir != playheadDir);
+                const bool modeChanged   = (bounceActive != playheadBounceMode);
+                playheadDir        = dir;
+                playheadBounceMode = bounceActive;
+                // Repaint playhead strip so the arrow updates in the current frame.
+                if ((dirChanged || modeChanged) && prevPlayheadX >= 0)
+                {
+                    const int margin = 8; // wider margin to cover the 6px triangle
+                    repaint(prevPlayheadX - margin, getLocalBounds().getY(),
+                            2 * margin + 2, getLocalBounds().getHeight());
+                }
             }
 
             // Called by SampleCard's 60fps PlayheadTimer.
@@ -3436,8 +3539,10 @@ public:
             int    viewScrollX = 0;    // Viewport scroll offset — updated via setScrollOffset()
 
             // Playhead — written from SampleCard's 60fps timer, read only in paint()
-            float playheadNormalized = -1.0f;  // -1 = hidden
-            int   prevPlayheadX      = -1;     // pixel X from last frame, for dirty-region erase
+            float playheadNormalized  = -1.0f;  // -1 = hidden
+            int   prevPlayheadX       = -1;     // pixel X from last frame, for dirty-region erase
+            int   playheadDir         = 1;      // +1=forward, -1=backward (bounce mode only)
+            bool  playheadBounceMode  = false;  // true while Bnc is active — draws directional arrow
 
             // ADSR envelope overlay state
             bool   adsrOverlayEnabled = false;
@@ -3989,6 +4094,8 @@ void adjustPitchUp()
     bool oneShotEnabled   = false;
     juce::TextButton reverseButton { "Rev" };
     bool reverseEnabledState = false;
+    juce::TextButton bounceButton { "Bnc" };
+    bool bounceEnabledState = false;
     OneShotPulseTimer oneShotPulseTimer { *this };
     int  oneShotPulsePhase = 0;
     juce::TextButton gridSnapButton { "Grid" };
@@ -4357,6 +4464,10 @@ void adjustPitchUp()
         float pos = getPlayheadPosition
                     ? (float)getPlayheadPosition()
                     : -1.0f;
+        int dir = (getPlayheadDirection && bounceEnabledState)
+                  ? getPlayheadDirection()
+                  : 1;
+        waveformComponent->setPlayheadBounceAndDirection(dir, bounceEnabledState);
         waveformComponent->setPlayheadPosition(pos);
     }
 
@@ -4409,6 +4520,9 @@ public:
     // Wired by MainComponent to return the current playback position normalized [0,1]
     // over the full sample, or -1 if no voice is active.  Read 60 times per second.
     std::function<double()> getPlayheadPosition;
+    // Wired by MainComponent to return current bounce direction: +1=forward, -1=backward.
+    // Returns 1 when not in bounce mode (or no voice active).
+    std::function<int()> getPlayheadDirection;
 
     // Fired when the user confirms Trim — MainComponent performs the actual file write.
     std::function<void()> onTrimRequested;
@@ -4455,7 +4569,7 @@ private:
         for (auto* c : std::initializer_list<juce::Component*>{
             &pitchDownButton, &pitchLabel, &pitchUpButton,
             &pitchStepButton, &pitchStepLabel,
-            &tuneButton, &freezeButton, &loopButton, &oneShotButton, &reverseButton,
+            &tuneButton, &freezeButton, &loopButton, &oneShotButton, &reverseButton, &bounceButton,
             &gridSnapButton, &gridResolutionButton,
             &detectionToggleButton,
             &prevTransientButton, &nextTransientButton,

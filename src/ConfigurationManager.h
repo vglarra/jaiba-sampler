@@ -169,6 +169,16 @@ public:
         return propertiesFile->getBoolValue("reverseEnabled", false);
     }
 
+    void saveBounceEnabled(bool enabled)
+    {
+        propertiesFile->setValue("bounceEnabled", enabled);
+    }
+
+    bool getBounceEnabled()
+    {
+        return propertiesFile->getBoolValue("bounceEnabled", false);
+    }
+
     void saveBaseTuningHz(double hz)
     {
         propertiesFile->setValue("baseTuningHz", hz);

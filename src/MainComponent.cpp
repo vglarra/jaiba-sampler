@@ -145,8 +145,15 @@ MainComponent::MainComponent()
           }
       };
 
-      // Wire playhead position — read 60fps from SampleCard's PlayheadTimer
+      // Wire playhead position and direction — read 60fps from SampleCard's PlayheadTimer
       sampleCard.getPlayheadPosition = [this] { return getPlayheadPositionNormalized(); };
+      sampleCard.getPlayheadDirection = [this] {
+          for (int i = 0; i < sampler.getNumVoices(); ++i)
+              if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
+                  if (v->playheadPositionAtomic.load() >= 0)
+                      return v->playDirectionAtomic.load();
+          return 1;
+      };
       sampleCard.onTrimRequested = [this] { performTrimAsync(); };
 
       // Set initial sample name
@@ -1379,6 +1386,7 @@ void MainComponent::updateSamplerSounds()
         sound->customAdsrSustain.store(sampleCard.getAdsrSustain());
         sound->customAdsrReleaseMs.store(sampleCard.getAdsrReleaseMs());
         sound->reverseEnabled.store(sampleCard.isReverseEnabled());
+        sound->bounceEnabled.store(sampleCard.isBounceEnabled());
 
         sampler.addSound(sound);
 
@@ -1664,6 +1672,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         sampleCard.resetEndPoint();
         sampleCard.setLoopEnabled(false);
         sampleCard.resetFreeze();
+        sampleCard.resetBounce();
 
         // ── Step 4: Install new sample ────────────────────────────────────────────
         {
@@ -2680,6 +2689,20 @@ void MainComponent::reverseEnabledChanged(bool enabled)
     printf("[REV] Reverse playback %s — saved to disk\n", enabled ? "ON" : "OFF");
 }
 
+void MainComponent::bounceEnabledChanged(bool enabled)
+{
+    // Propagate to all live sounds atomically — no rebuild needed.
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            sound->bounceEnabled.store(enabled);
+
+    if (configManager != nullptr)
+        configManager->saveBounceEnabled(enabled);
+
+    printf("[BNC] Bounce playback %s — saved to disk\n", enabled ? "ON" : "OFF");
+}
+
+
 void MainComponent::checkOneShotTailDone()
 {
     // Called every 200ms while a one-shot tail is playing.
@@ -2872,11 +2895,13 @@ void MainComponent::performPanicReset()
     //    Freeze is intentionally left off — freeze requires an active voice to be meaningful.
     bool loopOn    = sampleCard.isLoopEnabled();
     bool oneShotOn = sampleCard.isOneShotEnabled();
+    bool bounceOn  = sampleCard.isBounceEnabled();
     for (int i = 0; i < sampler.getNumSounds(); ++i)
         if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
         {
             s->loopEnabled.store(loopOn);
             s->oneShotEnabled.store(oneShotOn);
+            s->bounceEnabled.store(bounceOn);
         }
 
     // 10. Re-enable audio — engine is now idle and ready for new MIDI triggers
@@ -3314,6 +3339,14 @@ void MainComponent::loadLastSession()
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
             sound->reverseEnabled.store(savedReverse);
     printf("[REV] Restored reverse: %s\n", savedReverse ? "ON" : "OFF");
+
+    // Restore Bounce on/off state
+    bool savedBounce = configManager->getBounceEnabled();
+    sampleCard.setBounceEnabled(savedBounce);
+    for (int i = 0; i < sampler.getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            sound->bounceEnabled.store(savedBounce);
+    printf("[BNC] Restored bounce: %s\n", savedBounce ? "ON" : "OFF");
 
     // FIX 2: restore user-selected grid resolution from 'gridResolution' (ms) key if present
     {

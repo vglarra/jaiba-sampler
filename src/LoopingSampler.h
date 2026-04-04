@@ -63,6 +63,9 @@ public:
     std::atomic<float>       customAdsrReleaseMs { 0.0f };
     // Reverse playback: when true the voice reads samples from End→Start instead of Start→End.
     std::atomic<bool>        reverseEnabled      { false };
+    // Bounce (ping-pong) playback: forward then backward, alternating at start/end boundaries.
+    // Mutually exclusive with reverseEnabled at the UI level.
+    std::atomic<bool>        bounceEnabled       { false };
 };
 
 //==============================================================================
@@ -123,6 +126,8 @@ public:
             adsr.setParameters(params);
             adsr.noteOn();
             noteIsHeld = true;
+            playDirectionInternal = 1;   // always start forward in bounce mode
+            playDirectionAtomic.store(1);
 
             // Precompute manual envelope sample counts for the custom ADSR path.
             // These are recalculated each block in renderNextBlock for real-time knob updates,
@@ -182,11 +187,13 @@ public:
     // so the audio thread is not inside renderNextBlock concurrently.
     void forceStop()
     {
-        noteIsHeld        = false;
-        inRelease         = false;
-        releasePosition   = -1;
-        envSamplePosition = 0;
+        noteIsHeld            = false;
+        inRelease             = false;
+        releasePosition       = -1;
+        envSamplePosition     = 0;
+        playDirectionInternal = 1;
         playheadPositionAtomic.store(-1);  // hide playhead immediately
+        playDirectionAtomic.store(1);      // reset direction indicator
         pendingSeekAtomic.store(-1);       // cancel any pending direction-switch seek
         clearCurrentNote();   // sets currentlyPlayingSound = nullptr (releases ref-count)
         adsr.reset();
@@ -198,6 +205,9 @@ public:
     // Both are public so MainComponent can read them directly — no lock, no sound pointer access.
     std::atomic<juce::int64> playheadPositionAtomic { -1 };  // -1 = not playing
     std::atomic<juce::int64> totalSamplesAtomic     {  0 };  // total sample count for normalization
+    // Current bounce direction: +1 = forward, -1 = backward.
+    // Written by audio thread when direction flips; read by UI timer for direction arrow.
+    std::atomic<int>         playDirectionAtomic    {  1 };
     // Written by message thread when reverse is toggled during active playback.
     // Audio thread applies the seek at start of next block and resets to -1.
     // Enables the "mirror current position" behavior required for seamless direction switches.
@@ -229,8 +239,10 @@ public:
 
             const double regionLen = (double)(sEnd - sStart);
 
-            // Cache reverse flag once per block.
+            // Cache mode flags once per block.
             const bool reversePlayback = sound->reverseEnabled.load();
+            const bool bounceMode      = sound->bounceEnabled.load();
+            const bool freezeActive    = sound->freezeActive.load();
 
             // maxSafePos: highest pos where inL[pos+1] is still within the buffer.
             const int maxSafePos = data->getNumSamples() - 2;
@@ -244,7 +256,7 @@ public:
                               ? output.getWritePointer(1, startSample) : nullptr;
 
             // OneShot overrides loop: even if loopEnabled is true, we play through once only.
-            const bool shouldLoop = (sound->loopEnabled.load() || sound->freezeActive.load())
+            const bool shouldLoop = (sound->loopEnabled.load() || freezeActive)
                                     && !sound->oneShotEnabled.load();
 
             // Cache once per block — avoids repeated atomic loads inside the sample loop.
@@ -272,7 +284,43 @@ public:
             }
 
             // Clamp position to valid range for current direction.
-            if (reversePlayback)
+            if (bounceMode)
+            {
+                // Bounce: position must stay within [sStart, sEnd-1]; flip direction at boundaries.
+                if (playDirectionInternal == 1)
+                {
+                    if (sourceSamplePosition < (double)sStart)
+                        sourceSamplePosition = (double)sStart;
+                    if (sourceSamplePosition >= (double)sEnd)
+                    {
+                        if (noteIsHeld || freezeActive)
+                        {
+                            sourceSamplePosition = (double)(sEnd - 1);
+                            playDirectionInternal = -1;
+                            playDirectionAtomic.store(-1);
+                            if (customAdsr && noteIsHeld) envSamplePosition = 0;
+                        }
+                        else { playheadPositionAtomic.store(-1); clearCurrentNote(); adsr.reset(); return; }
+                    }
+                }
+                else
+                {
+                    if (sourceSamplePosition >= (double)sEnd)
+                        sourceSamplePosition = (double)(sEnd - 1);
+                    if (sourceSamplePosition < (double)sStart)
+                    {
+                        if (noteIsHeld || freezeActive)
+                        {
+                            sourceSamplePosition = (double)sStart;
+                            playDirectionInternal = 1;
+                            playDirectionAtomic.store(1);
+                            if (customAdsr && noteIsHeld) envSamplePosition = 0;
+                        }
+                        else { playheadPositionAtomic.store(-1); clearCurrentNote(); adsr.reset(); return; }
+                    }
+                }
+            }
+            else if (reversePlayback)
             {
                 // Reverse: position counts down from (sEnd-1) toward sStart.
                 if (sourceSamplePosition >= (double)sEnd)
@@ -406,15 +454,59 @@ public:
                 // Smooth pitch toward target — eliminates audible click on mid-playback pitch change.
                 smoothedPitchRatio += (pitchRatio - smoothedPitchRatio) * pitchSmoothCoeff;
 
-                // Advance position in the correct direction.
-                if (reversePlayback)
-                    sourceSamplePosition -= smoothedPitchRatio;
-                else
-                    sourceSamplePosition += smoothedPitchRatio;
-
-                // Boundary check — loop wrap or natural stop.
-                if (reversePlayback)
+                // Advance position and handle boundary (mode-specific).
+                if (bounceMode)
                 {
+                    // Bounce: advance in current internal direction, then flip at each boundary.
+                    if (playDirectionInternal == 1)
+                        sourceSamplePosition += smoothedPitchRatio;
+                    else
+                        sourceSamplePosition -= smoothedPitchRatio;
+
+                    // Continue bouncing while the note is held OR freeze is active.
+                    if (playDirectionInternal == 1 && sourceSamplePosition >= (double)sEnd)
+                    {
+                        if (noteIsHeld || freezeActive)
+                        {
+                            double overshoot = sourceSamplePosition - (double)(sEnd - 1);
+                            sourceSamplePosition = (double)(sEnd - 1) - overshoot;
+                            if (sourceSamplePosition < (double)sStart) sourceSamplePosition = (double)sStart;
+                            playDirectionInternal = -1;
+                            playDirectionAtomic.store(-1);
+                            if (customAdsr && noteIsHeld) envSamplePosition = 0;
+                        }
+                        else
+                        {
+                            playheadPositionAtomic.store(-1);
+                            clearCurrentNote();
+                            adsr.reset();
+                            break;
+                        }
+                    }
+                    else if (playDirectionInternal == -1 && sourceSamplePosition < (double)sStart)
+                    {
+                        if (noteIsHeld || freezeActive)
+                        {
+                            double overshoot = (double)sStart - sourceSamplePosition;
+                            sourceSamplePosition = (double)sStart + overshoot;
+                            if (sourceSamplePosition >= (double)sEnd) sourceSamplePosition = (double)(sEnd - 1);
+                            playDirectionInternal = 1;
+                            playDirectionAtomic.store(1);
+                            if (customAdsr && noteIsHeld) envSamplePosition = 0;
+                        }
+                        else
+                        {
+                            playheadPositionAtomic.store(-1);
+                            clearCurrentNote();
+                            adsr.reset();
+                            break;
+                        }
+                    }
+                }
+                else if (reversePlayback)
+                {
+                    sourceSamplePosition -= smoothedPitchRatio;
+
                     if (sourceSamplePosition < (double)sStart)
                     {
                         if (shouldLoop)
@@ -436,6 +528,8 @@ public:
                 }
                 else
                 {
+                    sourceSamplePosition += smoothedPitchRatio;
+
                     if (sourceSamplePosition >= (double)sEnd)
                     {
                         if (shouldLoop)
@@ -472,6 +566,9 @@ private:
     // True from startNote until a genuine note-off (not frozen/oneshot early-return).
     // Guards the loop-wrap envSamplePosition reset so a released note's release tail is never canceled.
     bool noteIsHeld = false;
+    // Current bounce direction: +1 = forward, -1 = backward.
+    // Changes at each boundary during bounce playback.
+    int playDirectionInternal = 1;
 
     // Manual per-cycle ADSR envelope (used when customAdsrEnabled=true).
     // Replaces adsr.noteOn() re-triggers at loop wraps — JUCE ADSR does not reliably restart
