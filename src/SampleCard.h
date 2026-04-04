@@ -780,18 +780,29 @@ public:
         volumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCECECE)); // neutral gray fill
         volumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
         volumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFF1E1E1E)); // dark indicator on gray
+        volumeKnob.setDoubleClickReturnValue(true, 1.0); // double-click resets to 100%
         volumeKnob.onValueChange = [this] {
-            listeners.call([this](Listener& l) { l.volumeChanged((float)volumeKnob.getValue()); });
+            float v = (float)volumeKnob.getValue();
+            volValueLabel.setText(juce::String(juce::roundToInt(v * 100)) + "%",
+                                  juce::dontSendNotification);
+            listeners.call([this, v](Listener& l) { l.volumeChanged(v); });
         };
         volumeKnob.onDragStart = [this] { isVolKnobDragging = true; };
         volumeKnob.onDragEnd   = [this] { isVolKnobDragging = false; };
+        volumeKnob.addMouseListener(this, false); // SampleCard::mouseDoubleClick flashes volValueLabel
         addAndMakeVisible(volumeKnob);
 
         volumeLabel.setText("Vol", juce::dontSendNotification);
-        volumeLabel.setJustificationType(juce::Justification::centred);
+        volumeLabel.setJustificationType(juce::Justification::centredRight);
         volumeLabel.setFont(juce::Font(11.0f));
         volumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(volumeLabel);
+
+        volValueLabel.setText("100%", juce::dontSendNotification);
+        volValueLabel.setJustificationType(juce::Justification::centredLeft);
+        volValueLabel.setFont(juce::Font(10.0f));
+        volValueLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
+        addAndMakeVisible(volValueLabel);
 
         // Start point knob — deep red matching the start marker (#CC0000), white indicator
         startKnob.setLookAndFeel(&compactKnobLaf);
@@ -817,7 +828,7 @@ public:
         addAndMakeVisible(startKnob);
 
         startKnobLabel.setText("Start", juce::dontSendNotification);
-        startKnobLabel.setJustificationType(juce::Justification::centred);
+        startKnobLabel.setJustificationType(juce::Justification::centredRight);
         startKnobLabel.setFont(juce::Font(11.0f));
         startKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(startKnobLabel);
@@ -859,7 +870,7 @@ public:
         addAndMakeVisible(endKnob);
 
         endKnobLabel.setText("End", juce::dontSendNotification);
-        endKnobLabel.setJustificationType(juce::Justification::centred);
+        endKnobLabel.setJustificationType(juce::Justification::centredRight);
         endKnobLabel.setFont(juce::Font(11.0f));
         endKnobLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(endKnobLabel);
@@ -1099,7 +1110,7 @@ public:
         addAndMakeVisible(sensKnob);
 
         sensLabel.setText("Sens", juce::dontSendNotification);
-        sensLabel.setJustificationType(juce::Justification::centred);
+        sensLabel.setJustificationType(juce::Justification::centredRight);
         sensLabel.setFont(juce::Font(11.0f));
         sensLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(sensLabel);
@@ -1432,38 +1443,52 @@ public:
         // Add margin around the entire card content (10px on each side)
         area.reduce(10, 10);
         
-        // ===== CRITICAL FIX: Change top row height from 40px to 30px =====
-        // Top row: All controls (height 30px to match pitch controls)
-        auto topRow = area.removeFromTop(30);  // ← CHANGED from 40 to 30
-        
-        // + button on left (40px wide, 30px tall)
-        addButton.setBounds(topRow.removeFromLeft(40).reduced(2));
-        
+        // ===== TOP ROW: uniform height matches tab buttons (24px bar, 20px buttons) =====
+        constexpr int kTopBtnH = 20; // same as kBtnH in Controls tab
+        auto topRow = area.removeFromTop(24); // matches tab bar height
+
+        // + button on left (40px wide)
+        addButton.setBounds(topRow.removeFromLeft(40).withSizeKeepingCentre(36, kTopBtnH));
+
         // Leave some space between + button and MIDI controls
         topRow.removeFromLeft(10);
-        
-        // Learn button (60px wide, 30px tall)
-        learnButton.setBounds(topRow.removeFromLeft(60).reduced(2));
-        
-        // MIDI Note display (100px wide, 30px tall)
-        midiNoteLabel.setBounds(topRow.removeFromLeft(100).reduced(2));
-        
+
+        // Learn button (60px wide)
+        learnButton.setBounds(topRow.removeFromLeft(60).withSizeKeepingCentre(56, kTopBtnH));
+
+        // MIDI Note display (100px wide)
+        midiNoteLabel.setBounds(topRow.removeFromLeft(100).withSizeKeepingCentre(96, kTopBtnH));
+
         // Space between note and channel controls
         topRow.removeFromLeft(10);
-        
+
         // MIDI Channel controls (total 120px: 30 + 60 + 30)
-        channelDownButton.setBounds(topRow.removeFromLeft(30).reduced(2));
-        midiChannelLabel.setBounds(topRow.removeFromLeft(60).reduced(2));
-        channelUpButton.setBounds(topRow.removeFromLeft(30).reduced(2));
-        
-        // Space before Prev/Next buttons
-        topRow.removeFromLeft(10);
-        
+        channelDownButton.setBounds(topRow.removeFromLeft(30).withSizeKeepingCentre(26, kTopBtnH));
+        midiChannelLabel.setBounds(topRow.removeFromLeft(60).withSizeKeepingCentre(56, kTopBtnH));
+        channelUpButton.setBounds(topRow.removeFromLeft(30).withSizeKeepingCentre(26, kTopBtnH));
+
+        // Gap before Vol knob
+        topRow.removeFromLeft(8);
+
+        // Vol knob with left label and right percentage display
+        // Layout: [Vol label (28px)] [knob (20x20)] [value% (32px)]
+        {
+            auto volLabelCol = topRow.removeFromLeft(28);
+            volumeLabel.setBounds(volLabelCol.withSizeKeepingCentre(26, kTopBtnH));
+            auto volKnobCol = topRow.removeFromLeft(20);
+            volumeKnob.setBounds(volKnobCol.withSizeKeepingCentre(kTopBtnH, kTopBtnH));
+            auto volValueCol = topRow.removeFromLeft(32);
+            volValueLabel.setBounds(volValueCol.withSizeKeepingCentre(30, kTopBtnH));
+        }
+
+        // Gap after Vol knob area
+        topRow.removeFromLeft(6);
+
         // Prev/Next buttons on right: Next rightmost, Prev to its left (L→R: Prev | Next)
-        nextButton.setBounds(topRow.removeFromRight(60).reduced(2));
-        prevButton.setBounds(topRow.removeFromRight(60).reduced(2));
+        nextButton.setBounds(topRow.removeFromRight(60).withSizeKeepingCentre(56, kTopBtnH));
+        prevButton.setBounds(topRow.removeFromRight(60).withSizeKeepingCentre(56, kTopBtnH));
         // Step description label: fills remaining space on the right, flush left of Prev
-        stepDescriptionLabel.setBounds(topRow.removeFromRight(140).reduced(2, 0));
+        stepDescriptionLabel.setBounds(topRow.removeFromRight(140).withSizeKeepingCentre(136, kTopBtnH));
         
         // Add 5px margin between top row and waveform
         area.removeFromTop(5);
@@ -1534,120 +1559,125 @@ public:
 
         if (activeTab == 0)
         {
+        // Standard button height = tab button height (tab bar 24px, reduced(1,2) = 20px).
+        // All Controls-tab buttons and knob containers use this same height.
+        static bool layoutPrinted = false;
+        if (!layoutPrinted) {
+            DBG("[LAYOUT] Tab button height: 20px — applying to all Controls tab buttons");
+            layoutPrinted = true;
+        }
+        constexpr int kBtnH = 20; // matches tab button height after reduced(1,2)
 
-        // ===== ROW 1: Playback controls (44px) — Down | Pitch | Up | Freeze | Loop =====
-        auto row1 = area.removeFromTop(44);
+        // ===== ROW 1: Playback controls (24px — matches tab bar height) =====
+        auto row1 = area.removeFromTop(24);
 
         {
-            // Pitch controls: Down | Pitch display | Up  (180px, 30px tall, vertically centred)
+            // Pitch controls: Down | Pitch display | Up  (180px, kBtnH tall, vertically centred)
             const int pitchCtrlW = 180;
             auto pitchArea = row1.removeFromLeft(pitchCtrlW);
-            auto pitchControlArea = pitchArea.withSizeKeepingCentre(pitchCtrlW, 30);
+            auto pitchControlArea = pitchArea.withSizeKeepingCentre(pitchCtrlW, kBtnH);
             pitchDownButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
             pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
             pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
         }
         row1.removeFromLeft(4); // gap
         {
-            // Pitch Step cycling button + "Step" label below it (60px column)
+            // Pitch Step cycling button — label hidden at this row height
             auto col = row1.removeFromLeft(60);
-            pitchStepLabel.setBounds(col.removeFromBottom(13).reduced(2, 0));
-            pitchStepButton.setBounds(col.withSizeKeepingCentre(58, 30));
+            pitchStepLabel.setBounds({});  // no room at 24px row height
+            pitchStepButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
         row1.removeFromLeft(4); // gap between step and toggle buttons
         {
             // Tune button — pitch detection (right of pitch controls)
             auto col = row1.removeFromLeft(62);
-            tuneButton.setBounds(col.withSizeKeepingCentre(58, 30));
+            tuneButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
         {
             // Freeze button
             auto col = row1.removeFromLeft(62);
-            freezeButton.setBounds(col.withSizeKeepingCentre(58, 30));
+            freezeButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
         {
             // Loop button
             auto col = row1.removeFromLeft(62);
-            loopButton.setBounds(col.withSizeKeepingCentre(58, 30));
+            loopButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
         {
             // One Shot button — right of Loop
             auto col = row1.removeFromLeft(62);
-            oneShotButton.setBounds(col.withSizeKeepingCentre(58, 30));
+            oneShotButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
         {
             // Rev (reverse) button — right of One Shot
             auto col = row1.removeFromLeft(62);
-            reverseButton.setBounds(col.withSizeKeepingCentre(58, 30));
+            reverseButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
         {
             // Grid snap button
             auto col = row1.removeFromLeft(62);
-            gridSnapButton.setBounds(col.withSizeKeepingCentre(58, 30));
+            gridSnapButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
         {
             // Grid resolution cycling button (compact, right of Grid)
             auto col = row1.removeFromLeft(52);
-            gridResolutionButton.setBounds(col.withSizeKeepingCentre(50, 30));
+            gridResolutionButton.setBounds(col.withSizeKeepingCentre(50, kBtnH));
         }
 
-        // 5px gap between rows
-        area.removeFromTop(5);
+        // 4px gap between rows (matches tab-bar gap)
+        area.removeFromTop(4);
 
-        // ===== ROW 2: Marker controls (60px) — <T | T> | Start | End | <T | T> | Sens | Vol =====
-        auto row2 = area.removeFromTop(60);
-        const int labelH = 13;
+        // ===== ROW 2: Marker controls (24px — matches tab bar height) =====
+        // Knob labels shown to the LEFT of each knob (right-aligned text flush to knob edge).
+        // Vol knob moved to top row — not present here.
+        // transientCountLabel hidden (no room at 24px).
+        auto row2 = area.removeFromTop(24);
+        transientCountLabel.setBounds({});  // hidden — no room at uniform row height
 
         {
             // "CRA" — transient detection toggle
             auto col = row2.removeFromLeft(44);
-            detectionToggleButton.setBounds(col.withSizeKeepingCentre(42, 30));
+            detectionToggleButton.setBounds(col.withSizeKeepingCentre(42, kBtnH));
         }
         {
             // "< T" — snap start to PREV transient
             auto col = row2.removeFromLeft(38);
-            prevTransientButton.setBounds(col.withSizeKeepingCentre(36, 30));
+            prevTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
         }
         {
             // "T >" — snap start to NEXT transient
             auto col = row2.removeFromLeft(38);
-            nextTransientButton.setBounds(col.withSizeKeepingCentre(36, 30));
+            nextTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
         }
         {
-            // Start knob
+            // Start knob — 60px column: left 30px = "Start" label, right 30px = knob
             auto col = row2.removeFromLeft(60);
-            startKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            startKnob.setBounds(col.reduced(2));
+            startKnobLabel.setBounds(col.removeFromLeft(30).withSizeKeepingCentre(28, kBtnH));
+            startKnob.setBounds(col.withSizeKeepingCentre(kBtnH, kBtnH));
         }
         {
-            // End knob
+            // End knob — 60px column: left 30px = "End" label, right 30px = knob
             auto col = row2.removeFromLeft(60);
-            endKnobLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            endKnob.setBounds(col.reduced(2));
+            endKnobLabel.setBounds(col.removeFromLeft(30).withSizeKeepingCentre(28, kBtnH));
+            endKnob.setBounds(col.withSizeKeepingCentre(kBtnH, kBtnH));
         }
         {
             // "< T" — snap end to PREV transient
             auto col = row2.removeFromLeft(38);
-            prevEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 30));
+            prevEndTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
         }
         {
             // "T >" — snap end to NEXT transient
             auto col = row2.removeFromLeft(38);
-            nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, 30));
+            nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
         }
         {
-            // Sens knob — two label rows: count (T:N) above "Sens"
+            // Sens knob — 60px column: left 30px = "Sens" label, right 30px = knob
             auto col = row2.removeFromLeft(60);
-            sensLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            transientCountLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            sensKnob.setBounds(col.reduced(2));
+            sensLabel.setBounds(col.removeFromLeft(30).withSizeKeepingCentre(28, kBtnH));
+            sensKnob.setBounds(col.withSizeKeepingCentre(kBtnH, kBtnH));
         }
-        {
-            // Vol knob
-            auto col = row2.removeFromLeft(60);
-            volumeLabel.setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            volumeKnob.setBounds(col.reduced(2));
-        }
+        // Vol knob is now in the top row — skip its row2 layout
 
         // Add margin before bottom info row
         area.removeFromTop(5);
@@ -1707,7 +1737,10 @@ public:
 
     void setVolume(float volume)
     {
-        volumeKnob.setValue(juce::jlimit(0.0f, 1.0f, volume), juce::dontSendNotification);
+        float v = juce::jlimit(0.0f, 1.0f, volume);
+        volumeKnob.setValue(v, juce::dontSendNotification);
+        volValueLabel.setText(juce::String(juce::roundToInt(v * 100)) + "%",
+                              juce::dontSendNotification);
     }
 
     // Start point — in seconds. Pass 0 to reset to the beginning.
@@ -2425,11 +2458,30 @@ public:
                 repaint();
             }
 
+            // Double-click resets pitch to 0 with a brief white flash to confirm.
+            void mouseDoubleClick(const juce::MouseEvent&) override
+            {
+                if (onPitchDragged) onPitchDragged(0);
+                if (onDragFinished) onDragFinished();
+                flashActive = true;
+                repaint();
+                juce::Timer::callAfterDelay(150, [safeThis = juce::Component::SafePointer<DraggablePitchLabel>(this)]()
+                {
+                    if (auto* p = safeThis.getComponent()) { p->flashActive = false; p->repaint(); }
+                });
+            }
+
             // Override paint to add hover/drag highlight glow
             void paint(juce::Graphics& g) override
             {
                 juce::Label::paint(g);
-                if (isHovered || isDragging)
+                if (flashActive)
+                {
+                    // Bright white fill flash on double-click reset
+                    g.setColour(juce::Colour(0x88FFFFFF));
+                    g.fillRect(getLocalBounds().reduced(1));
+                }
+                else if (isHovered || isDragging)
                 {
                     // Subtle white outline glow to signal interactivity
                     g.setColour(juce::Colour(0x44FFFFFF));
@@ -2442,6 +2494,7 @@ public:
             int  pitchAtDragStart = 0;
             bool isHovered        = false;
             bool isDragging       = false;
+            bool flashActive      = false;
         };
 
         // Timer for pulsing the 1Shot button while a one-shot tail is completing.
@@ -3921,7 +3974,8 @@ void adjustPitchUp()
 
     // Volume knob
     juce::Slider volumeKnob;
-    juce::Label volumeLabel;
+    juce::Label  volumeLabel;
+    juce::Label  volValueLabel;   // percentage display to the right of the knob (e.g. "75%")
 
     // Start point knob
     juce::Slider startKnob;
@@ -4304,8 +4358,7 @@ private:
             &startKnob, &startKnobLabel,
             &endKnob,   &endKnobLabel,
             &prevEndTransientButton, &nextEndTransientButton,
-            &sensKnob, &sensLabel, &transientCountLabel,
-            &volumeKnob, &volumeLabel})
+            &sensKnob, &sensLabel, &transientCountLabel})
             c->setVisible(showCtrl);
 
         // ADSR tab content (knobs only — Env toggle lives in the tab bar)
@@ -4758,6 +4811,25 @@ private:
         // Guard: restore correct appearance if user dragged away without completing the click.
         if (e.eventComponent == &freezeButton && !e.mouseWasClicked())
             applyFreezeButtonStyle(isFreezeActive);
+    }
+
+    // Double-click on vol knob: JUCE resets value via setDoubleClickReturnValue;
+    // we add a brief white flash on volValueLabel to confirm the reset.
+    void mouseDoubleClick(const juce::MouseEvent& e) override
+    {
+        if (e.eventComponent == &volumeKnob)
+        {
+            volValueLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0x88FFFFFF));
+            volValueLabel.repaint();
+            juce::Timer::callAfterDelay(150, [safeThis = juce::Component::SafePointer<SampleCard>(this)]()
+            {
+                if (auto* p = safeThis.getComponent())
+                {
+                    p->volValueLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+                    p->volValueLabel.repaint();
+                }
+            });
+        }
     }
 
     void applyFreezeButtonStyle(bool on)

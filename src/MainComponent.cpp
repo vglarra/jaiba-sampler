@@ -96,11 +96,16 @@ MainComponent::MainComponent()
     masterVolumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCECECE));
     masterVolumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
     masterVolumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFF1E1E1E)); // dark indicator on light fill
+    masterVolumeKnob.setDoubleClickReturnValue(true, 1.0); // double-click resets to 100%
     masterVolumeKnob.onValueChange = [this] {
-        masterVolumeGain.store((float)masterVolumeKnob.getValue());
+        float v = (float)masterVolumeKnob.getValue();
+        masterVolumeGain.store(v);
+        masterVolValueLabel.setText(juce::String(juce::roundToInt(v * 100)) + "%",
+                                    juce::dontSendNotification);
         if (configManager != nullptr)
-            configManager->saveMasterVolume((float)masterVolumeKnob.getValue());
+            configManager->saveMasterVolume(v);
     };
+    masterVolumeKnob.addMouseListener(this, false); // MainComponent::mouseDoubleClick flashes label
     addAndMakeVisible(masterVolumeKnob);
 
     masterVolumeLabel.setText("Master Vol", juce::dontSendNotification);
@@ -108,6 +113,12 @@ MainComponent::MainComponent()
     masterVolumeLabel.setFont(juce::Font(12.0f));
     masterVolumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
     addAndMakeVisible(masterVolumeLabel);
+
+    masterVolValueLabel.setText("70%", juce::dontSendNotification);
+    masterVolValueLabel.setJustificationType(juce::Justification::centredLeft);
+    masterVolValueLabel.setFont(juce::Font(10.0f));
+    masterVolValueLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
+    addAndMakeVisible(masterVolValueLabel);
 
       // Add MIDI activity light to the title area
       addAndMakeVisible(midiActivityLight);
@@ -473,18 +484,20 @@ void MainComponent::resized()
     // Menu button — vertically centred in 40px bar
     menuButton.setBounds(topBar.removeFromLeft(60).withSizeKeepingCentre(56, 30));
 
-    // Right: Reset(52)+gap(6)+HzLabel(70)+gap(6)+MasterVolLabel(62)+gap(4)+knob(28)+gap(8)+MIDI(22)+gap(6)+TestTone(62) = 326px
-    auto rightSide = topBar.removeFromRight(52 + 6 + 70 + 6 + 62 + 4 + 28 + 8 + 22 + 6 + 62);
+    // Right: Reset(52)+gap(6)+HzLabel(70)+gap(6)+MasterVolLabel(62)+gap(4)+knob(28)+gap(4)+value%(32)+gap(4)+MIDI(22)+gap(6)+TestTone(62) = 358px
+    auto rightSide = topBar.removeFromRight(52 + 6 + 70 + 6 + 62 + 4 + 28 + 4 + 32 + 4 + 22 + 6 + 62);
     resetButton.setBounds(rightSide.removeFromLeft(52).withSizeKeepingCentre(48, 30));
     rightSide.removeFromLeft(6);
     baseTuningLabel.setBounds(rightSide.removeFromLeft(70).withSizeKeepingCentre(68, 24));
     rightSide.removeFromLeft(6);
 
-    // Master Vol: label on left, 28x28 knob on right — both vertically centred
+    // Master Vol: label on left, 28x28 knob, then percentage value label
     masterVolumeLabel.setBounds(rightSide.removeFromLeft(62).withSizeKeepingCentre(62, 16));
     rightSide.removeFromLeft(4);
     masterVolumeKnob.setBounds(rightSide.removeFromLeft(28).withSizeKeepingCentre(28, 28));
-    rightSide.removeFromLeft(8);
+    rightSide.removeFromLeft(4);
+    masterVolValueLabel.setBounds(rightSide.removeFromLeft(32).withSizeKeepingCentre(30, 16));
+    rightSide.removeFromLeft(4);
 
     // MIDI light — vertically centred
     midiActivityLight.setBounds(rightSide.removeFromLeft(22).withSizeKeepingCentre(20, 20));
@@ -498,7 +511,7 @@ void MainComponent::resized()
     
     // Make the card take most of the body width, but with max width to maintain proportions
     const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
-    const int cardHeight = 415;     // Tab bar (24px + 4px gap) + two control rows (44px + 5px gap + 60px) below waveform
+    const int cardHeight = 352;     // Top row (24px) + 5px gap + waveform + 5px + tab bar (24px+4px) + two control rows (24px+4px+24px) + 5px + bottom row (22px)
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
     
@@ -2881,6 +2894,25 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     return false;
 }
 
+void MainComponent::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    if (e.eventComponent == &masterVolumeKnob)
+    {
+        // JUCE resets the knob value via setDoubleClickReturnValue.
+        // Flash the value label briefly white to confirm the reset.
+        masterVolValueLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0x88FFFFFF));
+        masterVolValueLabel.repaint();
+        juce::Timer::callAfterDelay(150, [safeThis = juce::Component::SafePointer<MainComponent>(this)]()
+        {
+            if (auto* p = safeThis.getComponent())
+            {
+                p->masterVolValueLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+                p->masterVolValueLabel.repaint();
+            }
+        });
+    }
+}
+
 void MainComponent::freezeChanged(bool isFrozen)
 {
     const juce::int64 t0 = juce::Time::getMillisecondCounter();
@@ -3025,6 +3057,8 @@ void MainComponent::loadLastSession()
     float savedMasterVolume = configManager->getMasterVolume();
     masterVolumeGain.store(savedMasterVolume);
     masterVolumeKnob.setValue(savedMasterVolume, juce::dontSendNotification);
+    masterVolValueLabel.setText(juce::String(juce::roundToInt(savedMasterVolume * 100)) + "%",
+                                juce::dontSendNotification);
     printf("[PERSIST] Global: master_vol=%.2f\n", savedMasterVolume);
 
     bool savedGridSnap = configManager->getGridSnapEnabled();

@@ -43,6 +43,7 @@ public:
     void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
     void sliderValueChanged(juce::Slider* slider) override;
     bool keyPressed(const juce::KeyPress& key) override;
+    void mouseDoubleClick(const juce::MouseEvent& e) override;
 
     //==============================================================================
     // SampleListModel access methods
@@ -252,7 +253,8 @@ private:
     juce::TextButton resetButton{ "Reset" };
     juce::TextButton testToneButton{ "Test tone" };
     juce::Slider masterVolumeKnob;
-    juce::Label masterVolumeLabel;
+    juce::Label  masterVolumeLabel;
+    juce::Label  masterVolValueLabel;  // percentage display to the right of the master vol knob
     DraggableHzLabel baseTuningLabel;      // Draggable display of base tuning frequency
     SampleCard sampleCard{formatManager};  // New card component with waveform support
     juce::Label audioDeviceInfoLabel;
