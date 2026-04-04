@@ -113,6 +113,11 @@ private:
     void performPanicReset();
 
     //==============================================================================
+    // Trim — writes a new WAV containing only the Start-to-End region.
+    // Validates, shows confirmation dialog, writes on background thread, then loads.
+    void performTrimAsync();
+
+    //==============================================================================
     // Normalize — compute peak-based gain from audio buffer within start/end range.
     float computeNormGainFromAudio(float targetDb) const;
 

@@ -147,6 +147,7 @@ MainComponent::MainComponent()
 
       // Wire playhead position — read 60fps from SampleCard's PlayheadTimer
       sampleCard.getPlayheadPosition = [this] { return getPlayheadPositionNormalized(); };
+      sampleCard.onTrimRequested = [this] { performTrimAsync(); };
 
       // Set initial sample name
       sampleCard.setSampleName("No sample loaded");
@@ -511,7 +512,7 @@ void MainComponent::resized()
     
     // Make the card take most of the body width, but with max width to maintain proportions
     const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
-    const int cardHeight = 352;     // Top row (24px) + 5px gap + waveform + 5px + tab bar (24px+4px) + two control rows (24px+4px+24px) + 5px + bottom row (22px)
+    const int cardHeight = 410;     // 10+24+5+165+5+24+4+139(tabContent)+24+10 — 139px for EQ display
     
     int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
     
@@ -2882,6 +2883,217 @@ void MainComponent::performPanicReset()
     muteOutput.store(false);
 
     printf("[PANIC] Reset complete — audio engine ready\n");
+}
+
+void MainComponent::performTrimAsync()
+{
+    // ── Step 1: capture sample data under lock ──────────────────────────────
+    juce::File   sourceFile;
+    std::shared_ptr<juce::AudioBuffer<float>> audioData;
+    double startSec = 0.0, endSec = 0.0, capSampleRate = 44100.0;
+    int    capChannels = 1, numTotalSamples = 0;
+
+    {
+        juce::ScopedLock lock(sampleLock);
+        if (samples.isEmpty() || selectedSampleIndex < 0 ||
+            selectedSampleIndex >= (int)samples.size() ||
+            samples[selectedSampleIndex] == nullptr ||
+            !samples[selectedSampleIndex]->isValid())
+        {
+            sampleCard.setTrimInProgress(false);
+            return;
+        }
+        auto* s        = samples[selectedSampleIndex];
+        sourceFile     = s->file;
+        audioData      = s->audioData;
+        startSec       = s->startPointSeconds;
+        capSampleRate  = s->sampleRate;
+        capChannels    = s->numChannels;
+        numTotalSamples = audioData->getNumSamples();
+        endSec = (s->endPointSeconds < 0.0)
+                 ? (double)numTotalSamples / capSampleRate
+                 : s->endPointSeconds;
+    }
+
+    const double totalDuration = (double)numTotalSamples / capSampleRate;
+    const double duration      = endSec - startSec;
+
+    // ── Step 2: edge-case validation ────────────────────────────────────────
+    if (startSec <= 0.001 && endSec >= totalDuration - 0.001)
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon, "No Trim Needed",
+            "Start and End markers cover the full sample. Move markers to trim a region.");
+        sampleCard.setTrimInProgress(false);
+        return;
+    }
+    if (duration < 0.1)
+    {
+        juce::AlertWindow::showMessageBoxAsync(
+            juce::AlertWindow::WarningIcon, "Trim Region Too Short",
+            "Trim region is too short - minimum 100ms.");
+        sampleCard.setTrimInProgress(false);
+        return;
+    }
+
+    // ── Step 3: confirmation dialog (non-blocking) ──────────────────────────
+    const juce::int64 origFileSize  = sourceFile.getSize();
+    const double      capStartSec   = startSec;
+    const double      capEndSec     = endSec;
+    auto              capAudio      = audioData;
+
+    auto* w = new juce::AlertWindow(
+        "Trim Sample",
+        "Are you sure you want to trim?\n\n"
+        "This will save a new file with only the audio between the Start and End markers. "
+        "The original file will not be modified.",
+        juce::AlertWindow::QuestionIcon);
+    w->addButton("Yes, Trim", 1);
+    w->addButton("Cancel",    0);
+
+    w->enterModalState(true,
+        juce::ModalCallbackFunction::create(
+            [this, sourceFile, capAudio, capStartSec, capEndSec,
+             capSampleRate, capChannels, origFileSize](int result) mutable
+            {
+                if (result == 0)
+                {
+                    sampleCard.setTrimInProgress(false);
+                    return;
+                }
+
+                // ── Step 4: generate unique output filename ──────────────────
+                auto parent   = sourceFile.getParentDirectory();
+                auto baseName = sourceFile.getFileNameWithoutExtension();
+                juce::File outFile;
+                int suffix = 1;
+                while (suffix < 1000)
+                {
+                    outFile = parent.getChildFile(
+                        baseName + juce::String::formatted("-%03d", suffix) + ".wav");
+                    if (!outFile.existsAsFile()) break;
+                    ++suffix;
+                }
+                if (suffix >= 1000)
+                {
+                    sampleCard.showTrimToast("Trim failed - could not find a unique filename.", true);
+                    sampleCard.setTrimInProgress(false);
+                    return;
+                }
+
+                // ── Step 5: compute sample range ─────────────────────────────
+                const int totalSmp = capAudio->getNumSamples();
+                const juce::int64 startSmp = juce::jlimit((juce::int64)0,
+                                                           (juce::int64)totalSmp,
+                                                           (juce::int64)(capStartSec * capSampleRate));
+                const juce::int64 endSmp   = juce::jlimit(startSmp + 1,
+                                                           (juce::int64)totalSmp,
+                                                           (juce::int64)(capEndSec * capSampleRate));
+
+                printf("[TRIM] Writing '%s' — samples %lld to %lld (%.3f–%.3f s)\n",
+                       outFile.getFileName().toRawUTF8(),
+                       (long long)startSmp, (long long)endSmp,
+                       capStartSec, capEndSec);
+
+                // ── Step 6: write on background thread ───────────────────────
+                backgroundThreads.addJob([this, capAudio, startSmp, endSmp,
+                                          capSampleRate, capChannels, outFile, origFileSize]() mutable
+                {
+                    juce::WavAudioFormat wavFormat;
+                    auto outStream = std::unique_ptr<juce::FileOutputStream>(
+                                         outFile.createOutputStream());
+                    if (outStream == nullptr)
+                    {
+                        juce::MessageManager::callAsync([this] {
+                            sampleCard.showTrimToast(
+                                "Trim failed - could not write file. Check disk space and permissions.", true);
+                            sampleCard.setTrimInProgress(false);
+                        });
+                        return;
+                    }
+
+                    auto* writer = wavFormat.createWriterFor(
+                        outStream.get(), capSampleRate,
+                        (unsigned int)capChannels, 24, {}, 0);
+                    if (writer == nullptr)
+                    {
+                        juce::MessageManager::callAsync([this] {
+                            sampleCard.showTrimToast("Trim failed - could not create WAV writer.", true);
+                            sampleCard.setTrimInProgress(false);
+                        });
+                        return;
+                    }
+                    outStream.release();  // writer owns the stream now
+
+                    // Write samples in 4096-frame blocks
+                    constexpr int kBlock = 4096;
+                    juce::int64 pos = startSmp;
+                    bool writeOk   = true;
+                    while (pos < endSmp && writeOk)
+                    {
+                        const int n = (int)juce::jmin((juce::int64)kBlock, endSmp - pos);
+                        juce::AudioBuffer<float> blk(capChannels, n);
+                        for (int ch = 0; ch < capChannels; ++ch)
+                            blk.copyFrom(ch, 0, *capAudio, ch, (int)pos, n);
+                        writeOk = writer->writeFromAudioSampleBuffer(blk, 0, n);
+                        pos += n;
+                    }
+                    delete writer;  // flushes and closes file
+
+                    // ── Step 7: verify ───────────────────────────────────────
+                    if (!writeOk || !outFile.existsAsFile() || outFile.getSize() == 0)
+                    {
+                        outFile.deleteFile();
+                        juce::MessageManager::callAsync([this] {
+                            sampleCard.showTrimToast(
+                                "Trim failed - could not write file. Check disk space and permissions.", true);
+                            sampleCard.setTrimInProgress(false);
+                        });
+                        return;
+                    }
+
+                    // ── Step 8: compute memory-saved string ──────────────────
+                    const juce::int64 newSize    = outFile.getSize();
+                    const double      savedBytes = (double)(origFileSize - newSize);
+                    juce::String savedStr;
+                    if (savedBytes > 1024.0 * 1024.0)
+                        savedStr = juce::String(savedBytes / (1024.0 * 1024.0), 1) + " MB";
+                    else if (savedBytes > 1024.0)
+                        savedStr = juce::String(savedBytes / 1024.0, 1) + " KB";
+                    else if (savedBytes > 0.0)
+                        savedStr = juce::String((int)savedBytes) + " B";
+
+                    printf("[TRIM] Written successfully: %lld bytes  (saved %s)\n",
+                           (long long)newSize, savedStr.toRawUTF8());
+
+                    // ── Step 9: load result on message thread ────────────────
+                    juce::MessageManager::callAsync([this, outFile, savedStr, savedBytes]() mutable
+                    {
+                        // Insert into folder navigation list
+                        {
+                            juce::ScopedWriteLock wlock(folderLock);
+                            if (!folderAudioFiles.contains(outFile))
+                                folderAudioFiles.add(outFile);
+                            for (int i = 0; i < folderAudioFiles.size(); ++i)
+                                if (folderAudioFiles[i] == outFile)
+                                { currentFileIndex = i; break; }
+                        }
+                        currentFolder = outFile.getParentDirectory();
+
+                        // Load the trimmed file (reset zoom to full view)
+                        sampleCard.restoreZoomAndScroll(1.0, 0.0f);
+                        loadSampleFileAsync(outFile, /*autoPlay=*/true, /*resetZoom=*/true);
+
+                        // Show success toast
+                        juce::String msg = "Trimmed -> " + outFile.getFileName();
+                        if (savedBytes > 0.0)
+                            msg += " (saved " + savedStr + ")";
+                        sampleCard.showTrimToast(msg, /*isError=*/false);
+                        sampleCard.setTrimInProgress(false);
+                    });
+                });
+            }),
+        /*deleteWhenDismissed=*/true);
 }
 
 bool MainComponent::keyPressed(const juce::KeyPress& key)

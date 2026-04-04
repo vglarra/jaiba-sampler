@@ -1006,6 +1006,24 @@ public:
         };
         addAndMakeVisible(reverseButton);
 
+        // Trim button — orange-red to indicate a new-file-creating (irreversible) action
+        trimButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFFE84A1A));
+        trimButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
+        trimButton.setTooltip("Write a new WAV file containing only the audio between the Start and End markers");
+        trimButton.onClick = [this] {
+            if (onTrimRequested)
+                onTrimRequested();
+        };
+        addAndMakeVisible(trimButton);
+
+        // Toast label — overlays footer with brief confirmation/error messages (auto-hides after 2s)
+        toastLabel.setJustificationType(juce::Justification::centred);
+        toastLabel.setFont(juce::Font(11.0f));
+        toastLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFFFFFFF));
+        toastLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        toastLabel.setVisible(false);
+        addAndMakeVisible(toastLabel);
+
         // Grid snap toggle — snaps markers to nearest grid division
         gridSnapButton.setClickingTogglesState(true);
         gridSnapButton.setToggleState(false, juce::dontSendNotification);
@@ -1104,6 +1122,7 @@ public:
         sensKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFFFFFFFF));
         sensKnob.onValueChange = [this] {
             transientThreshold = sensKnob.getValue();
+            sensValueLabel.setText(juce::String(transientThreshold, 1) + "x", juce::dontSendNotification);
             if (currentAudioFile.existsAsFile())
                 detectTransients(currentAudioFile);
         };
@@ -1114,6 +1133,12 @@ public:
         sensLabel.setFont(juce::Font(11.0f));
         sensLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
         addAndMakeVisible(sensLabel);
+
+        sensValueLabel.setText("4.0x", juce::dontSendNotification);
+        sensValueLabel.setJustificationType(juce::Justification::centredLeft);
+        sensValueLabel.setFont(juce::Font(10.0f));
+        sensValueLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
+        addAndMakeVisible(sensValueLabel);
 
         transientCountLabel.setText("T: 0", juce::dontSendNotification);
         transientCountLabel.setJustificationType(juce::Justification::centred);
@@ -1551,25 +1576,45 @@ public:
         }
         area.removeFromTop(4); // gap below tab bar
 
-        // ===== TAB CONTENT =====
+        // ===== Tab content area — height capped so footer is always at a fixed bottom Y =====
+        // Footer is anchored at: getHeight() - 10 (bottom margin) - 24 (footer height).
+        // Tab content fills exactly the space between the tab bar and the footer.
+        constexpr int kFooterH = 24;
+        const int footerY       = getHeight() - 10 - kFooterH;
+        auto tabContentArea     = area.withHeight(juce::jmax(0, footerY - area.getY()));
+
+        // Print layout diagnostics once per launch
+        static bool diagPrinted = false;
+        if (!diagPrinted)
+        {
+            diagPrinted = true;
+            const int wvH = static_cast<int>(4 * 37.8) + SCROLLBAR_HEIGHT;
+            printf("[LAYOUT] SamplerPad total height:  %dpx\n", getHeight());
+            printf("[LAYOUT] Waveform area:            %dpx  (y=%d)\n", wvH, 10 + 24 + 5);
+            printf("[LAYOUT] Tab bar area:             24px  (y=%d)\n", 10 + 24 + 5 + wvH + 5);
+            printf("[LAYOUT] Tab content area:         %dpx  (y=%d)\n", tabContentArea.getHeight(), tabContentArea.getY());
+            printf("[LAYOUT] Footer area:              %dpx  (y=%d)\n", kFooterH, footerY);
+            printf("[LAYOUT] EQ display height:        %dpx\n", tabContentArea.getHeight());
+        }
+
+        // ===== TAB CONTENT (routed by active tab; all use tabContentArea) =====
         if (activeTab == 1)
-            layoutAdsrTabContent(area);
+            layoutAdsrTabContent(tabContentArea);
         else if (activeTab == 2)
-            layoutEqTabContent(area);
+            layoutEqTabContent(tabContentArea);
 
         if (activeTab == 0)
         {
         // Standard button height = tab button height (tab bar 24px, reduced(1,2) = 20px).
-        // All Controls-tab buttons and knob containers use this same height.
         static bool layoutPrinted = false;
         if (!layoutPrinted) {
             DBG("[LAYOUT] Tab button height: 20px — applying to all Controls tab buttons");
             layoutPrinted = true;
         }
-        constexpr int kBtnH = 20; // matches tab button height after reduced(1,2)
+        constexpr int kBtnH = 20;
 
-        // ===== ROW 1: Playback controls (24px — matches tab bar height) =====
-        auto row1 = area.removeFromTop(24);
+        // ===== ROW 1: Playback controls (24px) =====
+        auto row1 = tabContentArea.removeFromTop(24);
 
         {
             // Pitch controls: Down | Pitch display | Up  (180px, kBtnH tall, vertically centred)
@@ -1625,13 +1670,10 @@ public:
         }
 
         // 4px gap between rows (matches tab-bar gap)
-        area.removeFromTop(4);
+        tabContentArea.removeFromTop(4);
 
-        // ===== ROW 2: Marker controls (24px — matches tab bar height) =====
-        // Knob labels shown to the LEFT of each knob (right-aligned text flush to knob edge).
-        // Vol knob moved to top row — not present here.
-        // transientCountLabel hidden (no room at 24px).
-        auto row2 = area.removeFromTop(24);
+        // ===== ROW 2: Marker controls (24px) =====
+        auto row2 = tabContentArea.removeFromTop(24);
         transientCountLabel.setBounds({});  // hidden — no room at uniform row height
 
         {
@@ -1672,36 +1714,43 @@ public:
             nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
         }
         {
-            // Sens knob — 60px column: left 30px = "Sens" label, right 30px = knob
-            auto col = row2.removeFromLeft(60);
+            // Sens knob — 90px column: left 30px = "Sens" label, 20px = knob, right 35px = value
+            auto col = row2.removeFromLeft(90);
             sensLabel.setBounds(col.removeFromLeft(30).withSizeKeepingCentre(28, kBtnH));
-            sensKnob.setBounds(col.withSizeKeepingCentre(kBtnH, kBtnH));
+            sensKnob.setBounds(col.removeFromLeft(20).withSizeKeepingCentre(kBtnH, kBtnH));
+            sensValueLabel.setBounds(col.withSizeKeepingCentre(33, kBtnH));
         }
         // Vol knob is now in the top row — skip its row2 layout
 
-        // Add margin before bottom info row
-        area.removeFromTop(5);
+        // 4px gap then Row 3: Trim button (24px)
+        tabContentArea.removeFromTop(4);
+        {
+            auto row3 = tabContentArea.removeFromTop(24);
+            trimButton.setBounds(row3.removeFromLeft(62).withSizeKeepingCentre(58, kBtnH));
+        }
 
         } // end if (activeTab == 0)
 
         updateTabVisibility();
 
-        // ===== Bottom info row: filename | duration | pitch indicator =====
-        auto bottomRow = area.removeFromTop(22);
+        // ===== Footer — fixed at absolute bottom regardless of active tab =====
+        footerBounds = { 10, footerY, getWidth() - 20, kFooterH };
+        auto bottomRow = footerBounds;
 
-        int filenameWidth = static_cast<int>(bottomRow.getWidth() * 0.65);
-        sampleNameLabel.setBounds(bottomRow.removeFromLeft(filenameWidth).reduced(3, 0));
+        const int rowW = bottomRow.getWidth();
+        const int pitchIndicatorWidth = static_cast<int>(rowW * 0.22);
+        const int durationWidth       = static_cast<int>(rowW * 0.12);
+        const int filenameWidth       = rowW - pitchIndicatorWidth - durationWidth - 8;
 
-        int pitchIndicatorWidth = static_cast<int>(bottomRow.getWidth() * 0.50);
-        bottomInfoLabel.setBounds(bottomRow.removeFromRight(pitchIndicatorWidth).reduced(3, 0));
-        
-        // ===== CRITICAL FIX #6: Duration on far right (remaining space) =====
-        durationLabel.setBounds(bottomRow.reduced(3, 0));
-        
-        // Make duration label use smaller font to fit better
+        sampleNameLabel.setBounds (bottomRow.removeFromLeft(filenameWidth).reduced(3, 0));
+        bottomInfoLabel.setBounds (bottomRow.removeFromRight(pitchIndicatorWidth).reduced(3, 0));
+        durationLabel.setBounds   (bottomRow.removeFromRight(durationWidth).reduced(3, 0));
+        // remaining 8px is a spacer between filename and duration
+
+        // Toast overlay — covers entire footer; invisible by default, shown on trim result
+        toastLabel.setBounds(footerBounds);
+
         durationLabel.setFont(juce::Font(11.0f));
-        
-        // Make pitch indicator use yellow color and bold font
         bottomInfoLabel.setFont(juce::Font(11.0f, juce::Font::bold));
         bottomInfoLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFD4A017));
     }
@@ -1715,6 +1764,24 @@ public:
         // Draw card border
         g.setColour(juce::Colour(0xFF5A5A5A));
         g.drawRoundedRectangle(getLocalBounds().toFloat(), 8.0f, 1.5f);
+
+        // Draw footer background — slightly darker than card to visually frame the info row.
+        // Clip to the card's rounded rect so bottom corners stay rounded.
+        if (!footerBounds.isEmpty())
+        {
+            g.saveState();
+            juce::Path cardClip;
+            cardClip.addRoundedRectangle(getLocalBounds().toFloat(), 8.0f);
+            g.reduceClipRegion(cardClip);
+            g.setColour(juce::Colour(0xFF2A2A2A));
+            g.fillRect(footerBounds);
+            g.restoreState();
+            // Subtle top separator line
+            g.setColour(juce::Colour(0xFF444444));
+            g.drawHorizontalLine(footerBounds.getY(),
+                                 (float)footerBounds.getX(),
+                                 (float)footerBounds.getRight());
+        }
 
         // Draw dark outline around every VISIBLE TextButton child.
         // Must skip invisible components — hidden tab controls still exist as children
@@ -1799,6 +1866,7 @@ public:
     {
         transientThreshold = juce::jlimit(1.5, 10.0, threshold);
         sensKnob.setValue(transientThreshold, juce::dontSendNotification);
+        sensValueLabel.setText(juce::String(transientThreshold, 1) + "x", juce::dontSendNotification);
         if (currentAudioFile.existsAsFile())
             detectTransients(currentAudioFile);
     }
@@ -3962,7 +4030,14 @@ void adjustPitchUp()
     // Sensitivity knob + labels
     juce::Slider sensKnob;
     juce::Label  sensLabel;
+    juce::Label  sensValueLabel;     // numeric threshold display to the right of Sens knob (e.g. "4.0x")
     juce::Label  transientCountLabel;
+
+    juce::Rectangle<int> footerBounds;  // set in resized(), drawn in paint() as darker background
+
+    // Trim feature
+    juce::TextButton trimButton { "Trim" };
+    juce::Label      toastLabel;   // brief status overlay on the footer (2-second auto-hide)
 
     // Freeze state — never persisted, always starts false
     bool isFreezeActive          = false;
@@ -4146,6 +4221,10 @@ void adjustPitchUp()
         // Count label: white when enabled; gray when disabled
         transientCountLabel.setColour(juce::Label::textColourId,
                                       on ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF555555));
+
+        // Sens value label: white when enabled; gray when disabled
+        sensValueLabel.setColour(juce::Label::textColourId,
+                                 on ? juce::Colour(0xFFFFFFFF) : juce::Colour(0xFF555555));
 
         repaint();
     }
@@ -4331,6 +4410,31 @@ public:
     // over the full sample, or -1 if no voice is active.  Read 60 times per second.
     std::function<double()> getPlayheadPosition;
 
+    // Fired when the user confirms Trim — MainComponent performs the actual file write.
+    std::function<void()> onTrimRequested;
+
+    // Called by MainComponent to show/hide the "Trimming..." state.
+    void setTrimInProgress(bool inProgress)
+    {
+        trimButton.setButtonText(inProgress ? "Trimming..." : "Trim");
+        trimButton.setEnabled(!inProgress);
+    }
+
+    // Show a brief status message overlaid on the footer for 2 seconds, then auto-hide.
+    // isError=true uses a dark-red background; false uses a dark-green background.
+    void showTrimToast(const juce::String& msg, bool isError = false)
+    {
+        toastLabel.setText(msg, juce::dontSendNotification);
+        toastLabel.setColour(juce::Label::backgroundColourId,
+                             isError ? juce::Colour(0xFF8B0000) : juce::Colour(0xFF006000));
+        toastLabel.setVisible(true);
+        juce::Component::SafePointer<SampleCard> safe(this);
+        juce::Timer::callAfterDelay(2000, [safe]() mutable {
+            if (auto* self = safe.getComponent())
+                self->toastLabel.setVisible(false);
+        });
+    }
+
 private:
 
     // Normalized scroll position [0, 1] — 0 = fully left, 1 = fully right.
@@ -4358,7 +4462,8 @@ private:
             &startKnob, &startKnobLabel,
             &endKnob,   &endKnobLabel,
             &prevEndTransientButton, &nextEndTransientButton,
-            &sensKnob, &sensLabel, &transientCountLabel})
+            &sensKnob, &sensLabel, &sensValueLabel, &transientCountLabel,
+            &trimButton})
             c->setVisible(showCtrl);
 
         // ADSR tab content (knobs only — Env toggle lives in the tab bar)
