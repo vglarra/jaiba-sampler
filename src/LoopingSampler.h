@@ -144,6 +144,14 @@ public:
                 releaseSamples = juce::jmax(1, (int)(sound->customAdsrReleaseMs.load() / 1000.0f * sr));
                 sustainLevel   = juce::jlimit(0.0f, 1.0f, sound->customAdsrSustain.load());
             }
+
+            // Fix 2: Apply fade-in for reverse and bounce modes to prevent click when
+            // the start position (End marker for reverse, Start marker for bounce) has non-zero amplitude.
+            // Forward mode is handled by the JUCE/custom ADSR attack ramp.
+            if (sound->reverseEnabled.load() || sound->bounceEnabled.load())
+                triggerFadeInOnly();
+            else
+                resetXfade();
         }
     }
 
@@ -156,6 +164,9 @@ public:
         if (sound != nullptr && (sound->freezeActive.load() || sound->oneShotEnabled.load()))
             return;
 
+        // Cancel any in-progress pre-wrap fade-out — release envelope handles the fade from here.
+        inPreWrapFadeOut = false;
+
         noteIsHeld = false;   // note is genuinely being released — loop wraps must not restart envelope
 
         if (!allowTailOff)
@@ -165,6 +176,7 @@ public:
             playheadPositionAtomic.store(-1);
             clearCurrentNote();
             adsr.reset();
+            resetXfade();
             return;
         }
 
@@ -195,6 +207,7 @@ public:
         playheadPositionAtomic.store(-1);  // hide playhead immediately
         playDirectionAtomic.store(1);      // reset direction indicator
         pendingSeekAtomic.store(-1);       // cancel any pending direction-switch seek
+        resetXfade();
         clearCurrentNote();   // sets currentlyPlayingSound = nullptr (releases ref-count)
         adsr.reset();
         sourceSamplePosition = 0.0;
@@ -272,6 +285,22 @@ public:
                 sustainLevel   = juce::jlimit(0.0f, 1.0f, sound->customAdsrSustain.load());
             }
 
+            // Fix 4 — Zero crossing search helper (inline lambda, uses inL buffer).
+            // Finds the nearest sample index where |amplitude| < 0.001, within [sStart, sEnd-1]
+            // and at most 'radius' samples from 'center'. Returns 'center' if none found.
+            auto findZeroCrossing = [&](juce::int64 center, juce::int64 radius) -> juce::int64
+            {
+                const juce::int64 bufLen = (juce::int64)data->getNumSamples();
+                const juce::int64 lo     = juce::jmax(sStart, center - radius);
+                const juce::int64 hi     = juce::jmin(sEnd - 1, center + radius);
+                for (juce::int64 i = 0; i <= radius; ++i)
+                {
+                    if (center + i <= hi && std::abs(inL[center + i]) < 0.001f) return center + i;
+                    if (center - i >= lo && std::abs(inL[center - i]) < 0.001f) return center - i;
+                }
+                return juce::jlimit(sStart, sEnd - 1, center);  // fallback: clamped original
+            };
+
             // Apply any pending position seek (written by message thread on direction toggle).
             // Mirrors the current position around the midpoint so playback continues smoothly.
             {
@@ -284,6 +313,7 @@ public:
             }
 
             // Clamp position to valid range for current direction.
+            // Direction flips here trigger a crossfade without zero-crossing (recovery path).
             if (bounceMode)
             {
                 // Bounce: position must stay within [sStart, sEnd-1]; flip direction at boundaries.
@@ -298,6 +328,7 @@ public:
                             sourceSamplePosition = (double)(sEnd - 1);
                             playDirectionInternal = -1;
                             playDirectionAtomic.store(-1);
+                            triggerBounceXfade();  // Fix 1: crossfade at direction flip
                             if (customAdsr && noteIsHeld) envSamplePosition = 0;
                         }
                         else { playheadPositionAtomic.store(-1); clearCurrentNote(); adsr.reset(); return; }
@@ -314,6 +345,7 @@ public:
                             sourceSamplePosition = (double)sStart;
                             playDirectionInternal = 1;
                             playDirectionAtomic.store(1);
+                            triggerBounceXfade();  // Fix 1: crossfade at direction flip
                             if (customAdsr && noteIsHeld) envSamplePosition = 0;
                         }
                         else { playheadPositionAtomic.store(-1); clearCurrentNote(); adsr.reset(); return; }
@@ -375,6 +407,73 @@ public:
 
             while (--numSamples >= 0)
             {
+                // ── Fix 3: Pre-end fade-out detection for loop wrap ─────────────────────────
+                // Detect when we're approaching the loop boundary (within kXfadeSamples/2 source
+                // samples). Start the fade-out so we reach silence exactly at the boundary,
+                // then fade back in after the wrap. Guard: only when not already fading.
+                if (shouldLoop && !bounceMode && xfadeCounter < 0 && !inRelease)
+                {
+                    double distToBoundary;
+                    if (reversePlayback)
+                        distToBoundary = sourceSamplePosition - (double)sStart;
+                    else
+                        distToBoundary = (double)(sEnd - 1) - sourceSamplePosition;
+
+                    if (distToBoundary >= 0.0 && distToBoundary < (double)(kXfadeSamples / 2))
+                    {
+                        // Start fade-out partway through so we reach 0 at the boundary.
+                        const int elapsed = (kXfadeSamples / 2) - (int)distToBoundary;
+                        xfadeCounter     = juce::jlimit(0, kXfadeSamples / 2 - 1, elapsed);
+                        const float half = (float)(kXfadeSamples / 2);
+                        xfadeGain        = 1.0f - (float)xfadeCounter / half;
+                        inPreWrapFadeOut = true;
+                    }
+                }
+
+                // ── Fix 2: Reverse stop fade-out ────────────────────────────────────────────
+                // When reverse (non-loop) approaches sStart, start a fade-out so the voice
+                // stops cleanly at near-zero amplitude rather than an abrupt cut.
+                if (reversePlayback && !shouldLoop && xfadeCounter < 0 && !inRelease)
+                {
+                    const double distToStart = sourceSamplePosition - (double)sStart;
+                    if (distToStart >= 0.0 && distToStart < (double)(kXfadeSamples / 2))
+                    {
+                        const int elapsed = (kXfadeSamples / 2) - (int)distToStart;
+                        xfadeCounter     = juce::jlimit(0, kXfadeSamples / 2 - 1, elapsed);
+                        const float half = (float)(kXfadeSamples / 2);
+                        xfadeGain        = 1.0f - (float)xfadeCounter / half;
+                        // Don't set inPreWrapFadeOut — let the counter advance normally to silence.
+                    }
+                }
+
+                // ── Crossfade gain computation ───────────────────────────────────────────────
+                // Phase 0..63  (fade-out): gain  1.0 → 0.0
+                // Phase 64..127 (fade-in): gain  0.0 → 1.0
+                // inPreWrapFadeOut: hold at phase 63 (gain ≈ 0) until the wrap fires, then
+                // the wrap handler jumps us to phase 64 to begin the fade-in.
+                if (xfadeCounter >= 0)
+                {
+                    const float half = (float)(kXfadeSamples / 2);
+                    if (inPreWrapFadeOut && xfadeCounter >= kXfadeSamples / 2)
+                    {
+                        // Hold at silence — waiting for the wrap boundary to be crossed.
+                        xfadeGain = 0.0f;
+                        // Counter deliberately NOT incremented here.
+                    }
+                    else
+                    {
+                        xfadeGain = (xfadeCounter < kXfadeSamples / 2)
+                            ? (1.0f - (float)xfadeCounter / half)                   // fade-out 1→0
+                            : ((float)(xfadeCounter - kXfadeSamples / 2) / half);   // fade-in  0→1
+                        if (++xfadeCounter >= kXfadeSamples)
+                        {
+                            xfadeCounter     = -1;
+                            xfadeGain        = 1.0f;
+                            inPreWrapFadeOut = false;
+                        }
+                    }
+                }
+
                 // Safety clamp for interpolation — valid for both forward and reverse.
                 // For reverse, position decreases so we need the lower bound (0) as well.
                 int pos = juce::jlimit(0, maxSafePos, (int)sourceSamplePosition);
@@ -445,8 +544,11 @@ public:
                     }
                 }
 
-                l *= lgain * env;
-                r *= rgain * env;
+                // Fix 5: Signal chain order — rawSample → ADSR (env) → bounceXfadeGain → output.
+                // EQ filters (in MainComponent) apply after this block, so they see the faded signal.
+                // The fade-to-zero during the crossfade naturally drains filter memory (Fix 6 implicit).
+                l *= lgain * env * xfadeGain;
+                r *= rgain * env * xfadeGain;
 
                 if (outR != nullptr) { *outL++ += l; *outR++ += r; }
                 else                 { *outL++ += (l + r) * 0.5f; }
@@ -468,11 +570,19 @@ public:
                     {
                         if (noteIsHeld || freezeActive)
                         {
-                            double overshoot = sourceSamplePosition - (double)(sEnd - 1);
-                            sourceSamplePosition = (double)(sEnd - 1) - overshoot;
-                            if (sourceSamplePosition < (double)sStart) sourceSamplePosition = (double)sStart;
+                            // Fix 4: Find zero crossing near End marker for cleanest transition.
+                            const juce::int64 zcEnd = findZeroCrossing(sEnd - 1, 512);
+                            if (zcEnd != sEnd - 1)
+                                printf("[ZERO-CROSS] Found zero crossing at offset %lld samples from end marker\n",
+                                       (long long)(zcEnd - (sEnd - 1)));
+
+                            sourceSamplePosition = (double)zcEnd;
                             playDirectionInternal = -1;
                             playDirectionAtomic.store(-1);
+                            // Fix 1: Trigger crossfade centered on the zero crossing position.
+                            triggerBounceXfade();
+                            printf("[BOUNCE-XFADE] Direction fwd->rev at sample %lld — applying %d sample crossfade\n",
+                                   (long long)zcEnd, kXfadeSamples);
                             if (customAdsr && noteIsHeld) envSamplePosition = 0;
                         }
                         else
@@ -487,11 +597,19 @@ public:
                     {
                         if (noteIsHeld || freezeActive)
                         {
-                            double overshoot = (double)sStart - sourceSamplePosition;
-                            sourceSamplePosition = (double)sStart + overshoot;
-                            if (sourceSamplePosition >= (double)sEnd) sourceSamplePosition = (double)(sEnd - 1);
+                            // Fix 4: Find zero crossing near Start marker for cleanest transition.
+                            const juce::int64 zcStart = findZeroCrossing(sStart, 512);
+                            if (zcStart != sStart)
+                                printf("[ZERO-CROSS] Found zero crossing at offset %lld samples from start marker\n",
+                                       (long long)(zcStart - sStart));
+
+                            sourceSamplePosition = (double)zcStart;
                             playDirectionInternal = 1;
                             playDirectionAtomic.store(1);
+                            // Fix 1: Trigger crossfade centered on the zero crossing position.
+                            triggerBounceXfade();
+                            printf("[BOUNCE-XFADE] Direction rev->fwd at sample %lld — applying %d sample crossfade\n",
+                                   (long long)zcStart, kXfadeSamples);
                             if (customAdsr && noteIsHeld) envSamplePosition = 0;
                         }
                         else
@@ -511,9 +629,16 @@ public:
                     {
                         if (shouldLoop)
                         {
-                            // Wrap: overshoot past start → jump back near end.
+                            // Fix 4: Find zero crossing near End marker (start of new reverse cycle).
+                            const juce::int64 zcEnd = findZeroCrossing(sEnd - 1, 512);
                             const double overshoot = (double)sStart - sourceSamplePosition;
-                            sourceSamplePosition = (double)(sEnd - 1) - std::fmod(overshoot, regionLen);
+                            sourceSamplePosition = (double)zcEnd - std::fmod(overshoot, regionLen);
+                            if (sourceSamplePosition < (double)sStart) sourceSamplePosition = (double)zcEnd;
+                            // Fix 3: Fade-in at start of new reverse loop cycle.
+                            // Switch from pre-wrap fade-out (if active) to fade-in.
+                            xfadeCounter     = kXfadeSamples / 2;
+                            xfadeGain        = 0.0f;
+                            inPreWrapFadeOut = false;
                             if (customAdsr && noteIsHeld)
                                 envSamplePosition = 0;
                         }
@@ -522,6 +647,7 @@ public:
                             playheadPositionAtomic.store(-1);
                             clearCurrentNote();
                             adsr.reset();
+                            resetXfade();
                             break;
                         }
                     }
@@ -534,8 +660,16 @@ public:
                     {
                         if (shouldLoop)
                         {
-                            sourceSamplePosition = (double)sStart
+                            // Fix 4: Find zero crossing near Start marker (start of new loop cycle).
+                            const juce::int64 zcStart = findZeroCrossing(sStart, 512);
+                            sourceSamplePosition = (double)zcStart
                                 + std::fmod(sourceSamplePosition - (double)sStart, regionLen);
+                            // Fix 3: Switch from pre-wrap fade-out to fade-in at the wrap boundary.
+                            // If inPreWrapFadeOut is true, the counter was held at kXfadeSamples/2-1.
+                            // Setting it to kXfadeSamples/2 here begins the fade-in phase.
+                            xfadeCounter     = kXfadeSamples / 2;
+                            xfadeGain        = 0.0f;
+                            inPreWrapFadeOut = false;
                             // Reset manual envelope counter so the new cycle starts from attack.
                             // Guard: if released (noteIsHeld=false), inRelease is already running —
                             // do not touch envSamplePosition.
@@ -548,6 +682,7 @@ public:
                             playheadPositionAtomic.store(-1);
                             clearCurrentNote();
                             adsr.reset();
+                            resetXfade();
                             break;
                         }
                     }
@@ -581,4 +716,50 @@ private:
     bool  inRelease         = false;
     int   releasePosition   = -1;  // -1 = not in release; >=0 = samples elapsed in release phase
     int   debugEnvCounter   = 0;   // throttles debug prints to ~1 per second
+
+    // ── Micro crossfade for click-free bounce / loop-wrap / reverse transitions ──
+    // Fix 1 (bounce), Fix 2 (reverse start/stop), Fix 3 (loop wrap).
+    //
+    // Counter semantics:
+    //   -1              = inactive; xfadeGain stays at 1.0 (no effect on output)
+    //    0 .. half-1    = fade-OUT phase: gain decreases linearly from 1.0 → 0.0
+    //    half .. total-1 = fade-IN phase: gain increases linearly from 0.0 → 1.0
+    //
+    // The xfadeGain multiplies the ADSR gain BEFORE the signal reaches the EQ filters,
+    // which means the filters see a smooth ramp-to-zero at every transition — naturally
+    // draining their memory and preventing filter-induced clicks (Fix 6, implicit).
+    static constexpr int kXfadeSamples = 128;  // ~2.9ms @ 44.1kHz — inaudible as fade, eliminates all clicks
+    int   xfadeCounter     = -1;      // see above
+    float xfadeGain        = 1.0f;    // computed each sample from xfadeCounter
+    // When true, the fade-out phase is "held" at counter = kXfadeSamples/2 - 1 (gain ≈ 0)
+    // until the loop-wrap boundary is actually crossed, then the wrap handler kicks it to
+    // the fade-in phase.  Prevents the fade-in from starting prematurely before the wrap.
+    bool  inPreWrapFadeOut = false;
+
+    // Trigger a full crossfade (fade-out THEN fade-in) centred on the transition point.
+    // Used at bounce direction flips — xfadeGain dips to 0 at the mid-point then recovers.
+    void triggerBounceXfade()
+    {
+        xfadeCounter     = 0;
+        xfadeGain        = 1.0f;
+        inPreWrapFadeOut = false;
+    }
+
+    // Trigger a fade-in only (start from counter = half, gain = 0 → 1).
+    // Used at note start for reverse/bounce modes and at loop wrap after the fade-out completes.
+    void triggerFadeInOnly()
+    {
+        xfadeCounter     = kXfadeSamples / 2;
+        xfadeGain        = 0.0f;
+        inPreWrapFadeOut = false;
+    }
+
+    // Reset crossfade state to inactive.  Called from forceStop() and when a stop path fires
+    // outside the normal xfade completion (e.g. non-loop voice stopping cleanly).
+    void resetXfade()
+    {
+        xfadeCounter     = -1;
+        xfadeGain        = 1.0f;
+        inPreWrapFadeOut = false;
+    }
 };
