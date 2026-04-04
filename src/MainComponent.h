@@ -604,6 +604,18 @@ private:
     };
     FilterModeSaveTimer filterModeSaveTimer { *this };
 
+    // Deferred loop-state save — fires 400ms after the last Loop toggle.
+    // The atomic store in loopEnabledChanged() is instant; only the disk flush is deferred.
+    class LoopSaveTimer : public juce::Timer
+    {
+    public:
+        LoopSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    LoopSaveTimer loopSaveTimer { *this };
+
     // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
     juce::int64 navStartTimeMs = 0;
 

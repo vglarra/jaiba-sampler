@@ -89,6 +89,7 @@ public:
             const int offset = sound->pitchOffsetAtomic.load();
             const float tuningRatio = sound->baseTuningRatioAtomic.load();
             pitchRatio = basePitchRatio * (double)tuningRatio * std::pow(2.0, offset / 1200.0);
+            smoothedPitchRatio = pitchRatio;   // align immediately at note start — no ramp at attack
 
             // Start playback at the correct boundary for current direction.
             // Reverse: start at End−1 and count down toward Start.
@@ -190,6 +191,7 @@ public:
         clearCurrentNote();   // sets currentlyPlayingSound = nullptr (releases ref-count)
         adsr.reset();
         sourceSamplePosition = 0.0;
+        smoothedPitchRatio   = 0.0;
     }
 
     // Written by audio thread once per block; read by UI timer (60 fps) for playhead display.
@@ -219,6 +221,10 @@ public:
             const int offset = sound->pitchOffsetAtomic.load();
             const float tuningRatio = sound->baseTuningRatioAtomic.load();
             pitchRatio = basePitchRatio * (double)tuningRatio * std::pow(2.0, offset / 1200.0);
+            // 10ms exponential pitch-ramp coefficient — precomputed once per block (not per sample).
+            // At 44100 Hz: coeff ≈ 0.00226; smoothedPitchRatio reaches 63% of target in ~10ms.
+            // Eliminates audible click when pitch changes during active playback.
+            const double pitchSmoothCoeff = 1.0 - std::exp(-1.0 / (getSampleRate() * 0.010));
             if (sStart >= sEnd) return;
 
             const double regionLen = (double)(sEnd - sStart);
@@ -397,11 +403,14 @@ public:
                 if (outR != nullptr) { *outL++ += l; *outR++ += r; }
                 else                 { *outL++ += (l + r) * 0.5f; }
 
+                // Smooth pitch toward target — eliminates audible click on mid-playback pitch change.
+                smoothedPitchRatio += (pitchRatio - smoothedPitchRatio) * pitchSmoothCoeff;
+
                 // Advance position in the correct direction.
                 if (reversePlayback)
-                    sourceSamplePosition -= pitchRatio;
+                    sourceSamplePosition -= smoothedPitchRatio;
                 else
-                    sourceSamplePosition += pitchRatio;
+                    sourceSamplePosition += smoothedPitchRatio;
 
                 // Boundary check — loop wrap or natural stop.
                 if (reversePlayback)
@@ -455,7 +464,8 @@ public:
 
 private:
     double basePitchRatio = 0.0;       // MIDI transpose only — set in startNote, never changes
-    double pitchRatio = 0.0;           // basePitchRatio * pow(2, offset/12) — updated per block
+    double pitchRatio = 0.0;           // basePitchRatio * pow(2, offset/12) — updated per block (target)
+    double smoothedPitchRatio = 0.0;   // exponential IIR toward pitchRatio — 10ms ramp, no click on pitch change
     double sourceSamplePosition = 0.0;
     float  lgain = 0.0f, rgain = 0.0f;
     juce::ADSR adsr;

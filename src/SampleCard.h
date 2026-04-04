@@ -695,8 +695,9 @@ public:
         pitchDownButton.setButtonText("Down");
         pitchDownButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         pitchDownButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-        pitchDownButton.onClick = [this] { adjustPitchDown(); };
-        pitchDownButton.setTooltip("Lower pitch (longer duration)");
+        // onClick fires on mouseUp — only handle if mouseDown didn't already fire the step.
+        pitchDownButton.onClick = [this] { if (!pitchRepeatTimer.suppressNextClick()) adjustPitchDown(); };
+        pitchDownButton.setTooltip("Lower pitch (longer duration) — hold for continuous change");
         addAndMakeVisible(pitchDownButton);
         
         pitchLabel.setJustificationType(juce::Justification::centred);
@@ -728,9 +729,15 @@ public:
         pitchUpButton.setButtonText("Up");
         pitchUpButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
         pitchUpButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-        pitchUpButton.onClick = [this] { adjustPitchUp(); };
-        pitchUpButton.setTooltip("Higher pitch (shorter duration)");
+        // onClick fires on mouseUp — only handle if mouseDown didn't already fire the step.
+        pitchUpButton.onClick = [this] { if (!pitchRepeatTimer.suppressNextClick()) adjustPitchUp(); };
+        pitchUpButton.setTooltip("Higher pitch (shorter duration) — hold for continuous change");
         addAndMakeVisible(pitchUpButton);
+
+        // Wire hold-to-repeat: mouseDown fires first step instantly; timer handles subsequent steps.
+        pitchRepeatTimer.onUp   = [this] { adjustPitchUp(); };
+        pitchRepeatTimer.onDown = [this] { adjustPitchDown(); };
+        pitchRepeatTimer.attachToButtons(pitchUpButton, pitchDownButton);
 
         // Pitch step cycling button — cycles through step sizes: 100¢ / 50¢ / 25¢ / 33¢
         pitchStepButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFFD4A017));
@@ -926,6 +933,8 @@ public:
         freezeButton.setButtonText("Freeze");
         freezeButton.setClickingTogglesState(false);
         applyFreezeButtonStyle(false);
+        // FIX 4: instant visual on mouseDown — button lights up/dims before any audio work.
+        freezeButton.addMouseListener(this, false);
         freezeButton.onClick = [this]
         {
             const juce::int64 now = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
@@ -3462,39 +3471,47 @@ public:
     
 void adjustPitchDown()
 {
+    const juce::int64 t0 = juce::Time::getMillisecondCounter();
+    printf("[PITCH-TIMING] Down button clicked — current=%+d cents  step=%d cents\n",
+           pitchOffset, currentPitchStepCents);
+    fflush(stdout);
+
     int newOffset = pitchOffset - currentPitchStepCents;
 
     if (newOffset >= -4800 && newOffset <= 4800)
     {
         pitchOffset = newOffset;
-        updatePitchDisplay(pitchOffset);
+        updatePitchDisplay(pitchOffset);  // FIX 5: visual update happens before listener call
         listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
 
-        if (pitchOffset < 0)
-            printf("Pitch DOWN: %+d cents\n", pitchOffset);
-        else if (pitchOffset > 0)
-            printf("Pitch DOWN (toward zero): %+d cents\n", pitchOffset);
-        else
-            printf("Pitch reset to 0\n");
+        const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
+        printf("[PITCH-TIMING] Pitch updated atomically: %lldms  new=%+d cents\n",
+               (long long)elapsed, pitchOffset);
+        printf("[PITCH-TIMING] Save deferred: 500ms timer started\n");
+        fflush(stdout);
     }
 }
 
 void adjustPitchUp()
 {
+    const juce::int64 t0 = juce::Time::getMillisecondCounter();
+    printf("[PITCH-TIMING] Up button clicked — current=%+d cents  step=%d cents\n",
+           pitchOffset, currentPitchStepCents);
+    fflush(stdout);
+
     int newOffset = pitchOffset + currentPitchStepCents;
 
     if (newOffset >= -4800 && newOffset <= 4800)
     {
         pitchOffset = newOffset;
-        updatePitchDisplay(pitchOffset);
+        updatePitchDisplay(pitchOffset);  // FIX 5: visual update happens before listener call
         listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
 
-        if (pitchOffset > 0)
-            printf("Pitch UP: %+d cents\n", pitchOffset);
-        else if (pitchOffset < 0)
-            printf("Pitch UP (toward zero): %+d cents\n", pitchOffset);
-        else
-            printf("Pitch reset to 0\n");
+        const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
+        printf("[PITCH-TIMING] Pitch updated atomically: %lldms  new=%+d cents\n",
+               (long long)elapsed, pitchOffset);
+        printf("[PITCH-TIMING] Save deferred: 500ms timer started\n");
+        fflush(stdout);
     }
 }
     
@@ -4092,6 +4109,115 @@ void adjustPitchUp()
     };
     PlayheadTimer playheadTimer { *this };
 
+    //==============================================================================
+    // Hold-to-repeat timer for the Up/Down pitch buttons.
+    // mouseDown fires one step immediately; after 400ms hold, repeats every 100ms;
+    // after 1000ms hold, accelerates to every 50ms. mouseUp stops cleanly.
+    class PitchRepeatTimer : public juce::Timer, public juce::MouseListener
+    {
+    public:
+        PitchRepeatTimer() = default;
+
+        std::function<void()> onUp;
+        std::function<void()> onDown;
+
+        void attachToButtons(juce::Button& upBtn, juce::Button& downBtn)
+        {
+            upButton   = &upBtn;
+            downButton = &downBtn;
+            upBtn.addMouseListener(this, false);
+            downBtn.addMouseListener(this, false);
+        }
+
+        // Returns true (and consumes the flag) when mouseDown already handled the press.
+        // Called from onClick to prevent double-fire on mouse release.
+        bool suppressNextClick()
+        {
+            if (suppressClick) { suppressClick = false; return true; }
+            return false;
+        }
+
+        void mouseDown(const juce::MouseEvent& e) override
+        {
+            if      (e.eventComponent == upButton)   startHold(1);
+            else if (e.eventComponent == downButton) startHold(-1);
+        }
+
+        void mouseUp(const juce::MouseEvent& e) override
+        {
+            if (e.eventComponent == upButton || e.eventComponent == downButton)
+                stopHold();
+        }
+
+    private:
+        juce::Button*  upButton    = nullptr;
+        juce::Button*  downButton  = nullptr;
+        int            direction   = 0;          // +1=up, -1=down, 0=idle
+        juce::int64    holdStartMs = 0;
+        juce::int64    lastFireMs  = 0;
+        bool           suppressClick = false;
+
+        void startHold(int dir)
+        {
+            direction    = dir;
+            holdStartMs  = (juce::int64)juce::Time::getMillisecondCounter();
+            lastFireMs   = holdStartMs;
+            suppressClick = true;   // onClick fires on mouseUp — skip it
+
+            // Fire the first step immediately on press (feels instant).
+            if (direction > 0 && onUp)   onUp();
+            else if (direction < 0 && onDown) onDown();
+
+            startTimer(50);   // poll every 50ms — matches our fastest repeat rate
+            updateButtonVisual(dir, true);
+        }
+
+        void stopHold()
+        {
+            stopTimer();
+            updateButtonVisual(direction, false);
+            direction = 0;
+        }
+
+        void timerCallback() override
+        {
+            if (direction == 0) return;
+
+            const juce::int64 now           = (juce::int64)juce::Time::getMillisecondCounter();
+            const juce::int64 heldMs        = now - holdStartMs;
+            const juce::int64 sinceLastFire = now - lastFireMs;
+
+            if (heldMs < 400) return;   // Initial hold delay — no repeat yet
+
+            // 400–1000ms: slow repeat every 100ms.  >1000ms: fast repeat every 50ms.
+            const juce::int64 repeatMs = (heldMs < 1000) ? 100LL : 50LL;
+
+            if (sinceLastFire >= repeatMs)
+            {
+                lastFireMs = now;
+                if (direction > 0 && onUp)   onUp();
+                else if (direction < 0 && onDown) onDown();
+            }
+        }
+
+        void updateButtonVisual(int dir, bool active)
+        {
+            auto* btn = (dir > 0) ? upButton : (dir < 0 ? downButton : nullptr);
+            if (btn == nullptr) return;
+            if (active)
+            {
+                btn->setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF6A6A6A));
+                btn->setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
+            }
+            else
+            {
+                btn->setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+                btn->setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            }
+        }
+    };
+    PitchRepeatTimer pitchRepeatTimer;
+
     void updatePlayhead()
     {
         if (waveformComponent == nullptr) return;
@@ -4611,6 +4737,28 @@ private:
 
     //==============================================================================
     // Freeze helpers
+
+    // FIX 4: instant visual response — mouseDown previews the NEXT toggle state.
+    // The button appearance changes on press, not on release (onClick fires on mouseUp).
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        if (e.eventComponent == &freezeButton)
+        {
+            // Preview next state: if currently ON flash toward OFF color, and vice-versa.
+            // The actual state is committed in onClick → toggleFreeze() which runs on mouseUp.
+            const bool nextState = !isFreezeActive;
+            applyFreezeButtonStyle(nextState);
+        }
+    }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        // If onClick is about to run toggleFreeze() it will call applyFreezeButtonStyle again
+        // with the confirmed state — so nothing extra to do here.
+        // Guard: restore correct appearance if user dragged away without completing the click.
+        if (e.eventComponent == &freezeButton && !e.mouseWasClicked())
+            applyFreezeButtonStyle(isFreezeActive);
+    }
 
     void applyFreezeButtonStyle(bool on)
     {

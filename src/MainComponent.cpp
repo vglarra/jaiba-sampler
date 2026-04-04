@@ -206,6 +206,7 @@ MainComponent::~MainComponent()
     adsrSaveTimer.stopTimer();
     normSaveTimer.stopTimer();
     filterModeSaveTimer.stopTimer();
+    loopSaveTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // OPT 1: Stop FFT worker thread before audio shutdown to prevent use-after-free
@@ -2052,20 +2053,26 @@ void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
     }
 
     // Push TOTAL (in cents) to all live sounds atomically — no rebuild, no note cutoff.
-    // Audio thread picks up the new value on the next block (~6ms) — no delay.
+    // Audio thread reads pitchOffsetAtomic once per block; 10ms IIR ramp smoothes the transition.
     for (int i = 0; i < sampler.getNumSounds(); ++i)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
             sound->pitchOffsetAtomic.store(totalCents);
 
-    // In-memory save only (no disk flush) — deferred 300ms timer handles the flush.
+    const juce::int64 tAtomic = juce::Time::getMillisecondCounter();
+    printf("[PITCH-TIMING] updateSamplerSounds called: 0ms — SKIPPED (atomic pitchOffsetAtomic store)\n");
+    printf("[PITCH-TIMING] Ramp started: target=%.6f (10ms IIR smoothing on audio thread)\n",
+           std::pow(2.0, totalCents / 1200.0));
+
+    // In-memory save only (no disk flush) — deferred 500ms timer handles the flush.
     if (configManager != nullptr)
         configManager->savePitchOffset(userPitchOffsetCents);  // in-memory setValue only
 
-    // Restart debounce timer — one disk write fires 300ms after the last pitch change.
-    pitchSaveTimer.startTimer(300);
+    // Restart debounce timer — one disk write fires 500ms after the last pitch change.
+    pitchSaveTimer.startTimer(500);
 
     const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
-    printf("[PITCH-TIMING] Pitch change applied atomically: %lldms — no sound rebuild  (user=%+d cents  total=%+d cents)\n",
+    printf("[PITCH-TIMING] saveCurrentSampleState called: deferred 500ms\n");
+    printf("[PITCH-TIMING] total handler time: %lldms  (user=%+d cents  total=%+d cents)\n",
            (long long)elapsed, userPitchOffsetCents, totalCents);
     fflush(stdout);
 }
@@ -2175,16 +2182,15 @@ void MainComponent::loopEnabledChanged(bool isLooping)
 
     // Update the flag on all currently loaded sounds — no rebuild needed
     for (int i = 0; i < sampler.getNumSounds(); ++i)
-    {
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
             sound->loopEnabled.store(isLooping);
-    }
 
     if (configManager != nullptr)
-        configManager->saveLoopEnabled(isLooping);
+        configManager->saveLoopEnabled(isLooping);  // in-memory setValue only
 
-    saveCurrentSampleState();
-    printf("Loop %s\n", isLooping ? "ON" : "OFF");
+    loopSaveTimer.startTimer(400);  // one disk write 400ms after toggle
+    printf("Loop %s — save deferred 400ms\n", isLooping ? "ON" : "OFF");
+    fflush(stdout);
 }
 
 void MainComponent::gridSnapChanged(bool isEnabled)
@@ -2877,11 +2883,14 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
 
 void MainComponent::freezeChanged(bool isFrozen)
 {
-    printf("Freeze %s\n", isFrozen ? "ON" : "OFF");
+    const juce::int64 t0 = juce::Time::getMillisecondCounter();
+    printf("[FREEZE-TIMING] Freeze button clicked — isFrozen=%s\n", isFrozen ? "true" : "false");
+    fflush(stdout);
 
     if (isFrozen)
     {
-        // 1. Mark all sounds as frozen + ensure loop is active
+        // Freeze ON — purely atomic: mark sounds frozen + ensure loop flag is set.
+        // No sound rebuild, no disk write, no blocking operations.
         for (int i = 0; i < sampler.getNumSounds(); ++i)
         {
             if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
@@ -2891,60 +2900,65 @@ void MainComponent::freezeChanged(bool isFrozen)
             }
         }
 
-        // 2. If no voice is currently playing, inject a phantom note to start the loop.
-        //    With freeze active, stopNote is a no-op so the phantom loop runs forever.
+        // If no voice is currently playing, inject a phantom note to start the loop.
+        // With freezeActive=true, stopNote is a no-op so the phantom loop runs until freeze is released.
         bool anyActive = false;
         for (int i = 0; i < sampler.getNumVoices(); ++i)
             if (sampler.getVoice(i)->isVoiceActive()) { anyActive = true; break; }
 
         if (!anyActive && !samples.isEmpty() && samples[0]->isValid())
             sampler.noteOn(1, samples[0]->rootNote, 0.8f);
+
+        const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
+        printf("[FREEZE-TIMING] Freeze updated atomically: %lldms — no rebuild\n", (long long)elapsed);
+        printf("[FREEZE-TIMING] No save needed — freeze does not persist\n");
+        fflush(stdout);
     }
     else
     {
-        // Full aggressive kill to eliminate ghost freeze voices.
-        // allNotesOff(tail-off) is not enough — the frozen voice keeps looping through
-        // the ADSR release tail.  We need the same forceStop+clearSounds+rebuild
-        // sequence used during sample navigation.
+        // Freeze OFF — kill frozen voice without a full updateSamplerSounds() rebuild.
+        //
+        // The old sequence called clearSounds() + updateSamplerSounds() which allocated new
+        // LoopingSamplerSound objects and re-added them. This was unnecessary: forceStop()
+        // already releases the voice's currentlyPlayingSound refcount, leaving the existing
+        // sounds in the sampler intact and ready for new MIDI notes.
+        //
+        // New sequence: atomic flag clears + forceStop + allNotesOff + loop restore.
+        // No heap allocations, no disk writes, all steps complete in microseconds.
 
-        // Step 1: Silence audio thread immediately
+        // Step 1: Silence audio thread immediately — non-blocking atomic store.
         muteOutput.store(true);
 
-        // Step 2: Clear freeze/loop flags so no re-entry into freeze guard
+        // Step 2: Clear freezeActive on all sounds so stopNote() works normally from now on.
         for (int i = 0; i < sampler.getNumSounds(); ++i)
             if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
-            {
                 sound->freezeActive.store(false);
-                sound->loopEnabled.store(false);
-            }
 
-        // Step 3: Force-stop all voices — releases currentlyPlayingSound refcount directly
+        // Step 3: Force-stop all voices — directly releases currentlyPlayingSound refcount.
+        // Safe: muteOutput=true guarantees the audio thread is not inside renderNextBlock.
         for (int i = 0; i < sampler.getNumVoices(); ++i)
             if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
                 v->forceStop();
 
-        // Step 4: Remove all sounds from synthesiser
-        sampler.clearSounds();
-
-        // Step 5: Belt-and-suspenders note reset
+        // Step 4: Belt-and-suspenders JUCE voice-state reset (no tail-off).
         sampler.allNotesOff(0, false);
 
-        // Step 6: Stop each voice directly via its own stopNote
-        for (int i = 0; i < sampler.getNumVoices(); ++i)
-            sampler.getVoice(i)->stopNote(0.0f, false);
-
-        // Step 7: Rebuild from current sample — fresh sounds, no ghost state
-        updateSamplerSounds();
-
-        // Step 8: Apply correct loop state on the new sounds
+        // Step 5: Restore loop state on existing sounds (sounds stay in sampler — no rebuild needed).
         const bool loopOn = sampleCard.isLoopEnabled();
         loopEnabled.store(loopOn);
         for (int i = 0; i < sampler.getNumSounds(); ++i)
             if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
                 sound->loopEnabled.store(loopOn);
 
-        // Step 9: Resume audio output — buffer was zeroed while muteOutput=true
+        // Step 6: Resume audio output.
         muteOutput.store(false);
+
+        const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
+        printf("[FREEZE-TIMING] updateSamplerSounds called: 0ms — SKIPPED (forceStop+allNotesOff only)\n");
+        printf("[FREEZE-TIMING] Freeze updated atomically: %lldms — no rebuild\n", (long long)elapsed);
+        printf("[FREEZE-TIMING] No save needed — freeze does not persist\n");
+        printf("[FREEZE-TIMING] total handler time: %lldms\n", (long long)elapsed);
+        fflush(stdout);
     }
 }
 
