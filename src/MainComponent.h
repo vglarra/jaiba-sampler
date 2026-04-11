@@ -345,6 +345,15 @@ private:
     std::atomic<bool>    eqActive   { false };
     int                  eqFilterModes[3] = { 2, 2, 2 };  // message-thread only; 0-5 per band
 
+    // FIX 1: Pre-computed flat EQ coefficients (100/500/8kHz, 0dB, Bell, Q=1).
+    // Initialized once in prepareToPlay() after sample rate is known.
+    // Reset copies these directly to eqCoeffDB with no calculation — nanoseconds.
+    EqCoeffDoubleBuffer::Coeffs defaultFlatCoeffs[3];
+
+    // Timing: set to ms timestamp when Reset fires; audio thread reads it and prints
+    // round-trip latency on the first block that picks up new coefficients, then clears.
+    std::atomic<juce::int64> eqResetRequestedMs { 0 };
+
     // Per-channel filter state — audio thread only, no locking needed.
     double eqZ1[3][2] {};  // [band][channel]
     double eqZ2[3][2] {};

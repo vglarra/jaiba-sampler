@@ -156,6 +156,33 @@ MainComponent::MainComponent()
       };
       sampleCard.onTrimRequested = [this] { performTrimAsync(); };
 
+      // FIX 2: Fast path for EQ Reset — write pre-computed flat coefficients atomically.
+      // No coefficient math, no resetEqState() data race, no synchronous disk write.
+      sampleCard.onEqReset = [this]
+      {
+          const juce::int64 t0 = juce::Time::getMillisecondCounter();
+
+          // FIX 2: Copy pre-computed flat defaults directly to double buffer — nanoseconds.
+          eqCoeffDB.writeFromUI(defaultFlatCoeffs);
+          // Stamp the request time so the audio thread can print round-trip latency.
+          eqResetRequestedMs.store(t0, std::memory_order_relaxed);
+
+          const juce::int64 tWrite = juce::Time::getMillisecondCounter();
+          printf("[RESET-TIMING] coefficients written atomically: %lldms — no calculation\n",
+                 (long long)(tWrite - t0));
+          // FIX 3: No updateSamplerSounds.
+          printf("[RESET-TIMING] updateSamplerSounds called: 0ms — SKIPPED (atomic coefficient swap)\n");
+
+          // FIX 4: Defer save — no synchronous disk write on Reset.
+          eqSaveTimer.startTimer(400);
+          const juce::int64 tSave = juce::Time::getMillisecondCounter();
+          printf("[RESET-TIMING] save deferred: 400ms timer started at %lldms\n",
+                 (long long)(tSave - t0));
+          printf("[RESET-TIMING] total MainComponent reset handler: %lldms\n",
+                 (long long)(tSave - t0));
+          fflush(stdout);
+      };
+
       // Set initial sample name
       sampleCard.setSampleName("No sample loaded");
 
@@ -290,6 +317,12 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     // Reset filter state and circular buffer (fresh start).
     resetEqState();
     fftAbstractFifo.reset();
+
+    // FIX 1: Pre-compute flat EQ coefficients once — copied directly to double buffer on Reset.
+    defaultFlatCoeffs[0] = computeEqCoeffs(100.0f,  0.0f, 1.0f, 2, sampleRate);
+    defaultFlatCoeffs[1] = computeEqCoeffs(500.0f,  0.0f, 1.0f, 2, sampleRate);
+    defaultFlatCoeffs[2] = computeEqCoeffs(8000.0f, 0.0f, 1.0f, 2, sampleRate);
+    printf("[EQ-RESET] Default flat coefficients pre-computed at SR=%.0f\n", sampleRate);
     std::fill(std::begin(fftCircularBuffer), std::end(fftCircularBuffer), 0.0f);
 
     // Inform EQDisplay of the current sample rate so biquad response rendering is correct.
@@ -347,6 +380,17 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
 
         // OPT 2: swap in freshly computed coefficients if UI thread wrote them (nanoseconds).
         const auto* c = eqCoeffDB.swapIfUpdated();
+
+        // FIX 6: Timing diagnostic — measure round-trip from Reset click to audio application.
+        const juce::int64 resetReqMs = eqResetRequestedMs.load(std::memory_order_relaxed);
+        if (resetReqMs > 0)
+        {
+            const juce::int64 now = juce::Time::getMillisecondCounter();
+            printf("[RESET-TIMING] Audio thread applied new coefficients after: %lldms\n",
+                   (long long)(now - resetReqMs));
+            fflush(stdout);
+            eqResetRequestedMs.store(0, std::memory_order_relaxed);
+        }
 
         // OPT 3: single pass — apply all 3 bands per sample (better cache utilization vs.
         // three separate passes over the buffer).
@@ -2451,24 +2495,18 @@ void MainComponent::eqParamsChanged(bool enabled,
     eqCoeffDB.writeFromUI(newCoeffs);
     const juce::int64 tWrite = juce::Time::getMillisecondCounter();
 
-    // Skip resetEqState() during drag — calling it on every pixel zeroes the filter memory
-    // and causes an audible click each time. Only reset on the final mouseUp event or
-    // when toggling the EQ on/off (not a drag).
-    const bool isDragging = sampleCard.isEqDisplayDragging();
-    if (enabled && !isDragging)
-        resetEqState();
+    // FIX 7: resetEqState() is ONLY safe when muteOutput=true (audio thread not running).
+    // Calling it during active playback is a data race: the audio thread holds eqZ1/eqZ2
+    // in CPU registers for the entire inner sample loop — a message-thread write to the
+    // backing memory has no effect until the audio thread writes registers back (end of block),
+    // at which point it overwrites our zeros.  The filter state decays naturally and quickly
+    // through the biquad equation — no explicit zero is needed.
+    // resetEqState() is intentionally NOT called here.
 
-    // During drag: restart debounced timer — one disk flush fires 400ms after drag stops.
-    // When not dragging (EQ toggle, mode change, final mouseUp): save immediately.
-    if (isDragging)
-    {
-        eqSaveTimer.startTimer(400);
-    }
-    else
-    {
-        eqSaveTimer.stopTimer();
-        saveCurrentSampleState();
-    }
+    // FIX 4: Always defer save — no synchronous disk write from eqParamsChanged.
+    // Covers EQ band drag, EQ toggle, and any other path through this function.
+    const bool isDragging = sampleCard.isEqDisplayDragging();
+    eqSaveTimer.startTimer(400);
 
     printf("[EQ-TIMING] coeffs computed: %lldms  buffer written: %lldms  dragging=%s  %s  "
            "band1=%.0fHz/%.1fdB/Q%.2f(mode%d)  band2=%.0fHz/%.1fdB/Q%.2f(mode%d)  band3=%.0fHz/%.1fdB/Q%.2f(mode%d)\n",
@@ -2501,7 +2539,9 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
     const auto tCoeffs = juce::Time::getMillisecondCounter();
     printf("[FILTER-TIMING] coefficients recalculated: %lldms\n", (long long)(tCoeffs - t0));
 
-    if (eqActive.load()) resetEqState();
+    // FIX 7: Do NOT call resetEqState() here — same data race issue as eqParamsChanged.
+    // Filter state decays naturally through the biquad equation.
+    printf("[FILTER-TIMING] resetEqState: SKIPPED — unsafe during active playback (data race)\n");
 
     // NO updateSamplerSounds() — coefficients written atomically above.
     printf("[FILTER-TIMING] updateSamplerSounds called: 0ms — SKIPPED (atomic coefficient swap)\n");

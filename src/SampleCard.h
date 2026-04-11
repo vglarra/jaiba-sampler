@@ -1411,7 +1411,11 @@ public:
         eqResetButton.setTooltip("Reset all EQ bands to flat defaults (100/500/8000 Hz, 0dB, Bell)");
         eqResetButton.onClick = [this]
         {
-            // Reset band parameters to defaults — leave eqEnabled and norm unchanged.
+            const juce::int64 t0 = juce::Time::getMillisecondCounter();
+            printf("[RESET-TIMING] Reset button clicked\n");
+            fflush(stdout);
+
+            // FIX 5: Visual update is instant — update bands/modes before any audio work.
             eqBands[0] = { 100.0f,  0.0f, 1.0f };
             eqBands[1] = { 500.0f,  0.0f, 1.0f };
             eqBands[2] = { 8000.0f, 0.0f, 1.0f };
@@ -1424,14 +1428,24 @@ public:
                 eqDisplay->setFilterMode(1, 2);
                 eqDisplay->setFilterMode(2, 2);
             }
-            // Update filter mode button to show Bell for the active band.
             filterModeButton.setButtonText("Bell");
 
-            // Notify MainComponent to recompute EQ coefficients and save (deferred via eqSaveTimer).
-            listeners.call([this](Listener& l) {
-                l.eqFilterModesChanged(2, 2, 2);
-            });
-            fireEqParamsChanged();
+            const juce::int64 tVis = juce::Time::getMillisecondCounter();
+            printf("[RESET-TIMING] visual update: %lldms\n", (long long)(tVis - t0));
+
+            // Update mode tracking in MainComponent (deferred save via filterModeSaveTimer — no disk I/O).
+            listeners.call([](Listener& l) { l.eqFilterModesChanged(2, 2, 2); });
+
+            const juce::int64 tModes = juce::Time::getMillisecondCounter();
+            printf("[RESET-TIMING] eqFilterModesChanged fired: %lldms\n", (long long)(tModes - t0));
+
+            // FIX 1+2: Write pre-computed default coefficients directly — no calculation, no sync save.
+            // MainComponent::onEqReset does: eqCoeffDB.writeFromUI(defaultFlatCoeffs) + defer save.
+            if (onEqReset) onEqReset();
+
+            const juce::int64 tDone = juce::Time::getMillisecondCounter();
+            printf("[RESET-TIMING] total reset handler time: %lldms\n", (long long)(tDone - t0));
+            fflush(stdout);
 
             // Brief white flash to confirm reset was applied.
             eqResetButton.setColour(juce::TextButton::buttonColourId,  juce::Colours::white);
@@ -4569,6 +4583,10 @@ public:
 
     // Fired when the user confirms Trim — MainComponent performs the actual file write.
     std::function<void()> onTrimRequested;
+
+    // Fired when the EQ Reset button is clicked — MainComponent writes pre-computed flat
+    // coefficients directly to EqCoeffDoubleBuffer (no computation, no synchronous save).
+    std::function<void()> onEqReset;
 
     // Called by MainComponent to show/hide the "Trimming..." state.
     void setTrimInProgress(bool inProgress)
