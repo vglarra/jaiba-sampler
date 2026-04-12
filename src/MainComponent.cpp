@@ -1590,7 +1590,7 @@ void MainComponent::navigateToFile(int index)
     fflush(stdout);
 }
 
-void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, bool resetZoom, bool deferTransients)
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, bool resetZoom, bool deferTransients, TrimSettingsSnapshot trimSnapshot)
 {
     // ── Background thread: read audio data ────────────────────────────────────────
     const juce::int64 tBgStart = (juce::int64)juce::Time::getMillisecondCounter();
@@ -1678,7 +1678,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
     // ── Message thread: stop audio, restore state, rebuild sampler ────────────────
     juce::MessageManager::callAsync([this, sample, file, autoPlay, resetZoom, deferTransients,
                                       peaks = std::move(peaks), peakNumCh, peakNSamples, peakSR,
-                                      tBgStart]() mutable {
+                                      tBgStart, trimSnapshot]() mutable {
 
         const juce::int64 tMsgStart = (juce::int64)juce::Time::getMillisecondCounter();
         printf("[LOAD-TIMING] callAsync lambda started: %lldms after bg job\n",
@@ -1749,9 +1749,10 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         sample->lowNote  = sample->rootNote;
         sample->highNote = sample->rootNote;
 
-        // ── Steps 5-7: Restore per-sample state (start/end/vol/loop only) ───────────
-        // Pitch is NOT per-sample — it is never read or written here.
-        // Pitch is left exactly as it currently is on the card (global session value).
+        // ── Steps 5-7: Restore per-sample state ──────────────────────────────────
+        // Start/end always reset to 0 / full-length (trim changes sample length).
+        // For trim loads, all other settings come from the TrimSettingsSnapshot.
+        // For normal loads, settings come from ConfigurationManager (per-sample key).
         double effectiveStart = 0.0;
         double effectiveEnd   = -1.0;   // -1 = full sample length
         float  effectiveVol   = 1.0f;
@@ -1759,73 +1760,120 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
 
         printf("[PERSIST] --- Loading: %s ---\n", file.getFileName().toRawUTF8());
 
-        if (configManager != nullptr)
+        // Helper lambda — applies ADSR/EQ/Norm state from fields (avoids code duplication)
+        auto applyAdsrState = [&](bool adsrEn, float atk, float dcy, float sus, float rel)
         {
+            printf("[ADSR LOAD] adsrEnabled=%s  atk=%.0fms  dcy=%.0fms  sus=%.0f%%  rel=%.0fms\n",
+                   adsrEn ? "true" : "false", atk, dcy, sus * 100.0f, rel);
+            sampleCard.setAdsrParams(adsrEn, atk, dcy, sus, rel, /*notifyListeners=*/false);
+        };
+
+        auto applyEqState = [&](bool eqEn,
+                                float f1, float g1, float q1, int m1,
+                                float f2, float g2, float q2, int m2,
+                                float f3, float g3, float q3, int m3)
+        {
+            sampleCard.setEqParams(eqEn, f1,g1,q1, f2,g2,q2, f3,g3,q3, /*notifyListeners=*/false);
+            eqFilterModes[0] = m1; eqFilterModes[1] = m2; eqFilterModes[2] = m3;
+            sampleCard.setEqFilterModes(m1, m2, m3, /*notify=*/false);
+            eqActive.store(eqEn);
+            const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
+            EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+            newCoeffs[0] = computeEqCoeffs(f1, g1, q1, m1, sr);
+            newCoeffs[1] = computeEqCoeffs(f2, g2, q2, m2, sr);
+            newCoeffs[2] = computeEqCoeffs(f3, g3, q3, m3, sr);
+            eqCoeffDB.writeFromUI(newCoeffs);
+            resetEqState();  // safe: muteOutput=true here
+            printf("[EQ] Restored filter modes: band1=%d  band2=%d  band3=%d\n", m1, m2, m3);
+        };
+
+        auto applyNormState = [&](bool normEn, float targetDb)
+        {
+            sampleCard.setNormParams(normEn, targetDb, /*notifyListeners=*/false);
+            if (normEn)
+            {
+                const float gain   = computeNormGainFromAudio(targetDb);
+                normGain.store(gain);
+                const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
+                sampleCard.setNormGainDisplay(gainDb);
+            }
+            else
+            {
+                normGain.store(1.0f);
+            }
+        };
+
+        if (trimSnapshot.valid)
+        {
+            // ── TRIM LOAD: restore all settings from pre-trim snapshot ────────────
+            // Start/end intentionally NOT restored — trimmed file has new length.
+            printf("[TRIM] Restoring settings from snapshot — pitch=%+dcents  loop=%s  adsr=%s  eq=%s  norm=%s\n",
+                   trimSnapshot.pitchCents,
+                   trimSnapshot.loopEnabled ? "ON" : "OFF",
+                   trimSnapshot.adsrEnabled ? "ON" : "OFF",
+                   trimSnapshot.eqEnabled   ? "ON" : "OFF",
+                   trimSnapshot.normEnabled ? "ON" : "OFF");
+
+            effectiveVol  = trimSnapshot.volumeLevel;
+            effectiveLoop = trimSnapshot.loopEnabled;
+
+            // Pitch
+            sampleCard.setPitchOffset(trimSnapshot.pitchCents);
+            sampleCard.setBasePitchOffset(trimSnapshot.basePitchOffset);
+            sampleCard.setDetectedNoteName(trimSnapshot.detectedNoteName, trimSnapshot.detectedFreqHz);
+            sampleCard.setBaseTuningHz(trimSnapshot.baseTuningHz);
+            sampleCard.setPitchStepCents(trimSnapshot.pitchStepCents);
+
+            // Playback modes (quiet setters — no listener fired)
+            sampleCard.setOneShotEnabled(trimSnapshot.oneShotEnabled);
+            sampleCard.setReverseEnabled(trimSnapshot.reverseEnabled);
+            sampleCard.setBounceEnabled(trimSnapshot.bounceEnabled);
+
+            // Transient
+            sampleCard.setTransientDetectionEnabled(trimSnapshot.transientDetectionEnabled);
+            sampleCard.setTransientThreshold((double)trimSnapshot.transientThreshold);
+
+            // Grid
+            sampleCard.setGridSnapEnabled(trimSnapshot.gridSnapEnabled);
+            sampleCard.setGridResolutionIndex(trimSnapshot.gridResolutionIndex);
+
+            // ADSR
+            applyAdsrState(trimSnapshot.adsrEnabled, trimSnapshot.adsrAttackMs,
+                           trimSnapshot.adsrDecayMs, trimSnapshot.adsrSustain, trimSnapshot.adsrReleaseMs);
+
+            // EQ
+            applyEqState(trimSnapshot.eqEnabled,
+                         trimSnapshot.eq1Freq, trimSnapshot.eq1Gain, trimSnapshot.eq1Q, trimSnapshot.eq1Mode,
+                         trimSnapshot.eq2Freq, trimSnapshot.eq2Gain, trimSnapshot.eq2Q, trimSnapshot.eq2Mode,
+                         trimSnapshot.eq3Freq, trimSnapshot.eq3Gain, trimSnapshot.eq3Q, trimSnapshot.eq3Mode);
+
+            // Normalize (recomputed on trimmed audio — peak may differ from original)
+            applyNormState(trimSnapshot.normEnabled, trimSnapshot.normTargetDb);
+
+            printf("[TRIM] Settings restore complete\n");
+        }
+        else if (configManager != nullptr)
+        {
+            // ── NORMAL LOAD: restore from per-sample config key ───────────────────
             auto state = configManager->getSampleState(file);
             if (state.exists)
             {
-                // Saved settings found — restore start/end/vol/loop/thresh for this file
                 effectiveStart = state.startPoint;
                 effectiveEnd   = state.endPoint;
                 effectiveVol   = state.volume;
                 effectiveLoop  = state.loopEnabled;
-                // Restore transient threshold (re-runs detection with saved sensitivity)
                 sampleCard.setTransientThreshold(state.transientThreshold);
-                // Restore detected note and hidden base offset (quiet — no listener fired)
                 sampleCard.setDetectedNoteName(state.detectedNoteName, state.detectedFreqHz);
                 sampleCard.setBasePitchOffset(state.basePitchOffset);
-                // Restore ADSR envelope state.
-                // notifyListeners=false: silent restore, no save triggered here.
-                // The final saveCurrentSampleState() at end of lambda saves the correct values.
-                printf("[ADSR LOAD] Reading from disk: adsrEnabled=%s  atk=%.0fms  dcy=%.0fms  sus=%.0f%%  rel=%.0fms\n",
-                       state.adsrEnabled ? "true" : "false",
-                       state.adsrAttackMs, state.adsrDecayMs,
-                       state.adsrSustain * 100.0f, state.adsrReleaseMs);
-                sampleCard.setAdsrParams(state.adsrEnabled, state.adsrAttackMs, state.adsrDecayMs,
-                                         state.adsrSustain, state.adsrReleaseMs, /*notifyListeners=*/false);
-                printf("[ADSR LOAD] Applied to SampleCard  →  card reports: en=%s atk=%.0f\n",
+                applyAdsrState(state.adsrEnabled, state.adsrAttackMs, state.adsrDecayMs,
+                               state.adsrSustain, state.adsrReleaseMs);
+                printf("[ADSR LOAD] Applied to SampleCard  ->  card reports: en=%s atk=%.0f\n",
                        sampleCard.isAdsrEnabled() ? "true" : "false", sampleCard.getAdsrAttackMs());
-
-                // Restore EQ state silently (no listener = no redundant save)
-                sampleCard.setEqParams(state.eqEnabled,
-                                       state.eq1Freq, state.eq1Gain, state.eq1Q,
-                                       state.eq2Freq, state.eq2Gain, state.eq2Q,
-                                       state.eq3Freq, state.eq3Gain, state.eq3Q,
-                                       /*notifyListeners=*/false);
-                // Restore EQ filter modes silently
-                eqFilterModes[0] = state.eq1Mode;
-                eqFilterModes[1] = state.eq2Mode;
-                eqFilterModes[2] = state.eq3Mode;
-                sampleCard.setEqFilterModes(state.eq1Mode, state.eq2Mode, state.eq3Mode, /*notify=*/false);
-                // OPT 2+5: Compute EQ coefficients on UI thread, write to double buffer.
-                // resetEqState() is safe here because muteOutput=true (audio thread not running).
-                eqActive.store(state.eqEnabled);
-                {
-                    const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-                    EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
-                    newCoeffs[0] = computeEqCoeffs(state.eq1Freq, state.eq1Gain, state.eq1Q, state.eq1Mode, sr);
-                    newCoeffs[1] = computeEqCoeffs(state.eq2Freq, state.eq2Gain, state.eq2Q, state.eq2Mode, sr);
-                    newCoeffs[2] = computeEqCoeffs(state.eq3Freq, state.eq3Gain, state.eq3Q, state.eq3Mode, sr);
-                    eqCoeffDB.writeFromUI(newCoeffs);
-                }
-                resetEqState();  // OPT 5: always reset filter state on sample load (muteOutput=true)
-                printf("[EQ] Restored filter modes: band1=%d  band2=%d  band3=%d\n",
-                       state.eq1Mode, state.eq2Mode, state.eq3Mode);
-
-                // Restore normalize state silently, then recompute gain if enabled.
-                sampleCard.setNormParams(state.normEnabled, state.normTargetDb, /*notifyListeners=*/false);
-                if (state.normEnabled)
-                {
-                    const float gain   = computeNormGainFromAudio(state.normTargetDb);
-                    normGain.store(gain);
-                    const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
-                    sampleCard.setNormGainDisplay(gainDb);
-                }
-                else
-                {
-                    normGain.store(1.0f);
-                }
-
+                applyEqState(state.eqEnabled,
+                             state.eq1Freq, state.eq1Gain, state.eq1Q, state.eq1Mode,
+                             state.eq2Freq, state.eq2Gain, state.eq2Q, state.eq2Mode,
+                             state.eq3Freq, state.eq3Gain, state.eq3Q, state.eq3Mode);
+                applyNormState(state.normEnabled, state.normTargetDb);
                 printf("[PERSIST] RESTORED  start=%.3f  end=%.3f  vol=%.2f  loop=%s  thresh=%.1f  note=%s\n",
                        effectiveStart, effectiveEnd, effectiveVol,
                        effectiveLoop ? "ON" : "OFF",
@@ -1834,26 +1882,18 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             }
             else
             {
-                // New file — reset sensitivity to default, clear detection and base offset
+                // New file — reset all to defaults
                 sampleCard.setTransientThreshold(4.0);
                 sampleCard.setDetectedNoteName("", 0.0);
                 sampleCard.setBasePitchOffset(0);
-                // New file: reset EQ to defaults (OFF, all bands flat, all Bell mode)
-                sampleCard.setEqParams(false, 100.0f,0.0f,1.0f, 500.0f,0.0f,1.0f, 8000.0f,0.0f,1.0f,
-                                       /*notifyListeners=*/false);
-                eqFilterModes[0] = eqFilterModes[1] = eqFilterModes[2] = 2;
-                sampleCard.setEqFilterModes(2, 2, 2, /*notify=*/false);
-                eqActive.store(false);
-                resetEqState();  // OPT 5: reset filter state so old sample state doesn't bleed in
-                // New file: reset normalize to defaults (OFF, target -6dB)
-                sampleCard.setNormParams(false, -6.0f, /*notifyListeners=*/false);
-                normGain.store(1.0f);
+                applyEqState(false, 100.0f,0.0f,1.0f,2, 500.0f,0.0f,1.0f,2, 8000.0f,0.0f,1.0f,2);
+                applyNormState(false, -6.0f);
                 printf("[PERSIST] NEW FILE — using defaults  start=0.0  end=full  vol=1.0  loop=OFF  thresh=4.0\n");
             }
         }
 
         // Pitch: total = global user offset + per-sample base (from Tune).
-        // basePitchOffset was restored from SampleState above (0 if never tuned).
+        // For trim loads, both were restored from the snapshot above.
         sample->pitchOffset = sampleCard.getPitchOffset() + sampleCard.getBasePitchOffset() * 100;
         printf("[PITCH] Sample loaded: user=%+d cents  base=%+d st  total=%+d cents\n",
                sampleCard.getPitchOffset(), sampleCard.getBasePitchOffset(), sample->pitchOffset);
@@ -1861,12 +1901,12 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         sample->startPointSeconds = effectiveStart;
         sample->endPointSeconds   = effectiveEnd;
 
-        // Apply start marker
+        // Apply start marker (always 0 for trim loads)
         if (effectiveStart > 0.0)
             sampleCard.setStartPoint(effectiveStart);
         // else already reset above
 
-        // Apply end marker
+        // Apply end marker (always full for trim loads)
         if (effectiveEnd > 0.0)
             sampleCard.setEndPoint(effectiveEnd);
         // else already reset above (full length)
@@ -2952,7 +2992,50 @@ void MainComponent::performPanicReset()
 
 void MainComponent::performTrimAsync()
 {
-    // ── Step 1: capture sample data under lock ──────────────────────────────
+    // ── Step 1a: snapshot all current SampleCard settings (before any write) ──
+    // Start/end points are intentionally NOT captured — the trimmed file has a
+    // different length so they reset to 0.0 / full-length after load.
+    TrimSettingsSnapshot snap;
+    snap.valid                   = true;
+    snap.pitchCents              = sampleCard.getPitchOffset();
+    snap.basePitchOffset         = sampleCard.getBasePitchOffset();
+    snap.baseTuningHz            = sampleCard.getBaseTuningHz();
+    snap.pitchStepCents          = sampleCard.getPitchStepCents();
+    snap.detectedNoteName        = sampleCard.getDetectedNoteName();
+    snap.detectedFreqHz          = sampleCard.getDetectedFreqHz();
+    snap.loopEnabled             = sampleCard.isLoopEnabled();
+    snap.oneShotEnabled          = sampleCard.isOneShotEnabled();
+    snap.reverseEnabled          = sampleCard.isReverseEnabled();
+    snap.bounceEnabled           = sampleCard.isBounceEnabled();
+    snap.volumeLevel             = sampleCard.getVolume();
+    snap.normEnabled             = sampleCard.isNormEnabled();
+    snap.normTargetDb            = sampleCard.getNormTargetDb();
+    snap.adsrEnabled             = sampleCard.isAdsrEnabled();
+    snap.adsrAttackMs            = sampleCard.getAdsrAttackMs();
+    snap.adsrDecayMs             = sampleCard.getAdsrDecayMs();
+    snap.adsrSustain             = sampleCard.getAdsrSustain();
+    snap.adsrReleaseMs           = sampleCard.getAdsrReleaseMs();
+    snap.eqEnabled               = sampleCard.isEqEnabled();
+    snap.eq1Freq = sampleCard.getEqBandFreq(0); snap.eq1Gain = sampleCard.getEqBandGain(0);
+    snap.eq1Q    = sampleCard.getEqBandQ(0);    snap.eq1Mode = sampleCard.getEqFilterMode(0);
+    snap.eq2Freq = sampleCard.getEqBandFreq(1); snap.eq2Gain = sampleCard.getEqBandGain(1);
+    snap.eq2Q    = sampleCard.getEqBandQ(1);    snap.eq2Mode = sampleCard.getEqFilterMode(1);
+    snap.eq3Freq = sampleCard.getEqBandFreq(2); snap.eq3Gain = sampleCard.getEqBandGain(2);
+    snap.eq3Q    = sampleCard.getEqBandQ(2);    snap.eq3Mode = sampleCard.getEqFilterMode(2);
+    snap.transientDetectionEnabled = sampleCard.isTransientDetectionEnabled();
+    snap.transientThreshold        = (float)sampleCard.getTransientThreshold();
+    snap.gridSnapEnabled           = sampleCard.isGridSnapEnabled();
+    snap.gridResolutionIndex       = sampleCard.getGridResolutionIndex();
+
+    printf("[TRIM] Settings snapshot captured — pitch=%+dcents  loop=%s  adsr=%s  eq=%s  norm=%s\n",
+           snap.pitchCents,
+           snap.loopEnabled    ? "ON" : "OFF",
+           snap.adsrEnabled    ? "ON" : "OFF",
+           snap.eqEnabled      ? "ON" : "OFF",
+           snap.normEnabled    ? "ON" : "OFF");
+    fflush(stdout);
+
+    // ── Step 1b: capture sample data under lock ─────────────────────────────
     juce::File   sourceFile;
     std::shared_ptr<juce::AudioBuffer<float>> audioData;
     double startSec = 0.0, endSec = 0.0, capSampleRate = 44100.0;
@@ -3019,7 +3102,7 @@ void MainComponent::performTrimAsync()
     w->enterModalState(true,
         juce::ModalCallbackFunction::create(
             [this, sourceFile, capAudio, capStartSec, capEndSec,
-             capSampleRate, capChannels, origFileSize](int result) mutable
+             capSampleRate, capChannels, origFileSize, snap](int result) mutable
             {
                 if (result == 0)
                 {
@@ -3062,7 +3145,7 @@ void MainComponent::performTrimAsync()
 
                 // ── Step 6: write on background thread ───────────────────────
                 backgroundThreads.addJob([this, capAudio, startSmp, endSmp,
-                                          capSampleRate, capChannels, outFile, origFileSize]() mutable
+                                          capSampleRate, capChannels, outFile, origFileSize, snap]() mutable
                 {
                     juce::WavAudioFormat wavFormat;
                     auto outStream = std::unique_ptr<juce::FileOutputStream>(
@@ -3132,7 +3215,7 @@ void MainComponent::performTrimAsync()
                            (long long)newSize, savedStr.toRawUTF8());
 
                     // ── Step 9: load result on message thread ────────────────
-                    juce::MessageManager::callAsync([this, outFile, savedStr, savedBytes]() mutable
+                    juce::MessageManager::callAsync([this, outFile, savedStr, savedBytes, snap]() mutable
                     {
                         // Insert into folder navigation list
                         {
@@ -3145,12 +3228,14 @@ void MainComponent::performTrimAsync()
                         }
                         currentFolder = outFile.getParentDirectory();
 
-                        // Load the trimmed file (reset zoom to full view)
+                        // Load the trimmed file, passing the settings snapshot so all
+                        // parameters (pitch, ADSR, EQ, loop, normalize, etc.) are preserved.
                         sampleCard.restoreZoomAndScroll(1.0, 0.0f);
-                        loadSampleFileAsync(outFile, /*autoPlay=*/true, /*resetZoom=*/true);
+                        loadSampleFileAsync(outFile, /*autoPlay=*/true, /*resetZoom=*/true,
+                                            /*deferTransients=*/false, snap);
 
-                        // Show success toast
-                        juce::String msg = "Trimmed -> " + outFile.getFileName();
+                        // Show success toast — mention settings preserved
+                        juce::String msg = "Trimmed -> " + outFile.getFileName() + " — settings preserved";
                         if (savedBytes > 0.0)
                             msg += " (saved " + savedStr + ")";
                         sampleCard.showTrimToast(msg, /*isError=*/false);

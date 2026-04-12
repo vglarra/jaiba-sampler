@@ -81,33 +81,87 @@ public:
 
 private:
     //==============================================================================
+    // Snapshot of all SampleCard settings captured just before a Trim write begins.
+    // Passed to loadSampleFileAsync so the trimmed file inherits everything except
+    // start/end points (which reset to 0/full since the file length changes).
+    // Must be declared before loadSampleFileAsync which uses it as a default parameter.
+    struct TrimSettingsSnapshot
+    {
+        bool valid = false;
+
+        // Pitch
+        int    pitchCents      = 0;
+        int    basePitchOffset = 0;
+        double baseTuningHz    = 440.0;
+        int    pitchStepCents  = 100;
+        juce::String detectedNoteName;
+        double       detectedFreqHz = 0.0;
+
+        // Playback modes
+        bool loopEnabled    = false;
+        bool oneShotEnabled = false;
+        bool reverseEnabled = false;
+        bool bounceEnabled  = false;
+
+        // Volume
+        float volumeLevel  = 1.0f;
+
+        // Normalize
+        bool  normEnabled  = false;
+        float normTargetDb = -6.0f;
+
+        // ADSR
+        bool  adsrEnabled  = false;
+        float adsrAttackMs = 0.0f;
+        float adsrDecayMs  = 0.0f;
+        float adsrSustain  = 1.0f;
+        float adsrReleaseMs= 0.0f;
+
+        // EQ
+        bool  eqEnabled = false;
+        float eq1Freq = 100.0f, eq1Gain = 0.0f, eq1Q = 1.0f; int eq1Mode = 2;
+        float eq2Freq = 500.0f, eq2Gain = 0.0f, eq2Q = 1.0f; int eq2Mode = 2;
+        float eq3Freq = 8000.0f,eq3Gain = 0.0f, eq3Q = 1.0f; int eq3Mode = 2;
+
+        // Transient
+        bool  transientDetectionEnabled = true;
+        float transientThreshold        = 4.0f;
+
+        // Grid
+        bool gridSnapEnabled    = false;
+        int  gridResolutionIndex= 5;
+    };
+
+    //==============================================================================
     // Sample loading and management
     void loadSampleFile(const juce::File& file);
     // deferTransients=true during Prev/Next navigation: skips detectTransients() on the
     // message thread and fires it via transientDetectionTimer 800ms after navigation stops.
-    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, bool resetZoom = false, bool deferTransients = false);
+    // trimSnapshot: when valid=true, restore all settings from snapshot instead of config lookup.
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, bool resetZoom = false,
+                              bool deferTransients = false, TrimSettingsSnapshot trimSnapshot = {});
     void updateSamplerSounds();
-    
+
     // Audio device management
     void showAudioDeviceSettings();
     void updateDeviceInfo();
     void saveAudioSettings();
     void loadAudioSettings();
-    
+
     // MIDI device management
     void showMidiDeviceSettings();
     void updateMidiDeviceList();
-    
+
     // Sine wave test
     void toggleSineWave();
-    
+
     // Multi-sample mapping interface
     void showMappingInterface();
     void addSampleToMap();
     void removeSelectedSample();
     void clearAllSamples();
     void updateMappingUI();
-    
+
     //==============================================================================
     // Panic reset — hard-cuts all audio immediately
     void performPanicReset();
