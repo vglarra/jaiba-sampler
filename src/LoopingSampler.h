@@ -93,6 +93,8 @@ public:
             const float tuningRatio = sound->baseTuningRatioAtomic.load();
             pitchRatio = basePitchRatio * (double)tuningRatio * std::pow(2.0, offset / 1200.0);
             smoothedPitchRatio = pitchRatio;   // align immediately at note start — no ramp at attack
+            // Cache pitch smooth coefficient — avoids std::exp() every block (SR never changes mid-note).
+            pitchSmoothCoeff = 1.0 - std::exp(-1.0 / (getSampleRate() * 0.010));
 
             // Start playback at the correct boundary for current direction.
             // Reverse: start at End−1 and count down toward Start.
@@ -135,7 +137,6 @@ public:
             envSamplePosition = 0;
             inRelease         = false;
             releasePosition   = -1;
-            debugEnvCounter   = 0;
             if (sound->customAdsrEnabled.load())
             {
                 const double sr = getSampleRate();
@@ -244,10 +245,7 @@ public:
             const int offset = sound->pitchOffsetAtomic.load();
             const float tuningRatio = sound->baseTuningRatioAtomic.load();
             pitchRatio = basePitchRatio * (double)tuningRatio * std::pow(2.0, offset / 1200.0);
-            // 10ms exponential pitch-ramp coefficient — precomputed once per block (not per sample).
-            // At 44100 Hz: coeff ≈ 0.00226; smoothedPitchRatio reaches 63% of target in ~10ms.
-            // Eliminates audible click when pitch changes during active playback.
-            const double pitchSmoothCoeff = 1.0 - std::exp(-1.0 / (getSampleRate() * 0.010));
+            // pitchSmoothCoeff is pre-cached in startNote() — no std::exp() per block.
             if (sStart >= sEnd) return;
 
             const double regionLen = (double)(sEnd - sStart);
@@ -522,15 +520,6 @@ public:
                         ++envSamplePosition;
                     }
 
-                    // Debug: print envelope state ~once per second.
-                    if (++debugEnvCounter >= 44100)
-                    {
-                        debugEnvCounter = 0;
-                        DBG("[ADSR-MANUAL] envPos=" + juce::String(envSamplePosition)
-                            + " gain=" + juce::String(env, 4)
-                            + " inRelease=" + juce::String((int)inRelease)
-                            + " relPos=" + juce::String(releasePosition));
-                    }
                 }
                 else
                 {
@@ -572,17 +561,10 @@ public:
                         {
                             // Fix 4: Find zero crossing near End marker for cleanest transition.
                             const juce::int64 zcEnd = findZeroCrossing(sEnd - 1, 512);
-                            if (zcEnd != sEnd - 1)
-                                printf("[ZERO-CROSS] Found zero crossing at offset %lld samples from end marker\n",
-                                       (long long)(zcEnd - (sEnd - 1)));
-
                             sourceSamplePosition = (double)zcEnd;
                             playDirectionInternal = -1;
                             playDirectionAtomic.store(-1);
-                            // Fix 1: Trigger crossfade centered on the zero crossing position.
                             triggerBounceXfade();
-                            printf("[BOUNCE-XFADE] Direction fwd->rev at sample %lld — applying %d sample crossfade\n",
-                                   (long long)zcEnd, kXfadeSamples);
                             if (customAdsr && noteIsHeld) envSamplePosition = 0;
                         }
                         else
@@ -599,17 +581,10 @@ public:
                         {
                             // Fix 4: Find zero crossing near Start marker for cleanest transition.
                             const juce::int64 zcStart = findZeroCrossing(sStart, 512);
-                            if (zcStart != sStart)
-                                printf("[ZERO-CROSS] Found zero crossing at offset %lld samples from start marker\n",
-                                       (long long)(zcStart - sStart));
-
                             sourceSamplePosition = (double)zcStart;
                             playDirectionInternal = 1;
                             playDirectionAtomic.store(1);
-                            // Fix 1: Trigger crossfade centered on the zero crossing position.
                             triggerBounceXfade();
-                            printf("[BOUNCE-XFADE] Direction rev->fwd at sample %lld — applying %d sample crossfade\n",
-                                   (long long)zcStart, kXfadeSamples);
                             if (customAdsr && noteIsHeld) envSamplePosition = 0;
                         }
                         else
@@ -692,9 +667,12 @@ public:
     }
 
 private:
-    double basePitchRatio = 0.0;       // MIDI transpose only — set in startNote, never changes
-    double pitchRatio = 0.0;           // basePitchRatio * pow(2, offset/12) — updated per block (target)
-    double smoothedPitchRatio = 0.0;   // exponential IIR toward pitchRatio — 10ms ramp, no click on pitch change
+    double basePitchRatio    = 0.0;    // MIDI transpose only — set in startNote, never changes
+    double pitchRatio        = 0.0;    // basePitchRatio * pow(2, offset/12) — updated per block (target)
+    double smoothedPitchRatio= 0.0;    // exponential IIR toward pitchRatio — 10ms ramp, no click on pitch change
+    // Exponential IIR coefficient for pitch smoothing. Cached at startNote to avoid std::exp each block.
+    // Recomputed in startNote(); device SR never changes mid-note so this is always current.
+    double pitchSmoothCoeff  = 0.0;
     double sourceSamplePosition = 0.0;
     float  lgain = 0.0f, rgain = 0.0f;
     juce::ADSR adsr;
@@ -715,7 +693,6 @@ private:
     float sustainLevel      = 1.0f;
     bool  inRelease         = false;
     int   releasePosition   = -1;  // -1 = not in release; >=0 = samples elapsed in release phase
-    int   debugEnvCounter   = 0;   // throttles debug prints to ~1 per second
 
     // ── Micro crossfade for click-free bounce / loop-wrap / reverse transitions ──
     // Fix 1 (bounce), Fix 2 (reverse start/stop), Fix 3 (loop wrap).

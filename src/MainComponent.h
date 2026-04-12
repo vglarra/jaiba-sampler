@@ -404,9 +404,11 @@ private:
     // Reset copies these directly to eqCoeffDB with no calculation — nanoseconds.
     EqCoeffDoubleBuffer::Coeffs defaultFlatCoeffs[3];
 
-    // Timing: set to ms timestamp when Reset fires; audio thread reads it and prints
-    // round-trip latency on the first block that picks up new coefficients, then clears.
-    std::atomic<juce::int64> eqResetRequestedMs { 0 };
+    // Set to ms timestamp when Reset fires (message thread).
+    // Audio thread reads it and stores elapsed ms into eqResetElapsedMs, then clears both.
+    // CPU timer reads eqResetElapsedMs from the message thread and prints it — no printf in audio thread.
+    std::atomic<juce::int64> eqResetRequestedMs  { 0 };
+    std::atomic<juce::int64> eqResetElapsedMs    { -1 };  // -1 = no pending print
 
     // Per-channel filter state — audio thread only, no locking needed.
     double eqZ1[3][2] {};  // [band][channel]
@@ -686,6 +688,13 @@ private:
         MainComponent& owner;
     };
     LoopSaveTimer loopSaveTimer { *this };
+
+    // MIDI-to-audio latency measurement.
+    // Written by MIDI callback thread on noteOn; read+cleared by getNextAudioBlock once per note.
+    std::atomic<juce::int64> midiNoteOnTicks { 0 };
+    // Stores the last measured MIDI-to-audio latency in microseconds (written by audio thread).
+    // Read by the CPU timer on the message thread and printed — no printf in audio thread.
+    std::atomic<juce::int64> lastMidiLatencyUs { -1 };
 
     // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
     juce::int64 navStartTimeMs = 0;

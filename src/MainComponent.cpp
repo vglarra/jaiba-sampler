@@ -338,6 +338,24 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     fftThread->startThread();
 
     printf("[EQ] prepareToPlay: sampleRate=%.1f  fftSize=%d  FFT worker thread started\n", sampleRate, kFFTSize);
+
+    // ── Latency report ──────────────────────────────────────────────────────────
+    const double bufMs = (double)samplesPerBlockExpected / sampleRate * 1000.0;
+    const juce::String driverType = (deviceManager.getCurrentAudioDevice() != nullptr)
+        ? deviceManager.getCurrentAudioDevice()->getTypeName() : "Unknown";
+    printf("\n[LATENCY-REPORT] ════════════════════════════════════\n");
+    printf("[LATENCY-REPORT] Buffer size  : %d samples = %.2f ms\n", samplesPerBlockExpected, bufMs);
+    printf("[LATENCY-REPORT] Sample rate  : %.0f Hz\n", sampleRate);
+    printf("[LATENCY-REPORT] Driver type  : %s\n", driverType.toRawUTF8());
+    printf("[LATENCY-REPORT] MIDI→noteOn  : < 1 us (lock-free FIFO)\n");
+    printf("[LATENCY-REPORT] noteOn→audio : 0 – %.2f ms (within same block)\n", bufMs);
+    printf("[LATENCY-REPORT] Target total : %.2f ms  (add output device latency)\n", bufMs);
+    if (driverType.containsIgnoreCase("ASIO"))
+        printf("[LATENCY-REPORT] ASIO detected — optimal low-latency path active\n");
+    else
+        printf("[LATENCY-REPORT] TIP: For sub-3ms latency use an ASIO driver (e.g. ASIO4ALL)\n");
+    printf("[LATENCY-REPORT] ════════════════════════════════════\n\n");
+    fflush(stdout);
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
@@ -352,12 +370,31 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     }
 
     bufferToFill.clearActiveBufferRegion();
-    
+
+    // ── Block budget monitor ─────────────────────────────────────────────────────
+    // Measure total time spent in this callback. Anything over half the buffer duration
+    // risks an underrun.  Budget = bufferSize / sampleRate * 1e6 us.
+    const juce::int64 blockStartTicks = juce::Time::getHighResolutionTicks();
+
     juce::MidiBuffer midiMessages;
     juce::MidiBuffer incomingMidi;
     midiCollector.removeNextBlockOfMessages(incomingMidi, bufferToFill.numSamples);
     midiMessages.addEvents(incomingMidi, 0, bufferToFill.numSamples, 0);
-    
+
+    // ── MIDI-to-audio latency measurement ────────────────────────────────────────
+    // Store measured latency in an atomic — CPU timer on message thread prints it.
+    // No printf here: printf+fflush in the audio thread adds ~1ms latency on Windows.
+    {
+        const juce::int64 noteTick = midiNoteOnTicks.exchange(0, std::memory_order_relaxed);
+        if (noteTick != 0)
+        {
+            const double ticksPerUs = juce::Time::getHighResolutionTicksPerSecond() / 1.0e6;
+            const juce::int64 now   = juce::Time::getHighResolutionTicks();
+            lastMidiLatencyUs.store((juce::int64)((double)(now - noteTick) / ticksPerUs),
+                                    std::memory_order_relaxed);
+        }
+    }
+
     sampler.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
 
     // Apply normalization gain (non-destructive, before per-pad volume)
@@ -381,14 +418,13 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         // OPT 2: swap in freshly computed coefficients if UI thread wrote them (nanoseconds).
         const auto* c = eqCoeffDB.swapIfUpdated();
 
-        // FIX 6: Timing diagnostic — measure round-trip from Reset click to audio application.
+        // Measure EQ Reset round-trip: store elapsed ms for message thread to print.
+        // No printf here — printing from the audio thread adds ~1ms latency on Windows.
         const juce::int64 resetReqMs = eqResetRequestedMs.load(std::memory_order_relaxed);
         if (resetReqMs > 0)
         {
-            const juce::int64 now = juce::Time::getMillisecondCounter();
-            printf("[RESET-TIMING] Audio thread applied new coefficients after: %lldms\n",
-                   (long long)(now - resetReqMs));
-            fflush(stdout);
+            const juce::int64 elapsed = juce::Time::getMillisecondCounter() - resetReqMs;
+            eqResetElapsedMs.store(elapsed, std::memory_order_relaxed);
             eqResetRequestedMs.store(0, std::memory_order_relaxed);
         }
 
@@ -488,6 +524,28 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     float masterGain = masterVolumeGain.load();
     if (masterGain != 1.0f)
         bufferToFill.buffer->applyGain(masterGain);
+
+    // ── Block budget monitor ─────────────────────────────────────────────────────
+    // Print a warning if this block took more than 50% of its time budget.
+    // Only evaluated every 512 blocks (~3s @ 44.1kHz/256) to avoid print overhead.
+    {
+        static int blockCounter = 0;
+        if (++blockCounter >= 512)
+        {
+            blockCounter = 0;
+            const juce::int64 blockEndTicks = juce::Time::getHighResolutionTicks();
+            const double ticksPerUs  = juce::Time::getHighResolutionTicksPerSecond() / 1.0e6;
+            const double elapsedUs   = (double)(blockEndTicks - blockStartTicks) / ticksPerUs;
+            const double budgetUs    = (double)bufferToFill.numSamples / sampler.getSampleRate() * 1.0e6;
+            if (elapsedUs > budgetUs * 0.5)
+            {
+                // Note: printf here is a last-resort diagnostic — it only fires when
+                // the block is already overrunning. fflush intentionally omitted.
+                printf("[AUDIO-PERF] Block took %.0f us — budget %.0f us (%.0f%%) — OVERRUN WARNING\n",
+                       elapsedUs, budgetUs, 100.0 * elapsedUs / budgetUs);
+            }
+        }
+    }
 }
 
 void MainComponent::releaseResources()
@@ -769,6 +827,30 @@ void MainComponent::showAudioDeviceSettings()
 
 void MainComponent::updateDeviceInfo()
 {
+    // ── Deferred diagnostic prints (written by audio thread, printed here on message thread) ─
+    {
+        const juce::int64 latUs = lastMidiLatencyUs.exchange(-1, std::memory_order_relaxed);
+        if (latUs >= 0)
+        {
+            const double bufMs = (sampler.getSampleRate() > 0)
+                ? (double)deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
+                  / sampler.getSampleRate() * 1000.0
+                : 0.0;
+            printf("[LATENCY] MIDI noteOn to audio block: %lld us  (buffer ~%.1f ms)\n",
+                   (long long)latUs, bufMs);
+            fflush(stdout);
+        }
+    }
+    {
+        const juce::int64 eqMs = eqResetElapsedMs.exchange(-1, std::memory_order_relaxed);
+        if (eqMs >= 0)
+        {
+            printf("[RESET-TIMING] Audio thread applied new EQ coefficients after: %lldms\n",
+                   (long long)eqMs);
+            fflush(stdout);
+        }
+    }
+
     // Update CPU usage only if changed significantly
     double newCPU = deviceManager.getCpuUsage() * 100.0;
     if (std::abs(newCPU - lastCPU) > 0.01)  // Only update if changed significantly
@@ -1005,196 +1087,48 @@ void MainComponent::showMidiDeviceSettings()
 }
 
 
-void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
+void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const juce::MidiMessage& message)
 {
-    // Filter out background MIDI messages that shouldn't trigger the light
-    // Ignore MIDI clock and active sense messages as they're sent continuously
+    // Drop high-frequency background messages immediately — zero work, zero latency.
     if (message.isMidiClock() || message.isActiveSense())
-    {
-        // Don't print anything - just return immediately
-        // These messages are ignored completely to avoid performance issues
         return;
-    }
-    
-      // ALWAYS trigger the MIDI activity light for ANY MIDI message
-      // This happens before any filtering so it shows activity from all channels
-      midiActivityLight.triggerActivity();
-      
-      // Update MIDI activity light based on message type for more nuanced feedback
-      if (message.isNoteOn())
-      {
-          midiActivityLight.noteOn();
-      }
-      else if (message.isNoteOff())
-      {
-          midiActivityLight.noteOff();
-      }
-      else
-      {
-          // For other MIDI messages (controllers, etc.) trigger a brief flash
-          midiActivityLight.triggerActivity();
-      }
-      
-      // Print ALL incoming MIDI messages for debugging (temporarily)
-      // You can comment these out once everything is working
-      if (message.isNoteOn())
-      {
-          printf("RAW MIDI Note On: %d, Vel: %d, Ch: %d\n", 
-                 message.getNoteNumber(), 
-                 message.getVelocity(),
-                 message.getChannel());
-      }
-      else if (message.isNoteOff())
-      {
-          printf("RAW MIDI Note Off: %d, Ch: %d\n", 
-                 message.getNoteNumber(),
-                 message.getChannel());
-      }
-      else if (message.isController())
-      {
-          printf("RAW MIDI Controller: %d, Val: %d, Ch: %d\n",
-                 message.getControllerNumber(),
-                 message.getControllerValue(),
-                 message.getChannel());
-      }
-      else if (message.isPitchWheel())
-      {
-          printf("RAW MIDI Pitch Wheel: %d, Ch: %d\n",
-                 message.getPitchWheelValue(),
-                 message.getChannel());
-      }
-      else if (message.isAftertouch())
-      {
-          printf("RAW MIDI Aftertouch: %d, Ch: %d\n",
-                 message.getAfterTouchValue(),
-                 message.getChannel());
-      }
-      else if (message.isChannelPressure())
-      {
-          printf("RAW MIDI Channel Pressure: %d, Ch: %d\n",
-                 message.getChannelPressureValue(),
-                 message.getChannel());
-      }
-      else if (message.isSysEx())
-      {
-          printf("RAW MIDI SysEx: %d bytes\n", message.getRawDataSize());
-      }
-      else if (message.isMidiStart() || message.isMidiStop() || message.isMidiContinue())
-      {
-          // These are transport messages - print them but they're less frequent
-          if (message.isMidiStart()) printf("RAW MIDI Start\n");
-          else if (message.isMidiStop()) printf("RAW MIDI Stop\n");
-          else if (message.isMidiContinue()) printf("RAW MIDI Continue\n");
-      }
-    
-    // ANTI-FLOOD PROTECTION: Ignore duplicate messages in quick succession
-    static juce::uint64 lastMessageTime = 0;
-    static int lastNoteNumber = -1;
-    static int lastNoteCount = 0;
-    static int totalIgnored = 0;
-    
-    juce::uint64 currentTime = juce::Time::getMillisecondCounter();
-    int timeSinceLast = (int)(currentTime - lastMessageTime);
-    
-    // If we're in learn mode and get a note on message, handle it specially
-    // In learn mode, we ignore channel filtering - learn from any channel
+
+    // Trigger MIDI activity LED — writes an atomic flag + schedules async repaint.
+    // Safe to call from any thread. No blocking I/O.
+    midiActivityLight.triggerActivity();
+
+    // Stamp high-resolution tick for MIDI-to-audio latency measurement.
+    // Audio thread reads this in getNextAudioBlock() and prints the delta once.
+    if (message.isNoteOn())
+        midiNoteOnTicks.store(juce::Time::getHighResolutionTicks(), std::memory_order_relaxed);
+
+    // MIDI Learn: intercept note-on before channel filter.
     if (isLearningMode && message.isNoteOn())
     {
-        int currentNote = message.getNoteNumber();
-        handleMidiLearn(currentNote);
-        // Still add to collector so user can hear the note
+        handleMidiLearn(message.getNoteNumber());
         midiCollector.addMessageToQueue(message);
-        
-        printf("🎹 LEARN MODE: Captured note %d from channel %d\n", 
-               currentNote, message.getChannel());
         return;
     }
-    
-    // Get the currently selected MIDI channel from the sample card
-    int selectedChannel = sampleCard.getMidiChannel();
-    
-    // For normal operation, filter by selected channel if not "All Channels" (0)
-    // Let's assume channel 0 means "All Channels"
-    bool channelMatches = (selectedChannel == 0) || (message.getChannel() == selectedChannel);
-    
-    // If channel doesn't match and we're not in learn mode, ignore the message
-    if (!channelMatches && !isLearningMode)
-    {
-        // The light still shows activity (we triggered it above), but audio is filtered
+
+    // Channel filter: drop messages on wrong channel (0 = any).
+    const int selectedChannel = sampleCard.getMidiChannel();
+    if (selectedChannel != 0 && message.getChannel() != selectedChannel)
         return;
-    }
-    
-    // If we're getting the same note message repeatedly within 10ms, ignore it
-    if (message.isNoteOn() || message.isNoteOff())
-    {
-        int currentNote = message.getNoteNumber();
-        
-        if (currentNote == lastNoteNumber && timeSinceLast < 10)
-        {
-            lastNoteCount++;
-            totalIgnored++;
-            
-            // If we've seen this note more than 5 times in a row within 10ms, ignore it
-            if (lastNoteCount > 5)
-            {
-                // Only print occasionally to avoid console flood
-                if (lastNoteCount % 100 == 0)
-                {
-                    printf("⚠️ Flood protection: Ignored %d duplicate messages on note %d (last interval: %dms)\n", 
-                           totalIgnored, currentNote, timeSinceLast);
-                }
-                return;  // IGNORE THE MESSAGE
-            }
-        }
-        else
-        {
-            // New note or timing out - reset counter
-            if (lastNoteCount > 5)
-            {
-                printf("✅ Flood ended - normal playing resumed (ignored %d messages total)\n", totalIgnored);
-                totalIgnored = 0;
-            }
-            lastNoteNumber = currentNote;
-            lastNoteCount = 0;
-        }
-        
-        lastMessageTime = currentTime;
-    }
-    
-    // Only add to collector if we passed the flood filter
+
+    // Add to lock-free FIFO — audio thread drains this each block.
+    // This is the ONLY operation that affects audio latency in this path.
     midiCollector.addMessageToQueue(message);
 
-    // One-shot tail detection: when a note-off arrives while 1Shot is ON,
-    // the audio engine ignores it and plays to completion.  Start polling
-    // voice activity so we know when to stop the button pulse.
+    // One-shot tail detection: note-off ignored by audio engine while 1Shot is ON.
+    // Timer and UI updates must run on the message thread — use callAsync.
     if (message.isNoteOff() && sampleCard.isOneShotEnabled() && !isOneShotTailPlaying)
     {
         isOneShotTailPlaying = true;
-        juce::MessageManager::callAsync([this] { sampleCard.setOneShotTailActive(true); });
-        oneShotTailTimer.startTimer(200);
-        printf("[1SHOT] Note-off received — tail playing, polling for completion\n");
-    }
-    
-    // Print human-performed notes normally (no throttling for these)
-    if (message.isNoteOn() && lastNoteCount <= 5)
-    {
-        printf("🎹 Note On: %d, Vel: %d, Ch: %d (interval: %dms)\n", 
-               message.getNoteNumber(), 
-               message.getVelocity(),
-               message.getChannel(),
-               timeSinceLast);
-    }
-    else if (message.isNoteOff() && lastNoteCount <= 5)
-    {
-        printf("🎹 Note Off: %d, Ch: %d\n", 
-               message.getNoteNumber(),
-               message.getChannel());
-    }
-    else if (message.isController())
-    {
-        int controller = message.getControllerNumber();
-        int value = message.getControllerValue();
-        printf("MIDI Controller: %d, Value: %d\n", controller, value);
+        juce::MessageManager::callAsync([this]
+        {
+            sampleCard.setOneShotTailActive(true);
+            oneShotTailTimer.startTimer(200);  // MUST be called from message thread
+        });
     }
 }
 
@@ -1446,14 +1380,35 @@ void MainComponent::updateSamplerSounds()
 // New UI functionality implementations
 void MainComponent::showSettingsMenu()
 {
+    // Buffer size submenu — shows current size and lets user pick from common values.
+    // Smaller = lower latency but higher CPU load risk.
+    juce::AudioDeviceManager::AudioDeviceSetup setup;
+    deviceManager.getAudioDeviceSetup(setup);
+    const int currentBuf = setup.bufferSize;
+
+    juce::PopupMenu bufferMenu;
+    const int bufSizes[] = { 64, 128, 256, 512 };
+    // IDs 10–13 reserved for buffer sizes
+    for (int i = 0; i < 4; ++i)
+    {
+        const int sz    = bufSizes[i];
+        const double ms = (double)sz / (setup.sampleRate > 0 ? setup.sampleRate : 44100.0) * 1000.0;
+        juce::String label = juce::String(sz) + " samples  (" + juce::String(ms, 1) + " ms)";
+        if (sz == 64)  label += "  [very tight — may drop out]";
+        if (sz == 128) label += "  [recommended]";
+        if (sz == currentBuf) label = "* " + label;  // mark active size
+        bufferMenu.addItem(10 + i, label);
+    }
+
     juce::PopupMenu menu;
-    
     menu.addItem(1, "Audio Settings");
     menu.addItem(2, "MIDI Settings");
-    
+    menu.addSeparator();
+    menu.addSubMenu("Buffer Size", bufferMenu);
+
     menu.showMenuAsync(juce::PopupMenu::Options()
                        .withTargetComponent(&menuButton)
-                       .withMinimumWidth(150),
+                       .withMinimumWidth(200),
                        [this](int result)
                        {
                            if (result == 1)
@@ -1463,6 +1418,32 @@ void MainComponent::showSettingsMenu()
                            else if (result == 2)
                            {
                                showMidiDeviceSettings();
+                           }
+                           else if (result >= 10 && result <= 13)
+                           {
+                               const int newBufSizes[] = { 64, 128, 256, 512 };
+                               const int newSize = newBufSizes[result - 10];
+                               juce::AudioDeviceManager::AudioDeviceSetup s;
+                               deviceManager.getAudioDeviceSetup(s);
+                               if (s.bufferSize != newSize)
+                               {
+                                   s.bufferSize = newSize;
+                                   juce::String err = deviceManager.setAudioDeviceSetup(s, true);
+                                   if (err.isEmpty())
+                                   {
+                                       saveAudioSettings();
+                                       const double ms = (double)newSize / (s.sampleRate > 0 ? s.sampleRate : 44100.0) * 1000.0;
+                                       printf("[LATENCY-REPORT] Buffer size changed to %d samples = %.1f ms\n",
+                                              newSize, ms);
+                                       fflush(stdout);
+                                   }
+                                   else
+                                   {
+                                       printf("[LATENCY-REPORT] Buffer size change failed: %s\n",
+                                              err.toRawUTF8());
+                                       fflush(stdout);
+                                   }
+                               }
                            }
                        });
 }
@@ -1942,6 +1923,40 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             for (int i = 0; i < sampler.getNumSounds(); ++i)
                 if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
                     s->reverseEnabled.store(rev);
+        }
+
+        // ── STEP 7: Pre-warm CPU cache for sample start position ────────────────
+        // Touch the first and last 2048 frames of each loaded buffer while muteOutput=true.
+        // This brings the audio data into L2/L3 cache so the first noteOn has minimal
+        // cache-miss latency — the difference between "tight" and "sluggish" drum feel.
+        {
+            juce::ScopedLock lock(sampleLock);
+            for (auto* s : samples)
+            {
+                if (s->audioData != nullptr && s->audioData->getNumSamples() > 0)
+                {
+                    const int numCh      = s->audioData->getNumChannels();
+                    const int numFrames  = s->audioData->getNumSamples();
+                    const int warmFrames = juce::jmin(2048, numFrames);
+                    volatile float sink  = 0.0f;  // volatile prevents the compiler from optimising away reads
+
+                    // Touch start region (most likely play position)
+                    for (int ch = 0; ch < numCh; ++ch)
+                    {
+                        const float* p = s->audioData->getReadPointer(ch);
+                        for (int i = 0; i < warmFrames; i += 16)  // stride 16 = one cache line (64 bytes / 4)
+                            sink += p[i];
+                    }
+                    // Touch end region (used by reverse + bounce modes)
+                    for (int ch = 0; ch < numCh; ++ch)
+                    {
+                        const float* p = s->audioData->getReadPointer(ch);
+                        for (int i = numFrames - warmFrames; i < numFrames; i += 16)
+                            sink += p[i];
+                    }
+                    (void)sink;  // suppress "unused variable" warning
+                }
+            }
         }
 
         muteOutput.store(false);

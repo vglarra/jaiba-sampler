@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <atomic>
 
 class MidiActivityLight : public juce::Component,
                           private juce::Timer
@@ -60,29 +61,25 @@ public:
     
     void triggerActivity()
     {
-        isActive = true;
-        lastActivityTime = juce::Time::getMillisecondCounter();
-        
-        // Always repaint on the message thread
+        // isActive is std::atomic — safe to write from any thread (MIDI callback thread).
+        isActive.store(true);
+        lastActivityTime.store(juce::Time::getMillisecondCounter());
         juce::MessageManager::callAsync([this] { repaint(); });
     }
     
 private:
     void timerCallback() override
     {
-        // Check if we've been inactive for more than 50ms
         auto now = juce::Time::getMillisecondCounter();
-        auto timeSinceLastActivity = now - lastActivityTime;
-        
-        // Only turn off if we've been inactive and we're currently on
-        if (isActive && timeSinceLastActivity > 50)
+        if (isActive.load() && (now - lastActivityTime.load()) > 50)
         {
-            isActive = false;
+            isActive.store(false);
             juce::MessageManager::callAsync([this] { repaint(); });
         }
     }
-    
-    bool isActive = false;
-    juce::uint64 lastActivityTime = 0;
+
+    // Both written from MIDI callback thread, read from message thread timer — must be atomic.
+    std::atomic<bool>          isActive        { false };
+    std::atomic<juce::uint64>  lastActivityTime { 0 };
 };
 
