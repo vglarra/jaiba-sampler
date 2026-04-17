@@ -14,6 +14,7 @@
 #include "ConfigurationManager.h"
 #include "MidiActivityLight.h"
 #include "LoopingSampler.h"
+#include "PadManager.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -47,35 +48,35 @@ public:
 
     //==============================================================================
     // SampleListModel access methods
-    int getSamplesCount() const { return samples.size(); }
-    juce::String getSampleName(int index) const 
-    { 
-        if (index >= 0 && index < samples.size())
-            return samples[index]->name;
+    int getSamplesCount() const { return pad().samples.size(); }
+    juce::String getSampleName(int index) const
+    {
+        if (index >= 0 && index < pad().samples.size())
+            return pad().samples[index]->name;
         return juce::String();
     }
     int getSampleLowNote(int index) const
     {
-        if (index >= 0 && index < samples.size())
-            return samples[index]->lowNote;
+        if (index >= 0 && index < pad().samples.size())
+            return pad().samples[index]->lowNote;
         return 0;
     }
     int getSampleHighNote(int index) const
     {
-        if (index >= 0 && index < samples.size())
-            return samples[index]->highNote;
+        if (index >= 0 && index < pad().samples.size())
+            return pad().samples[index]->highNote;
         return 0;
     }
     int getSampleRootNote(int index) const
     {
-        if (index >= 0 && index < samples.size())
-            return samples[index]->rootNote;
+        if (index >= 0 && index < pad().samples.size())
+            return pad().samples[index]->rootNote;
         return 0;
     }
-    int getSelectedSampleIndex() const { return selectedSampleIndex; }
-    void setSelectedSampleIndex(int index) 
-    { 
-        selectedSampleIndex = index; 
+    int getSelectedSampleIndex() const { return pad().selectedSampleIndex; }
+    void setSelectedSampleIndex(int index)
+    {
+        pad().selectedSampleIndex = index;
         updateMappingUI();
     }
 
@@ -172,8 +173,11 @@ private:
     void performTrimAsync();
 
     //==============================================================================
-    // Normalize — compute peak-based gain from audio buffer within start/end range.
-    float computeNormGainFromAudio(float targetDb) const;
+    // Normalize — delegates to pad().computeNormGainFromAudio()
+    float computeNormGainFromAudio(float targetDb) const
+    {
+        return pad().computeNormGainFromAudio(targetDb);
+    }
 
     //==============================================================================
     // Playhead — called 60fps from SampleCard's PlayheadTimer.
@@ -181,17 +185,7 @@ private:
     // returns normalized [0,1] position or -1.0 when no voice is active.
     double getPlayheadPositionNormalized()
     {
-        for (int i = 0; i < sampler.getNumVoices(); ++i)
-        {
-            if (auto* voice = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
-            {
-                const juce::int64 pos   = voice->playheadPositionAtomic.load();
-                const juce::int64 total = voice->totalSamplesAtomic.load();
-                if (pos >= 0 && total > 0)
-                    return (double)pos / (double)total;
-            }
-        }
-        return -1.0;
+        return pad().getPlayheadPositionNormalized();
     }
 
     //==============================================================================
@@ -333,10 +327,19 @@ private:
     
     //==============================================================================
     // Audio components
-    juce::Synthesiser sampler;
     juce::AudioFormatManager formatManager;
     juce::MidiMessageCollector midiCollector;
     juce::ThreadPool backgroundThreads{1};  // 1 thread — prevents stale loads finishing after newer ones
+
+    // Phase 2: PadManager owns all audio processing for all pads.
+    // padManager must be declared AFTER formatManager (PadManager ctor takes a ref to it).
+    PadManager padManager { formatManager };
+
+    // Convenience accessor — returns engine for pad 0 (the only active pad in the current build).
+    // All existing MainComponent code that previously accessed sampler/samples/eqCoeffDB etc.
+    // now goes through this accessor, keeping changes minimal and grep-able.
+    PadAudioEngine& pad() { return padManager.getEngine(0); }
+    const PadAudioEngine& pad() const { return padManager.getEngine(0); }
     
     //==============================================================================
     // MIDI components
@@ -349,139 +352,9 @@ private:
     bool isLearningMode = false;
     
     //==============================================================================
-    // Volume
-    std::atomic<float> volumeGain { 1.0f };
-    std::atomic<float> masterVolumeGain { 0.7f };
-    std::atomic<float> normGain { 1.0f };   // non-destructive normalize multiplier (before vol knob)
-    std::atomic<bool>  loopEnabled { false };
-    // Set true during sample-change to silence the audio thread immediately.
-    // Audio thread checks this at the top of getNextAudioBlock and returns a zeroed buffer.
-    std::atomic<bool>  muteOutput { false };
-
-    //==============================================================================
-    // EQ — three-band parametric biquad filters
-    // OPT 2: Coefficients are computed on the UI thread and stored in a lock-free
-    // double buffer.  Audio thread swaps buffers in nanoseconds — zero coefficient
-    // math on the audio thread.
-    struct EqCoeffDoubleBuffer
-    {
-        struct Coeffs { double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0; };
-
-        Coeffs buf[2][3] {};           // [ping-pong index][band 0-2]
-        std::atomic<bool> updated { false };
-        int front = 0;                 // audio-thread owned; never accessed from UI thread
-
-        // UI thread: write all 3 bands to back buffer, then set flag.
-        void writeFromUI(const Coeffs newCoeffs[3]) noexcept
-        {
-            const int back = 1 - front;
-            for (int i = 0; i < 3; ++i) buf[back][i] = newCoeffs[i];
-            updated.store(true, std::memory_order_release);
-        }
-
-        // Audio thread: swap if updated; return pointer to current front band array.
-        const Coeffs* swapIfUpdated() noexcept
-        {
-            if (updated.load(std::memory_order_acquire))
-            {
-                front = 1 - front;
-                updated.store(false, std::memory_order_relaxed);
-            }
-            return buf[front];
-        }
-
-        EqCoeffDoubleBuffer() = default;
-        EqCoeffDoubleBuffer(const EqCoeffDoubleBuffer&) = delete;
-        EqCoeffDoubleBuffer& operator=(const EqCoeffDoubleBuffer&) = delete;
-    };
-
-    EqCoeffDoubleBuffer  eqCoeffDB;
-    std::atomic<bool>    eqActive   { false };
-    int                  eqFilterModes[3] = { 2, 2, 2 };  // message-thread only; 0-5 per band
-
-    // FIX 1: Pre-computed flat EQ coefficients (100/500/8kHz, 0dB, Bell, Q=1).
-    // Initialized once in prepareToPlay() after sample rate is known.
-    // Reset copies these directly to eqCoeffDB with no calculation — nanoseconds.
-    EqCoeffDoubleBuffer::Coeffs defaultFlatCoeffs[3];
-
-    // Set to ms timestamp when Reset fires (message thread).
-    // Audio thread reads it and stores elapsed ms into eqResetElapsedMs, then clears both.
-    // CPU timer reads eqResetElapsedMs from the message thread and prints it — no printf in audio thread.
-    std::atomic<juce::int64> eqResetRequestedMs  { 0 };
-    std::atomic<juce::int64> eqResetElapsedMs    { -1 };  // -1 = no pending print
-
-    // Per-channel filter state — audio thread only, no locking needed.
-    double eqZ1[3][2] {};  // [band][channel]
-    double eqZ2[3][2] {};
-
-    // Resets filter state (called from prepareToPlay and on EQ toggle).
-    // Safe to call from message thread only when muteOutput=true (audio thread not running).
-    void resetEqState()
-    {
-        for (int b = 0; b < 3; ++b)
-            for (int ch = 0; ch < 2; ++ch)
-                eqZ1[b][ch] = eqZ2[b][ch] = 0.0;
-    }
-
-    // OPT 2: Computes biquad coefficients for one band on the UI thread and returns them.
-    // Caller assembles all 3 bands and calls eqCoeffDB.writeFromUI().
-    // mode: 0=LowCut, 1=LowShelf, 2=Bell, 3=Notch, 4=HighShelf, 5=HighCut
-    EqCoeffDoubleBuffer::Coeffs computeEqCoeffs(float freqHz, float gainDb, float q, int filterMode, double sampleRate);
-
-    //==============================================================================
-    // FFT spectrum analyzer — lock-free double buffer
-    static constexpr int kFFTOrder  = 11;               // 2^11 = 2048
-    static constexpr int kFFTSize   = 1 << kFFTOrder;   // 2048
-    static constexpr int kSpecBins  = kFFTSize / 2;     // 1024 output bins
-
-    std::unique_ptr<juce::dsp::FFT> fft;                // initialized in prepareToPlay
-
-    // OPT 1: Lock-free circular buffer — audio thread writes mono samples here (< 1us);
-    // FFT worker thread reads and processes without touching the audio thread.
-    juce::AbstractFifo fftAbstractFifo { kFFTSize * 2 };
-    float              fftCircularBuffer[kFFTSize * 2] {};
-
-    // Hann window applied before FFT to reduce spectral leakage.
-    float   fftWindow[kFFTSize] {};
-
-    // Scratch buffer — used only by the FFT worker thread (never touched by audio thread).
-    float   fftScratch[kFFTSize * 2] {};
-
-    // Double-buffered magnitude spectrum (after smoothing).
-    // FFT worker thread writes to buffer[1 - specFront]; UI reads from buffer[specFront].
-    float             specBuffers[2][kSpecBins] {};
-    std::atomic<int>  specFront     { 0 };
-    std::atomic<bool> hasNewFFTData { false };  // set by FFT thread, cleared by UI timer
-
-    // Exponential smoothing factors for spectrum display.
-    static constexpr float kSpecSmoothUp   = 0.7f;   // fast attack
-    static constexpr float kSpecSmoothDown = 0.3f;   // slower decay
-
-    // OPT 1: Background FFT worker thread — wakes every 33ms, processes one FFT frame.
-    class FftWorkerThread : public juce::Thread
-    {
-    public:
-        FftWorkerThread(MainComponent& o) : juce::Thread("FFT Worker"), owner(o) {}
-        void run() override
-        {
-            while (!threadShouldExit())
-            {
-                wait(33);
-                if (!threadShouldExit())
-                    owner.processFftOnWorkerThread();
-            }
-        }
-    private:
-        MainComponent& owner;
-    };
-    std::unique_ptr<FftWorkerThread> fftThread;
-
-    // Called on the FFT worker thread — reads from fftCircularBuffer, runs FFT, updates specBuffers.
-    void processFftOnWorkerThread();
-
-    // Called by EQDisplay's getSpectrumCallback — copies front buffer to dest.
-    // Returns true if new FFT data was available (consumed), false if no update since last call.
-    bool getSpectrumSnapshot(float* dest, int numBins);
+    // Volume — master volume lives in PadManager; per-pad volume lives in PadAudioEngine.
+    // These thin wrappers keep the existing MainComponent callsites unchanged.
+    std::atomic<float> masterVolumeGain { 0.7f };  // mirrored to padManager for the knob callback
 
     //==============================================================================
     // Sine wave generation
@@ -490,37 +363,10 @@ private:
     double sineWaveFrequency = 440.0;
     float sineWaveAmplitude = 0.2f;
     
-    //==============================================================================
-    // Sample management for multi-sampling
-    struct MappedSample
-    {
-        juce::File file;
-        juce::String name;
-        int rootNote = 60;
-        int lowNote = 48;
-        int highNote = 60;
-        double attack = 0.1;
-        double release = 0.1;
-        bool isSelected = false;
-        int pitchOffset = 0;  // Add pitch offset per sample
-        double startPointSeconds = 0.0;  // Sample start point offset
-        double endPointSeconds   = -1.0; // Sample end point offset (-1 = full length)
-        
-        // Cached audio data — shared_ptr so LoopingSamplerSound can safely outlive a reload
-        std::shared_ptr<juce::AudioBuffer<float>> audioData;
-        double sampleRate = 0;
-        int numChannels = 0;
-        juce::int64 lengthInSamples = 0;
-        
-        // Add a flag to indicate if sample is loaded
-        bool isValid() const { return audioData != nullptr && audioData->getNumSamples() > 0; }
-        
-        ~MappedSample() = default;
-    };
-    
-    juce::OwnedArray<MappedSample> samples;
-    int selectedSampleIndex = -1;
-    juce::CriticalSection sampleLock;  // Thread safety for sample array access
+    // MappedSample is now PadAudioEngine::MappedSample.
+    // Use pad().samples, pad().selectedSampleIndex, pad().sampleLock throughout.
+    // This typedef keeps existing code in .cpp that uses MappedSample by name compiling.
+    using MappedSample = PadAudioEngine::MappedSample;
     
     //==============================================================================
     // Mapping UI components
@@ -689,12 +535,8 @@ private:
     };
     LoopSaveTimer loopSaveTimer { *this };
 
-    // MIDI-to-audio latency measurement.
-    // Written by MIDI callback thread on noteOn; read+cleared by getNextAudioBlock once per note.
-    std::atomic<juce::int64> midiNoteOnTicks { 0 };
-    // Stores the last measured MIDI-to-audio latency in microseconds (written by audio thread).
-    // Read by the CPU timer on the message thread and printed — no printf in audio thread.
-    std::atomic<juce::int64> lastMidiLatencyUs { -1 };
+    // MIDI-to-audio latency measurement atomics live in PadAudioEngine (pad().midiNoteOnTicks etc.)
+    // Thin accessors kept here so existing MainComponent.cpp references compile unchanged.
 
     // Timing: millisecond counter captured on Prev/Next press; printed when audio is ready.
     juce::int64 navStartTimeMs = 0;
@@ -769,7 +611,7 @@ private:
         }
         
         // Reset the collector with current sample rate (or default if not playing)
-        double sampleRate = sampler.getSampleRate();
+        double sampleRate = pad().getSampleRate();
         if (sampleRate <= 0)
             sampleRate = 44100.0; // Default if not set
             

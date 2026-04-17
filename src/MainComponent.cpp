@@ -34,14 +34,9 @@ MainComponent::MainComponent()
     setSize(900, 700);
     
     formatManager.registerBasicFormats();
-    
-    // Add looping sampler voices with note stealing enabled
-    for (int i = 0; i < 16; ++i)
-        sampler.addVoice(new LoopingSamplerVoice());
-    
-    // Enable note stealing for better voice management
-    sampler.setNoteStealingEnabled(true);
-    
+
+    // PadAudioEngine ctor already adds 16 LoopingSamplerVoice instances and enables note stealing.
+
     // Configure buttons
     menuButton.setButtonText("Menu");
     menuButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
@@ -70,8 +65,8 @@ MainComponent::MainComponent()
         sampleCard.setBaseTuningHz(newHz);
         // Propagate to all live sounds
         float ratio = (float)(newHz / 440.0);
-        for (int i = 0; i < sampler.getNumSounds(); ++i)
-            if (auto* snd = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+        for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+            if (auto* snd = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
                 snd->baseTuningRatioAtomic.store(ratio);
         // Save
         if (configManager != nullptr)
@@ -100,6 +95,7 @@ MainComponent::MainComponent()
     masterVolumeKnob.onValueChange = [this] {
         float v = (float)masterVolumeKnob.getValue();
         masterVolumeGain.store(v);
+        padManager.setMasterVolume(v);
         masterVolValueLabel.setText(juce::String(juce::roundToInt(v * 100)) + "%",
                                     juce::dontSendNotification);
         if (configManager != nullptr)
@@ -148,8 +144,8 @@ MainComponent::MainComponent()
       // Wire playhead position and direction — read 60fps from SampleCard's PlayheadTimer
       sampleCard.getPlayheadPosition = [this] { return getPlayheadPositionNormalized(); };
       sampleCard.getPlayheadDirection = [this] {
-          for (int i = 0; i < sampler.getNumVoices(); ++i)
-              if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
+          for (int i = 0; i < pad().getSynthesiser().getNumVoices(); ++i)
+              if (auto* v = dynamic_cast<LoopingSamplerVoice*>(pad().getSynthesiser().getVoice(i)))
                   if (v->playheadPositionAtomic.load() >= 0)
                       return v->playDirectionAtomic.load();
           return 1;
@@ -163,9 +159,9 @@ MainComponent::MainComponent()
           const juce::int64 t0 = juce::Time::getMillisecondCounter();
 
           // FIX 2: Copy pre-computed flat defaults directly to double buffer — nanoseconds.
-          eqCoeffDB.writeFromUI(defaultFlatCoeffs);
+          pad().eqCoeffDB.writeFromUI(pad().defaultFlatCoeffs);
           // Stamp the request time so the audio thread can print round-trip latency.
-          eqResetRequestedMs.store(t0, std::memory_order_relaxed);
+          pad().eqResetRequestedMs.store(t0, std::memory_order_relaxed);
 
           const juce::int64 tWrite = juce::Time::getMillisecondCounter();
           printf("[RESET-TIMING] coefficients written atomically: %lldms — no calculation\n",
@@ -255,27 +251,13 @@ MainComponent::~MainComponent()
     loopSaveTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
-    // OPT 1: Stop FFT worker thread before audio shutdown to prevent use-after-free
-    // on fft/fftCircularBuffer when the audio device is torn down.
-    if (fftThread != nullptr)
-    {
-        fftThread->stopThread(200);
-        fftThread.reset();
-    }
-
-    // Kill any active freeze/loop voices before audio shutdown
-    muteOutput.store(true);
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
-        {
-            s->freezeActive.store(false);
-            s->loopEnabled.store(false);
-        }
-    for (int i = 0; i < sampler.getNumVoices(); ++i)
-        if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
-            v->forceStop();
-    sampler.clearSounds();
-    sampler.allNotesOff(0, false);
+    // Kill any active freeze/loop voices before audio shutdown.
+    // PadAudioEngine owns the FFT worker thread — it will be stopped in its destructor.
+    pad().muteOutput.store(true);
+    pad().clearActiveSoundFlags();
+    pad().forceStopAllVoices();
+    pad().clearSoundsAndVoices();
+    pad().allNotesOff(0, false);
 
     // Shutdown save — flush current state to disk before the app closes.
     // Also covers the case where navSaveTimer was still pending (user closed the app
@@ -296,48 +278,19 @@ MainComponent::~MainComponent()
 //==============================================================================
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
-    sampler.setCurrentPlaybackSampleRate(sampleRate);
     midiCollector.reset(sampleRate);
 
-    // ── FFT + EQ initialization ───────────────────────────────────────────────────
-    // OPT 1: Stop FFT worker thread before recreating the FFT object to prevent
-    // use-after-free if prepareToPlay is called while the thread is running.
-    if (fftThread != nullptr)
-    {
-        fftThread->stopThread(200);
-        fftThread.reset();
-    }
-
-    fft = std::make_unique<juce::dsp::FFT>(kFFTOrder);
-
-    // Precompute Hann window — reduces spectral leakage.
-    for (int i = 0; i < kFFTSize; ++i)
-        fftWindow[i] = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * i / (kFFTSize - 1)));
-
-    // Reset filter state and circular buffer (fresh start).
-    resetEqState();
-    fftAbstractFifo.reset();
-
-    // FIX 1: Pre-compute flat EQ coefficients once — copied directly to double buffer on Reset.
-    defaultFlatCoeffs[0] = computeEqCoeffs(100.0f,  0.0f, 1.0f, 2, sampleRate);
-    defaultFlatCoeffs[1] = computeEqCoeffs(500.0f,  0.0f, 1.0f, 2, sampleRate);
-    defaultFlatCoeffs[2] = computeEqCoeffs(8000.0f, 0.0f, 1.0f, 2, sampleRate);
+    // Delegate all audio engine initialization (FFT, EQ, voices) to PadManager.
+    padManager.prepareToPlay(samplesPerBlockExpected, sampleRate);
     printf("[EQ-RESET] Default flat coefficients pre-computed at SR=%.0f\n", sampleRate);
-    std::fill(std::begin(fftCircularBuffer), std::end(fftCircularBuffer), 0.0f);
 
     // Inform EQDisplay of the current sample rate so biquad response rendering is correct.
     sampleCard.setEqSampleRate(sampleRate);
 
     // OPT 4: Wire spectrum callback — returns true only when new FFT data is ready.
     sampleCard.setEqSpectrumCallback([this](float* dest, int numBins) -> bool {
-        return getSpectrumSnapshot(dest, numBins);
+        return pad().getSpectrumSnapshot(dest, numBins);
     });
-
-    // OPT 1: Start FFT worker thread (wakes every 33ms — 30fps).
-    fftThread = std::make_unique<FftWorkerThread>(*this);
-    fftThread->startThread();
-
-    printf("[EQ] prepareToPlay: sampleRate=%.1f  fftSize=%d  FFT worker thread started\n", sampleRate, kFFTSize);
 
     // ── Latency report ──────────────────────────────────────────────────────────
     const double bufMs = (double)samplesPerBlockExpected / sampleRate * 1000.0;
@@ -363,7 +316,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     // muteOutput is set true by the message thread during sample-change to guarantee a
     // silent, zeroed buffer while the sampler is being rebuilt.  Checked atomically so
     // the audio thread sees it within one block (~6 ms) with no locks required.
-    if (muteOutput.load())
+    if (pad().muteOutput.load())
     {
         bufferToFill.clearActiveBufferRegion();
         return;
@@ -385,145 +338,44 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     // Store measured latency in an atomic — CPU timer on message thread prints it.
     // No printf here: printf+fflush in the audio thread adds ~1ms latency on Windows.
     {
-        const juce::int64 noteTick = midiNoteOnTicks.exchange(0, std::memory_order_relaxed);
+        const juce::int64 noteTick = pad().midiNoteOnTicks.exchange(0, std::memory_order_relaxed);
         if (noteTick != 0)
         {
             const double ticksPerUs = juce::Time::getHighResolutionTicksPerSecond() / 1.0e6;
             const juce::int64 now   = juce::Time::getHighResolutionTicks();
-            lastMidiLatencyUs.store((juce::int64)((double)(now - noteTick) / ticksPerUs),
+            pad().lastMidiLatencyUs.store((juce::int64)((double)(now - noteTick) / ticksPerUs),
                                     std::memory_order_relaxed);
         }
     }
 
-    sampler.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
-
-    // Apply normalization gain (non-destructive, before per-pad volume)
-    {
-        float ng = normGain.load();
-        if (ng != 1.0f)
-            bufferToFill.buffer->applyGain(ng);
-    }
-
-    // Apply volume gain
-    float gain = volumeGain.load();
-    if (gain != 1.0f)
-        bufferToFill.buffer->applyGain(gain);
-
-    // ── Parametric EQ (3 biquad bands) — OPT 2+3: single-pass cascade, double-buffer coeffs ──
-    if (eqActive.load())
-    {
-        const int numSamples  = bufferToFill.numSamples;
-        const int numChannels = bufferToFill.buffer->getNumChannels();
-
-        // OPT 2: swap in freshly computed coefficients if UI thread wrote them (nanoseconds).
-        const auto* c = eqCoeffDB.swapIfUpdated();
-
-        // Measure EQ Reset round-trip: store elapsed ms for message thread to print.
-        // No printf here — printing from the audio thread adds ~1ms latency on Windows.
-        const juce::int64 resetReqMs = eqResetRequestedMs.load(std::memory_order_relaxed);
-        if (resetReqMs > 0)
-        {
-            const juce::int64 elapsed = juce::Time::getMillisecondCounter() - resetReqMs;
-            eqResetElapsedMs.store(elapsed, std::memory_order_relaxed);
-            eqResetRequestedMs.store(0, std::memory_order_relaxed);
-        }
-
-        // OPT 3: single pass — apply all 3 bands per sample (better cache utilization vs.
-        // three separate passes over the buffer).
-        for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
-        {
-            float* data = bufferToFill.buffer->getWritePointer(ch);
-            // Keep all six state variables in registers for the inner loop.
-            double z1_0 = eqZ1[0][ch], z2_0 = eqZ2[0][ch];
-            double z1_1 = eqZ1[1][ch], z2_1 = eqZ2[1][ch];
-            double z1_2 = eqZ1[2][ch], z2_2 = eqZ2[2][ch];
-
-            for (int i = 0; i < numSamples; ++i)
-            {
-                // Direct Form II Transposed cascade — all 3 bands per sample
-                double x  = static_cast<double>(data[i]);
-                // Band 0
-                double y0 = c[0].b0 * x  + z1_0;
-                z1_0 = c[0].b1 * x  - c[0].a1 * y0 + z2_0;
-                z2_0 = c[0].b2 * x  - c[0].a2 * y0;
-                // Band 1
-                double y1 = c[1].b0 * y0 + z1_1;
-                z1_1 = c[1].b1 * y0 - c[1].a1 * y1 + z2_1;
-                z2_1 = c[1].b2 * y0 - c[1].a2 * y1;
-                // Band 2
-                double y2 = c[2].b0 * y1 + z1_2;
-                z1_2 = c[2].b1 * y1 - c[2].a1 * y2 + z2_2;
-                z2_2 = c[2].b2 * y1 - c[2].a2 * y2;
-                data[i] = static_cast<float>(y2);
-            }
-
-            eqZ1[0][ch] = z1_0; eqZ2[0][ch] = z2_0;
-            eqZ1[1][ch] = z1_1; eqZ2[1][ch] = z2_1;
-            eqZ1[2][ch] = z1_2; eqZ2[2][ch] = z2_2;
-        }
-    }
-
-    // ── FFT spectrum analyzer (post-EQ) — OPT 1: push to circular buffer only ────
-    // The FFT worker thread reads from fftCircularBuffer every 33ms and does all the
-    // heavy processing there.  Audio thread cost here is < 1 microsecond.
-    {
-        const int numSamples  = bufferToFill.numSamples;
-        const int numChannels = bufferToFill.buffer->getNumChannels();
-        const int toWrite     = juce::jmin(numSamples, fftAbstractFifo.getFreeSpace());
-
-        if (toWrite > 0)
-        {
-            int start1, size1, start2, size2;
-            fftAbstractFifo.prepareToWrite(toWrite, start1, size1, start2, size2);
-
-            for (int i = 0; i < size1; ++i)
-            {
-                float mono = 0.0f;
-                for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
-                    mono += bufferToFill.buffer->getReadPointer(ch)[i];
-                if (numChannels > 0) mono /= static_cast<float>(numChannels);
-                fftCircularBuffer[start1 + i] = mono;
-            }
-            for (int i = 0; i < size2; ++i)
-            {
-                float mono = 0.0f;
-                for (int ch = 0; ch < juce::jmin(numChannels, 2); ++ch)
-                    mono += bufferToFill.buffer->getReadPointer(ch)[size1 + i];
-                if (numChannels > 0) mono /= static_cast<float>(numChannels);
-                fftCircularBuffer[start2 + i] = mono;
-            }
-
-            fftAbstractFifo.finishedWrite(size1 + size2);
-        }
-    }
+    // Delegate all per-pad audio rendering + EQ + FFT + normGain + volumeGain to PadManager.
+    // PadManager also applies master volume after mixing all pads.
+    padManager.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
 
     if (sineWaveActive)
     {
-        const double sampleRate = sampler.getSampleRate();
+        const double sampleRate = pad().getSampleRate();
         if (sampleRate > 0)
         {
             const double phaseIncrement = sineWaveFrequency * juce::MathConstants<double>::twoPi / sampleRate;
-            
+
             for (int channel = 0; channel < bufferToFill.buffer->getNumChannels(); ++channel)
             {
                 float* channelData = bufferToFill.buffer->getWritePointer(channel);
-                
+
                 for (int i = 0; i < bufferToFill.numSamples; ++i)
                 {
                     channelData[i] += (float)(std::sin(sineWavePhase + i * phaseIncrement) * sineWaveAmplitude);
                 }
             }
-            
+
             sineWavePhase += phaseIncrement * bufferToFill.numSamples;
             while (sineWavePhase >= juce::MathConstants<double>::twoPi)
                 sineWavePhase -= juce::MathConstants<double>::twoPi;
         }
     }
 
-    // Apply master volume last so it scales the entire output
-    float masterGain = masterVolumeGain.load();
-    if (masterGain != 1.0f)
-        bufferToFill.buffer->applyGain(masterGain);
+    // Master volume is applied by PadManager::renderNextBlock — do NOT apply it again here.
 
     // ── Block budget monitor ─────────────────────────────────────────────────────
     // Print a warning if this block took more than 50% of its time budget.
@@ -536,7 +388,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
             const juce::int64 blockEndTicks = juce::Time::getHighResolutionTicks();
             const double ticksPerUs  = juce::Time::getHighResolutionTicksPerSecond() / 1.0e6;
             const double elapsedUs   = (double)(blockEndTicks - blockStartTicks) / ticksPerUs;
-            const double budgetUs    = (double)bufferToFill.numSamples / sampler.getSampleRate() * 1.0e6;
+            const double budgetUs    = (double)bufferToFill.numSamples / pad().getSampleRate() * 1.0e6;
             if (elapsedUs > budgetUs * 0.5)
             {
                 // Note: printf here is a last-resort diagnostic — it only fires when
@@ -736,12 +588,12 @@ void MainComponent::buttonClicked(juce::Button* button)
                     printf("[PITCH] + button load: resetting pitch to 0\n");
                     sampleCard.setPitchOffset(0);
                     {
-                        juce::ScopedLock lock(sampleLock);
-                        if (!samples.isEmpty())
-                            samples[0]->pitchOffset = 0;
+                        juce::ScopedLock lock(pad().sampleLock);
+                        if (!pad().samples.isEmpty())
+                            pad().samples[0]->pitchOffset = 0;
                     }
-                    for (int i = 0; i < sampler.getNumSounds(); ++i)
-                        if (auto* snd = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+                    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+                        if (auto* snd = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
                             snd->pitchOffsetAtomic.store(0);
                     if (configManager != nullptr)
                         configManager->savePitchOffset(0);
@@ -829,12 +681,12 @@ void MainComponent::updateDeviceInfo()
 {
     // ── Deferred diagnostic prints (written by audio thread, printed here on message thread) ─
     {
-        const juce::int64 latUs = lastMidiLatencyUs.exchange(-1, std::memory_order_relaxed);
+        const juce::int64 latUs = pad().lastMidiLatencyUs.exchange(-1, std::memory_order_relaxed);
         if (latUs >= 0)
         {
-            const double bufMs = (sampler.getSampleRate() > 0)
+            const double bufMs = (pad().getSampleRate() > 0)
                 ? (double)deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
-                  / sampler.getSampleRate() * 1000.0
+                  / pad().getSampleRate() * 1000.0
                 : 0.0;
             printf("[LATENCY] MIDI noteOn to audio block: %lld us  (buffer ~%.1f ms)\n",
                    (long long)latUs, bufMs);
@@ -842,7 +694,7 @@ void MainComponent::updateDeviceInfo()
         }
     }
     {
-        const juce::int64 eqMs = eqResetElapsedMs.exchange(-1, std::memory_order_relaxed);
+        const juce::int64 eqMs = pad().eqResetElapsedMs.exchange(-1, std::memory_order_relaxed);
         if (eqMs >= 0)
         {
             printf("[RESET-TIMING] Audio thread applied new EQ coefficients after: %lldms\n",
@@ -981,31 +833,31 @@ void MainComponent::loadSampleFile(const juce::File& file)
     // For single-sample mode, clear existing samples before loading new one
     // This ensures only one sample is active at a time (consistent with Prev/Next navigation)
     {
-        juce::ScopedLock lock(sampleLock);
-        samples.clear();
-        selectedSampleIndex = 0;
+        juce::ScopedLock lock(pad().sampleLock);
+        pad().samples.clear();
+        pad().selectedSampleIndex = 0;
     }
-    
+
     std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
-    
+
     if (reader != nullptr)
     {
         auto* sample = new MappedSample();
         sample->file = file;
         sample->name = file.getFileName();
-        
+
         // IMPORTANT: Use the current MIDI note from the card as the root note
         sample->rootNote = sampleCard.getMidiNote();  // Use card's current note
-        
+
         // For single-note mode, all notes are the same
         sample->lowNote = sample->rootNote;
         sample->highNote = sample->rootNote;
-        
+
         // Cache the audio data in memory
         sample->sampleRate = reader->sampleRate;
         sample->numChannels = reader->numChannels;
         sample->lengthInSamples = reader->lengthInSamples;
-        
+
         auto buffer = std::make_shared<juce::AudioBuffer<float>>(
             (int)reader->numChannels,
             (int)reader->lengthInSamples
@@ -1015,14 +867,14 @@ void MainComponent::loadSampleFile(const juce::File& file)
         sample->audioData = std::move(buffer);
 
         {
-            juce::ScopedLock lock(sampleLock);
-            samples.add(sample);
+            juce::ScopedLock lock(pad().sampleLock);
+            pad().samples.add(sample);
         }
-        
+
         updateSamplerSounds();
         sampleCard.setSampleName(file.getFileName());
         sampleCard.setWaveform(file);  // Set the waveform
-        
+
         // Calculate duration
         double durationInSeconds = reader->lengthInSamples / reader->sampleRate;
         sampleCard.setDuration(durationInSeconds);
@@ -1100,7 +952,7 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
     // Stamp high-resolution tick for MIDI-to-audio latency measurement.
     // Audio thread reads this in getNextAudioBlock() and prints the delta once.
     if (message.isNoteOn())
-        midiNoteOnTicks.store(juce::Time::getHighResolutionTicks(), std::memory_order_relaxed);
+        pad().midiNoteOnTicks.store(juce::Time::getHighResolutionTicks(), std::memory_order_relaxed);
 
     // MIDI Learn: intercept note-on before channel filter.
     if (isLearningMode && message.isNoteOn())
@@ -1135,10 +987,10 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
 
 void MainComponent::sliderValueChanged(juce::Slider* slider)
 {
-    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
     {
-        auto* sample = samples[selectedSampleIndex];
-        
+        auto* sample = pad().samples[pad().selectedSampleIndex];
+
         if (slider == &lowNoteSlider)
         {
             int newLow = (int)lowNoteSlider.getValue();
@@ -1184,10 +1036,10 @@ void MainComponent::sliderValueChanged(juce::Slider* slider)
 
 void MainComponent::updateMappingUI()
 {
-    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
     {
-        auto* sample = samples[selectedSampleIndex];
-        
+        auto* sample = pad().samples[pad().selectedSampleIndex];
+
         lowNoteSlider.setValue(sample->lowNote, juce::dontSendNotification);
         highNoteSlider.setValue(sample->highNote, juce::dontSendNotification);
         rootNoteSlider.setValue(sample->rootNote, juce::dontSendNotification);
@@ -1252,41 +1104,41 @@ void MainComponent::addSampleToMap()
 
 void MainComponent::removeSelectedSample()
 {
-    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
     {
-        juce::String sampleName = samples[selectedSampleIndex]->name;
-        samples.remove(selectedSampleIndex);
-        selectedSampleIndex = -1;
+        juce::String sampleName = pad().samples[pad().selectedSampleIndex]->name;
+        pad().samples.remove(pad().selectedSampleIndex);
+        pad().selectedSampleIndex = -1;
         updateSamplerSounds();
         sampleListBox.updateContent();
         updateMappingUI();
-        
-        printf("Sample '%s' removed. Total samples: %d\n", 
-               sampleName.toRawUTF8(), samples.size());
+
+        printf("Sample '%s' removed. Total samples: %d\n",
+               sampleName.toRawUTF8(), pad().samples.size());
         fflush(stdout);
     }
 }
 
 void MainComponent::clearAllSamples()
 {
-    samples.clear();
-    selectedSampleIndex = -1;
-    sampler.clearSounds();
+    pad().samples.clear();
+    pad().selectedSampleIndex = -1;
+    pad().getSynthesiser().clearSounds();
     sampleListBox.updateContent();
     updateMappingUI();
     sampleCard.clearWaveform();  // Clear the waveform
     sampleCard.setSampleName("No sample loaded");
     sampleCard.setDuration(0.0);
-    
+
     printf("All samples cleared\n");
     fflush(stdout);
 }
 
 void MainComponent::updateSamplerSounds()
 {
-    sampler.clearSounds();
-    
-    for (auto* sample : samples)
+    pad().getSynthesiser().clearSounds();
+
+    for (auto* sample : pad().samples)
     {
         if (sample == nullptr || sample->audioData == nullptr) 
             continue;
@@ -1354,7 +1206,7 @@ void MainComponent::updateSamplerSounds()
         sound->fullAudioData = sample->audioData;       // shared_ptr copy — keeps buffer alive
         sound->startSampleAtomic.store(startSample);
         sound->endSampleAtomic.store(endSample);
-        sound->loopEnabled.store(loopEnabled.load());
+        sound->loopEnabled.store(pad().loopEnabled.load());
         sound->pitchOffsetAtomic.store(sample->pitchOffset);
         sound->oneShotEnabled.store(sampleCard.isOneShotEnabled());
         sound->baseTuningRatioAtomic.store((float)(sampleCard.getBaseTuningHz() / 440.0));
@@ -1366,13 +1218,13 @@ void MainComponent::updateSamplerSounds()
         sound->reverseEnabled.store(sampleCard.isReverseEnabled());
         sound->bounceEnabled.store(sampleCard.isBounceEnabled());
 
-        sampler.addSound(sound);
+        pad().getSynthesiser().addSound(sound);
 
         printf("Added sound: %s -> note %d, pitchOffset %+d\n",
                sample->name.toRawUTF8(), sample->rootNote, sample->pitchOffset);
     }
-    
-    printf("Sampler updated with %d sounds (each mapped to single note)\n", samples.size());
+
+    printf("Sampler updated with %d sounds (each mapped to single note)\n", pad().samples.size());
     fflush(stdout);
 }
 
@@ -1478,9 +1330,9 @@ void MainComponent::scanCurrentFolderForAudioFiles()
             // Capture current file before lock so we can find it in the new list
             juce::File currentFile;
             {
-                juce::ScopedLock lock(sampleLock);
-                if (!samples.isEmpty())
-                    currentFile = samples[0]->file;
+                juce::ScopedLock lock(pad().sampleLock);
+                if (!pad().samples.isEmpty())
+                    currentFile = pad().samples[0]->file;
             }
 
             {
@@ -1667,7 +1519,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         fflush(stdout);
 
         // ── Step 2: Stop all audio completely ─────────────────────────────────────
-        muteOutput.store(true);   // audio thread bails immediately
+        pad().muteOutput.store(true);   // audio thread bails immediately
 
         // Stop any one-shot tail poll (new sample cancels the old tail)
         if (isOneShotTailPlaying)
@@ -1678,19 +1530,11 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         }
 
         // Clear freeze/loop/oneshot flags so stopNote() fires correctly
-        for (int i = 0; i < sampler.getNumSounds(); ++i)
-            if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
-            {
-                s->freezeActive.store(false);
-                s->loopEnabled.store(false);
-                s->oneShotEnabled.store(false);
-            }
+        pad().clearActiveSoundFlags();
         // Force-stop every voice: releases currentlyPlayingSound ref-count directly
-        for (int i = 0; i < sampler.getNumVoices(); ++i)
-            if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
-                v->forceStop();
-        sampler.clearSounds();
-        sampler.allNotesOff(0, false);
+        pad().forceStopAllVoices();
+        pad().clearSoundsAndVoices();
+        pad().allNotesOff(0, false);
 
         // ── Step 3: Reset card to neutral state ───────────────────────────────────
         sampleCard.resetStartPoint();
@@ -1701,10 +1545,10 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
 
         // ── Step 4: Install new sample ────────────────────────────────────────────
         {
-            juce::ScopedLock lock(sampleLock);
-            samples.clear();
-            selectedSampleIndex = 0;
-            samples.add(sample);
+            juce::ScopedLock lock(pad().sampleLock);
+            pad().samples.clear();
+            pad().selectedSampleIndex = 0;
+            pad().samples.add(sample);
         }
 
         sampleCard.setSampleName(file.getFileName());
@@ -1755,16 +1599,16 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                                 float f3, float g3, float q3, int m3)
         {
             sampleCard.setEqParams(eqEn, f1,g1,q1, f2,g2,q2, f3,g3,q3, /*notifyListeners=*/false);
-            eqFilterModes[0] = m1; eqFilterModes[1] = m2; eqFilterModes[2] = m3;
+            pad().eqFilterModes[0] = m1; pad().eqFilterModes[1] = m2; pad().eqFilterModes[2] = m3;
             sampleCard.setEqFilterModes(m1, m2, m3, /*notify=*/false);
-            eqActive.store(eqEn);
-            const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-            EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
-            newCoeffs[0] = computeEqCoeffs(f1, g1, q1, m1, sr);
-            newCoeffs[1] = computeEqCoeffs(f2, g2, q2, m2, sr);
-            newCoeffs[2] = computeEqCoeffs(f3, g3, q3, m3, sr);
-            eqCoeffDB.writeFromUI(newCoeffs);
-            resetEqState();  // safe: muteOutput=true here
+            pad().eqActive.store(eqEn);
+            const double sr = pad().getSampleRate() > 0.0 ? pad().getSampleRate() : 44100.0;
+            PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+            newCoeffs[0] = pad().computeEqCoeffs(f1, g1, q1, m1, sr);
+            newCoeffs[1] = pad().computeEqCoeffs(f2, g2, q2, m2, sr);
+            newCoeffs[2] = pad().computeEqCoeffs(f3, g3, q3, m3, sr);
+            pad().eqCoeffDB.writeFromUI(newCoeffs);
+            pad().resetEqState();  // safe: muteOutput=true here
             printf("[EQ] Restored filter modes: band1=%d  band2=%d  band3=%d\n", m1, m2, m3);
         };
 
@@ -1773,14 +1617,14 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             sampleCard.setNormParams(normEn, targetDb, /*notifyListeners=*/false);
             if (normEn)
             {
-                const float gain   = computeNormGainFromAudio(targetDb);
-                normGain.store(gain);
+                const float gain   = pad().computeNormGainFromAudio(targetDb);
+                pad().normGain.store(gain);
                 const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
                 sampleCard.setNormGainDisplay(gainDb);
             }
             else
             {
-                normGain.store(1.0f);
+                pad().normGain.store(1.0f);
             }
         };
 
@@ -1893,11 +1737,11 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         // else already reset above (full length)
 
         // Apply volume
-        volumeGain.store(effectiveVol);
+        pad().volumeGain.store(effectiveVol);
         sampleCard.setVolume(effectiveVol);
 
         // Apply loop
-        loopEnabled.store(effectiveLoop);
+        pad().loopEnabled.store(effectiveLoop);
         sampleCard.setLoopEnabled(effectiveLoop);
 
         // Freeze is ALWAYS off — never persisted, reset already done above
@@ -1912,16 +1756,16 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         // Propagate current one-shot state to the freshly built sound(s).
         {
             const bool oneShot = sampleCard.isOneShotEnabled();
-            for (int i = 0; i < sampler.getNumSounds(); ++i)
-                if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+                if (auto* s = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
                     s->oneShotEnabled.store(oneShot);
         }
 
         // Propagate current reverse state to the freshly built sound(s).
         {
             const bool rev = sampleCard.isReverseEnabled();
-            for (int i = 0; i < sampler.getNumSounds(); ++i)
-                if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+                if (auto* s = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
                     s->reverseEnabled.store(rev);
         }
 
@@ -1930,8 +1774,8 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         // This brings the audio data into L2/L3 cache so the first noteOn has minimal
         // cache-miss latency — the difference between "tight" and "sluggish" drum feel.
         {
-            juce::ScopedLock lock(sampleLock);
-            for (auto* s : samples)
+            juce::ScopedLock lock(pad().sampleLock);
+            for (auto* s : pad().samples)
             {
                 if (s->audioData != nullptr && s->audioData->getNumSamples() > 0)
                 {
@@ -1959,7 +1803,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             }
         }
 
-        muteOutput.store(false);
+        pad().muteOutput.store(false);
 
         // ── Timing: print ms from button press to audio ready ─────────────────────
         if (deferTransients && navStartTimeMs > 0)
@@ -2022,9 +1866,9 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         if (autoPlay)
         {
             juce::MessageManager::callAsync([this, sample]() {
-                sampler.noteOn(1, sample->rootNote, 0.8f);
+                pad().getSynthesiser().noteOn(1, sample->rootNote, 0.8f);
                 juce::Timer::callAfterDelay(800, [this, sample]() {
-                    sampler.noteOff(1, sample->rootNote, 0.0f, true);
+                    pad().getSynthesiser().noteOff(1, sample->rootNote, 0.0f, true);
                 });
             });
         }
@@ -2106,9 +1950,9 @@ void MainComponent::fireDebounceNavigation()
 void MainComponent::midiNoteChanged(int newNote)
 {
     // Always update the current sample if one is selected
-    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
     {
-        auto* sample = samples[selectedSampleIndex];
+        auto* sample = pad().samples[pad().selectedSampleIndex];
         sample->rootNote = newNote;
         
         // Also update low/high notes to match for single-note mode
@@ -2146,7 +1990,7 @@ void MainComponent::midiChannelChanged(int newChannel)
     if (newChannel != sampleCard.getMidiChannel())
     {
         // Stop all notes when changing channels to avoid confusion
-        sampler.allNotesOff(1, false);
+        pad().getSynthesiser().allNotesOff(1, false);
     }
     
     // SAVE THE SESSION when MIDI channel changes
@@ -2169,15 +2013,15 @@ void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
 
     // Update the in-memory sample struct with the TOTAL offset
     {
-        juce::ScopedLock lock(sampleLock);
-        if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
-            samples[selectedSampleIndex]->pitchOffset = totalCents;
+        juce::ScopedLock lock(pad().sampleLock);
+        if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
+            pad().samples[pad().selectedSampleIndex]->pitchOffset = totalCents;
     }
 
     // Push TOTAL (in cents) to all live sounds atomically — no rebuild, no note cutoff.
     // Audio thread reads pitchOffsetAtomic once per block; 10ms IIR ramp smoothes the transition.
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->pitchOffsetAtomic.store(totalCents);
 
     const juce::int64 tAtomic = juce::Time::getMillisecondCounter();
@@ -2202,7 +2046,7 @@ void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
 void MainComponent::volumeChanged(float volume)
 {
     auto t0 = juce::Time::getMillisecondCounterHiRes();
-    volumeGain.store(volume);
+    pad().volumeGain.store(volume);
     if (configManager != nullptr)
         configManager->saveVolume(volume);  // in-memory setValue only, no flush
     volSaveTimer.startTimer(400);           // one disk write fires 400ms after dragging stops
@@ -2217,11 +2061,11 @@ void MainComponent::startPointChanged(double startPointSeconds)
 
     double sampleRate = 0.0;
     {
-        juce::ScopedLock lock(sampleLock);
-        if (!samples.isEmpty())
+        juce::ScopedLock lock(pad().sampleLock);
+        if (!pad().samples.isEmpty())
         {
-            samples[0]->startPointSeconds = startPointSeconds;
-            sampleRate = samples[0]->sampleRate;
+            pad().samples[0]->startPointSeconds = startPointSeconds;
+            sampleRate = pad().samples[0]->sampleRate;
         }
     }
 
@@ -2229,9 +2073,9 @@ void MainComponent::startPointChanged(double startPointSeconds)
     if (sampleRate > 0.0)
     {
         const juce::int64 newStart = (juce::int64)(startPointSeconds * sampleRate);
-        for (int i = 0; i < sampler.getNumSounds(); ++i)
+        for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
         {
-            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             {
                 // Keep start below end — clamp to endSampleAtomic - 1
                 const juce::int64 curEnd = sound->endSampleAtomic.load();
@@ -2258,13 +2102,13 @@ void MainComponent::endPointChanged(double endPointSeconds)
     double sampleRate     = 0.0;
     juce::int64 bufLen    = 0;
     {
-        juce::ScopedLock lock(sampleLock);
-        if (!samples.isEmpty())
+        juce::ScopedLock lock(pad().sampleLock);
+        if (!pad().samples.isEmpty())
         {
-            samples[0]->endPointSeconds = endPointSeconds;
-            sampleRate = samples[0]->sampleRate;
-            if (samples[0]->audioData != nullptr)
-                bufLen = samples[0]->audioData->getNumSamples();
+            pad().samples[0]->endPointSeconds = endPointSeconds;
+            sampleRate = pad().samples[0]->sampleRate;
+            if (pad().samples[0]->audioData != nullptr)
+                bufLen = pad().samples[0]->audioData->getNumSamples();
         }
     }
 
@@ -2276,9 +2120,9 @@ void MainComponent::endPointChanged(double endPointSeconds)
                                  : bufLen;
         newEnd = juce::jmin(newEnd, bufLen);
 
-        for (int i = 0; i < sampler.getNumSounds(); ++i)
+        for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
         {
-            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             {
                 // Keep end above start — clamp to startSampleAtomic + 1
                 const juce::int64 curStart = sound->startSampleAtomic.load();
@@ -2300,11 +2144,11 @@ void MainComponent::endPointChanged(double endPointSeconds)
 
 void MainComponent::loopEnabledChanged(bool isLooping)
 {
-    loopEnabled.store(isLooping);
+    pad().loopEnabled.store(isLooping);
 
     // Update the flag on all currently loaded sounds — no rebuild needed
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->loopEnabled.store(isLooping);
 
     if (configManager != nullptr)
@@ -2358,8 +2202,8 @@ void MainComponent::adsrParamsChanged(bool enabled, float attackMs, float decayM
 {
     auto t0 = juce::Time::getMillisecondCounterHiRes();
     // Propagate to all live sounds atomically — takes effect within one audio block.
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
         {
             sound->customAdsrEnabled.store(enabled);
             sound->customAdsrAttackMs.store(attackMs);
@@ -2390,145 +2234,7 @@ void MainComponent::activeTabChanged(int tabIndex)
     printf("[TAB] Active tab changed to %d\n", tabIndex);
 }
 
-//==============================================================================
-// EQ helpers
-
-// OPT 2: Compute biquad coefficients for one band on the UI thread.
-// Returns normalized Coeffs; caller assembles all 3 bands and calls eqCoeffDB.writeFromUI().
-MainComponent::EqCoeffDoubleBuffer::Coeffs MainComponent::computeEqCoeffs(
-    float freqHz, float gainDb, float q, int filterMode, double sampleRate)
-{
-    // Audio EQ Cookbook formulas — all 6 filter types.
-    const double w0    = juce::MathConstants<double>::twoPi * (double)freqHz / sampleRate;
-    const double sinW0 = std::sin(w0);
-    const double cosW0 = std::cos(w0);
-    const double safeQ = (double)juce::jmax(q, 0.01f);
-    const double alpha = sinW0 / (2.0 * safeQ);
-
-    double b0 = 1.0, b1 = 0.0, b2 = 0.0, a0 = 1.0, a1 = 0.0, a2 = 0.0;
-
-    switch (filterMode)
-    {
-        case 0: // Low Cut — 2nd order highpass
-            b0 = (1.0 + cosW0) / 2.0; b1 = -(1.0 + cosW0); b2 = (1.0 + cosW0) / 2.0;
-            a0 = 1.0 + alpha;          a1 = -2.0 * cosW0;   a2 = 1.0 - alpha;
-            break;
-        case 1: // Low Shelf
-        {
-            const double A   = std::pow(10.0, (double)gainDb / 40.0);
-            const double sqA = std::sqrt(juce::jmax(A, 0.0001));
-            const double arg = (A + 1.0 / A) * (1.0 / safeQ - 1.0) + 2.0;
-            const double al  = sinW0 / 2.0 * std::sqrt(juce::jmax(arg, 0.0));
-            b0 =   A * ((A+1.0) - (A-1.0)*cosW0 + 2.0*sqA*al);
-            b1 = 2.0*A * ((A-1.0) - (A+1.0)*cosW0);
-            b2 =   A * ((A+1.0) - (A-1.0)*cosW0 - 2.0*sqA*al);
-            a0 =       (A+1.0) + (A-1.0)*cosW0 + 2.0*sqA*al;
-            a1 =  -2.0 * ((A-1.0) + (A+1.0)*cosW0);
-            a2 =        (A+1.0) + (A-1.0)*cosW0 - 2.0*sqA*al;
-            break;
-        }
-        case 2: // Bell (peaking EQ)
-        {
-            const double A = std::pow(10.0, (double)gainDb / 40.0);
-            b0 = 1.0 + alpha*A; b1 = -2.0*cosW0; b2 = 1.0 - alpha*A;
-            a0 = 1.0 + alpha/A; a1 = -2.0*cosW0; a2 = 1.0 - alpha/A;
-            break;
-        }
-        case 3: // Notch
-            b0 = 1.0; b1 = -2.0*cosW0; b2 = 1.0;
-            a0 = 1.0 + alpha; a1 = -2.0*cosW0; a2 = 1.0 - alpha;
-            break;
-        case 4: // High Shelf
-        {
-            const double A   = std::pow(10.0, (double)gainDb / 40.0);
-            const double sqA = std::sqrt(juce::jmax(A, 0.0001));
-            const double arg = (A + 1.0 / A) * (1.0 / safeQ - 1.0) + 2.0;
-            const double al  = sinW0 / 2.0 * std::sqrt(juce::jmax(arg, 0.0));
-            b0 =     A * ((A+1.0) + (A-1.0)*cosW0 + 2.0*sqA*al);
-            b1 = -2.0*A * ((A-1.0) + (A+1.0)*cosW0);
-            b2 =     A * ((A+1.0) + (A-1.0)*cosW0 - 2.0*sqA*al);
-            a0 =        (A+1.0) - (A-1.0)*cosW0 + 2.0*sqA*al;
-            a1 =   2.0 * ((A-1.0) - (A+1.0)*cosW0);
-            a2 =        (A+1.0) - (A-1.0)*cosW0 - 2.0*sqA*al;
-            break;
-        }
-        case 5: // High Cut — 2nd order lowpass
-            b0 = (1.0 - cosW0) / 2.0; b1 = 1.0 - cosW0; b2 = (1.0 - cosW0) / 2.0;
-            a0 = 1.0 + alpha;          a1 = -2.0*cosW0;  a2 = 1.0 - alpha;
-            break;
-        default: // Fallback: Bell
-        {
-            const double A = std::pow(10.0, (double)gainDb / 40.0);
-            b0 = 1.0 + alpha*A; b1 = -2.0*cosW0; b2 = 1.0 - alpha*A;
-            a0 = 1.0 + alpha/A; a1 = -2.0*cosW0; a2 = 1.0 - alpha/A;
-            break;
-        }
-    }
-
-    if (std::abs(a0) < 1e-30)   // Degenerate — pass-through
-        return EqCoeffDoubleBuffer::Coeffs {};  // default: b0=1, rest=0 (pass-through)
-
-    return EqCoeffDoubleBuffer::Coeffs {
-        b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
-    };
-}
-
-// OPT 1: FFT worker thread body — called every 33ms from FftWorkerThread::run().
-// All FFT math happens here, completely off the audio thread.
-void MainComponent::processFftOnWorkerThread()
-{
-    if (fft == nullptr) return;
-    if (fftAbstractFifo.getNumReady() < kFFTSize) return;
-
-    int start1, size1, start2, size2;
-    fftAbstractFifo.prepareToRead(kFFTSize, start1, size1, start2, size2);
-
-    // Build windowed interleaved real/imag frame in scratch buffer.
-    int dst = 0;
-    for (int i = 0; i < size1; ++i, ++dst)
-    {
-        fftScratch[dst * 2]     = fftCircularBuffer[start1 + i] * fftWindow[dst];
-        fftScratch[dst * 2 + 1] = 0.0f;
-    }
-    for (int i = 0; i < size2; ++i, ++dst)
-    {
-        fftScratch[dst * 2]     = fftCircularBuffer[start2 + i] * fftWindow[dst];
-        fftScratch[dst * 2 + 1] = 0.0f;
-    }
-    fftAbstractFifo.finishedRead(size1 + size2);
-
-    fft->performFrequencyOnlyForwardTransform(fftScratch);
-
-    // Write to back buffer with exponential smoothing, then flip.
-    const int back = 1 - specFront.load(std::memory_order_relaxed);
-    for (int k = 0; k < kSpecBins; ++k)
-    {
-        const float mag  = fftScratch[k] / static_cast<float>(kFFTSize);
-        const float db   = juce::Decibels::gainToDecibels(mag, -100.0f);
-        const float prev = specBuffers[back][k];
-        specBuffers[back][k] = (db > prev)
-            ? kSpecSmoothUp   * db + (1.0f - kSpecSmoothUp)   * prev
-            : kSpecSmoothDown * db + (1.0f - kSpecSmoothDown) * prev;
-    }
-    specFront.store(back, std::memory_order_release);
-    hasNewFFTData.store(true, std::memory_order_release);
-}
-
-// OPT 4: Returns true only when new FFT data is available — called by EQDisplay timer.
-// Clears the hasNewFFTData flag so subsequent calls return false until the next FFT frame.
-bool MainComponent::getSpectrumSnapshot(float* dest, int numBins)
-{
-    if (!hasNewFFTData.load(std::memory_order_acquire))
-        return false;
-
-    hasNewFFTData.store(false, std::memory_order_relaxed);
-    const int front = specFront.load(std::memory_order_acquire);
-    const int count = juce::jmin(numBins, kSpecBins);
-    std::memcpy(dest, specBuffers[front], sizeof(float) * count);
-    if (numBins > kSpecBins)
-        std::memset(dest + kSpecBins, 0, sizeof(float) * (numBins - kSpecBins));
-    return true;
-}
+// computeEqCoeffs, processFftOnWorkerThread, getSpectrumSnapshot moved to PadAudioEngine.h.
 
 void MainComponent::eqParamsChanged(bool enabled,
                                      float f1, float g1, float q1,
@@ -2537,29 +2243,23 @@ void MainComponent::eqParamsChanged(bool enabled,
 {
     const juce::int64 t0 = juce::Time::getMillisecondCounter();
 
-    eqActive.store(enabled);
+    pad().eqActive.store(enabled);
 
     // OPT 2: Compute all 3 bands on the UI thread, write to double buffer in one shot.
-    const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-    EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
-    newCoeffs[0] = computeEqCoeffs(f1, g1, q1, eqFilterModes[0], sr);
-    newCoeffs[1] = computeEqCoeffs(f2, g2, q2, eqFilterModes[1], sr);
-    newCoeffs[2] = computeEqCoeffs(f3, g3, q3, eqFilterModes[2], sr);
+    const double sr = pad().getSampleRate() > 0.0 ? pad().getSampleRate() : 44100.0;
+    PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+    newCoeffs[0] = pad().computeEqCoeffs(f1, g1, q1, pad().eqFilterModes[0], sr);
+    newCoeffs[1] = pad().computeEqCoeffs(f2, g2, q2, pad().eqFilterModes[1], sr);
+    newCoeffs[2] = pad().computeEqCoeffs(f3, g3, q3, pad().eqFilterModes[2], sr);
 
     const juce::int64 tCoeffs = juce::Time::getMillisecondCounter();
-    eqCoeffDB.writeFromUI(newCoeffs);
+    pad().eqCoeffDB.writeFromUI(newCoeffs);
     const juce::int64 tWrite = juce::Time::getMillisecondCounter();
 
     // FIX 7: resetEqState() is ONLY safe when muteOutput=true (audio thread not running).
-    // Calling it during active playback is a data race: the audio thread holds eqZ1/eqZ2
-    // in CPU registers for the entire inner sample loop — a message-thread write to the
-    // backing memory has no effect until the audio thread writes registers back (end of block),
-    // at which point it overwrites our zeros.  The filter state decays naturally and quickly
-    // through the biquad equation — no explicit zero is needed.
     // resetEqState() is intentionally NOT called here.
 
     // FIX 4: Always defer save — no synchronous disk write from eqParamsChanged.
-    // Covers EQ band drag, EQ toggle, and any other path through this function.
     const bool isDragging = sampleCard.isEqDisplayDragging();
     eqSaveTimer.startTimer(400);
 
@@ -2568,9 +2268,9 @@ void MainComponent::eqParamsChanged(bool enabled,
            (long long)(tCoeffs - t0), (long long)(tWrite - tCoeffs),
            isDragging ? "YES" : "NO",
            enabled ? "ON" : "OFF",
-           f1, g1, q1, eqFilterModes[0],
-           f2, g2, q2, eqFilterModes[1],
-           f3, g3, q3, eqFilterModes[2]);
+           f1, g1, q1, pad().eqFilterModes[0],
+           f2, g2, q2, pad().eqFilterModes[1],
+           f3, g3, q3, pad().eqFilterModes[2]);
 }
 
 void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
@@ -2578,18 +2278,18 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
     const auto t0 = juce::Time::getMillisecondCounter();
     printf("[FILTER-TIMING] Filter mode changed: mode1=%d mode2=%d mode3=%d\n", mode1, mode2, mode3);
 
-    eqFilterModes[0] = mode1;
-    eqFilterModes[1] = mode2;
-    eqFilterModes[2] = mode3;
+    pad().eqFilterModes[0] = mode1;
+    pad().eqFilterModes[1] = mode2;
+    pad().eqFilterModes[2] = mode3;
 
     // Compute all 3 bands on UI thread, write to double buffer atomically.
     // Audio thread picks up new coefficients on the very next callback — no rebuild, no note cutoff.
-    const double sr = sampler.getSampleRate() > 0.0 ? sampler.getSampleRate() : 44100.0;
-    EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
-    newCoeffs[0] = computeEqCoeffs(sampleCard.getEqBandFreq(0), sampleCard.getEqBandGain(0), sampleCard.getEqBandQ(0), mode1, sr);
-    newCoeffs[1] = computeEqCoeffs(sampleCard.getEqBandFreq(1), sampleCard.getEqBandGain(1), sampleCard.getEqBandQ(1), mode2, sr);
-    newCoeffs[2] = computeEqCoeffs(sampleCard.getEqBandFreq(2), sampleCard.getEqBandGain(2), sampleCard.getEqBandQ(2), mode3, sr);
-    eqCoeffDB.writeFromUI(newCoeffs);
+    const double sr = pad().getSampleRate() > 0.0 ? pad().getSampleRate() : 44100.0;
+    PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+    newCoeffs[0] = pad().computeEqCoeffs(sampleCard.getEqBandFreq(0), sampleCard.getEqBandGain(0), sampleCard.getEqBandQ(0), mode1, sr);
+    newCoeffs[1] = pad().computeEqCoeffs(sampleCard.getEqBandFreq(1), sampleCard.getEqBandGain(1), sampleCard.getEqBandQ(1), mode2, sr);
+    newCoeffs[2] = pad().computeEqCoeffs(sampleCard.getEqBandFreq(2), sampleCard.getEqBandGain(2), sampleCard.getEqBandQ(2), mode3, sr);
+    pad().eqCoeffDB.writeFromUI(newCoeffs);
 
     const auto tCoeffs = juce::Time::getMillisecondCounter();
     printf("[FILTER-TIMING] coefficients recalculated: %lldms\n", (long long)(tCoeffs - t0));
@@ -2611,37 +2311,8 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
     fflush(stdout);
 }
 
-float MainComponent::computeNormGainFromAudio(float targetDb) const
-{
-    juce::ScopedLock lock(sampleLock);
-    if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size()) return 1.0f;
-    const auto* sample = samples[selectedSampleIndex];
-    if (sample == nullptr || !sample->isValid()) return 1.0f;
-
-    const auto& buf = *sample->audioData;
-    const int totalSamples = buf.getNumSamples();
-    if (totalSamples == 0) return 1.0f;
-
-    const double sr = sample->sampleRate > 0.0 ? sample->sampleRate : 44100.0;
-    const int startSamp = (int)(sample->startPointSeconds * sr);
-    const int endSamp   = (sample->endPointSeconds > 0.0)
-                          ? (int)(sample->endPointSeconds * sr)
-                          : totalSamples;
-    const int s0 = juce::jlimit(0, totalSamples - 1, startSamp);
-    const int s1 = juce::jlimit(s0 + 1, totalSamples, endSamp);
-
-    float peak = 0.0f;
-    for (int ch = 0; ch < buf.getNumChannels(); ++ch)
-    {
-        const float* data = buf.getReadPointer(ch);
-        for (int i = s0; i < s1; ++i)
-            peak = juce::jmax(peak, std::abs(data[i]));
-    }
-
-    if (peak <= 1e-7f) return 1.0f;
-    const float targetLinear = std::pow(10.0f, targetDb / 20.0f);
-    return targetLinear / peak;
-}
+// computeNormGainFromAudio is defined in PadAudioEngine.h and forwarded
+// via the inline wrapper in MainComponent.h.
 
 void MainComponent::normChanged(bool enabled, float targetDb)
 {
@@ -2650,7 +2321,7 @@ void MainComponent::normChanged(bool enabled, float targetDb)
 
     if (!enabled)
     {
-        normGain.store(1.0f);
+        pad().normGain.store(1.0f);
         sampleCard.setNormGainDisplay(0.0f);
         printf("[NORM-TIMING] normGain recalculated: 0ms  (disabled — gain=1.0)\n");
         printf("[NORM-TIMING] updateSamplerSounds called: 0ms — SKIPPED (atomic normGain store)\n");
@@ -2666,9 +2337,9 @@ void MainComponent::normChanged(bool enabled, float targetDb)
     // For enabled: check how many samples need scanning to decide sync vs async.
     int scanSamples = 0;
     {
-        juce::ScopedLock lock(sampleLock);
-        if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
-            if (const auto* s = samples[selectedSampleIndex]; s != nullptr && s->audioData != nullptr)
+        juce::ScopedLock lock(pad().sampleLock);
+        if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
+            if (const auto* s = pad().samples[pad().selectedSampleIndex]; s != nullptr && s->audioData != nullptr)
                 scanSamples = s->audioData->getNumSamples();
     }
 
@@ -2677,8 +2348,8 @@ void MainComponent::normChanged(bool enabled, float targetDb)
     if (scanSamples <= kBgScanThreshold || scanSamples == 0)
     {
         // Small sample — scan on message thread, fast enough.
-        const float gain   = computeNormGainFromAudio(targetDb);
-        normGain.store(gain);
+        const float gain   = pad().computeNormGainFromAudio(targetDb);
+        pad().normGain.store(gain);
         const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
         sampleCard.setNormGainDisplay(gainDb);
 
@@ -2705,14 +2376,14 @@ void MainComponent::normChanged(bool enabled, float targetDb)
         backgroundThreads.addJob([this, capturedTarget]()
         {
             const auto tBg = juce::Time::getMillisecondCounter();
-            const float gain   = computeNormGainFromAudio(capturedTarget);
+            const float gain   = pad().computeNormGainFromAudio(capturedTarget);
             const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
             const auto tScan = juce::Time::getMillisecondCounter();
             printf("[NORM-TIMING] normGain recalculated (bg): %lldms\n", (long long)(tScan - tBg));
 
             juce::MessageManager::callAsync([this, gain, gainDb]()
             {
-                normGain.store(gain);
+                pad().normGain.store(gain);
                 sampleCard.setNormGainDisplay(gainDb);
                 normSaveTimer.startTimer(400);
                 printf("[NORM-TIMING] normGain applied from bg thread  gain=%+.1fdB  save deferred 400ms\n", gainDb);
@@ -2730,8 +2401,8 @@ void MainComponent::normChanged(bool enabled, float targetDb)
 void MainComponent::oneShotEnabledChanged(bool enabled)
 {
     // Propagate to all live sounds atomically — no rebuild needed.
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->oneShotEnabled.store(enabled);
 
     // If oneshot is being turned off, cancel any running tail poll.
@@ -2753,16 +2424,16 @@ void MainComponent::reverseEnabledChanged(bool enabled)
     // Before updating the sound flag, mirror the current playback position so
     // the audio continues from the same perceptual location but in the new direction.
     // Formula: mirrored = (sEnd - 1) - (currentPos - sStart)
-    for (int si = 0; si < sampler.getNumSounds(); ++si)
+    for (int si = 0; si < pad().getSynthesiser().getNumSounds(); ++si)
     {
-        if (auto* snd = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(si).get()))
+        if (auto* snd = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(si).get()))
         {
             const juce::int64 sStart = snd->startSampleAtomic.load();
             const juce::int64 sEnd   = snd->endSampleAtomic.load();
 
-            for (int vi = 0; vi < sampler.getNumVoices(); ++vi)
+            for (int vi = 0; vi < pad().getSynthesiser().getNumVoices(); ++vi)
             {
-                if (auto* voice = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(vi)))
+                if (auto* voice = dynamic_cast<LoopingSamplerVoice*>(pad().getSynthesiser().getVoice(vi)))
                 {
                     const juce::int64 pos = voice->playheadPositionAtomic.load();
                     if (pos >= sStart && pos < sEnd)
@@ -2787,8 +2458,8 @@ void MainComponent::reverseEnabledChanged(bool enabled)
 void MainComponent::bounceEnabledChanged(bool enabled)
 {
     // Propagate to all live sounds atomically — no rebuild needed.
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->bounceEnabled.store(enabled);
 
     if (configManager != nullptr)
@@ -2802,9 +2473,7 @@ void MainComponent::checkOneShotTailDone()
 {
     // Called every 200ms while a one-shot tail is playing.
     // Stop polling once no voice is active.
-    bool anyActive = false;
-    for (int i = 0; i < sampler.getNumVoices(); ++i)
-        if (sampler.getVoice(i)->isVoiceActive()) { anyActive = true; break; }
+    bool anyActive = pad().isAnyVoiceActive();
 
     if (!anyActive)
     {
@@ -2855,10 +2524,10 @@ void MainComponent::flushNavigationSave()
     snap->hasSample        = false;
 
     {
-        juce::ScopedLock lock(sampleLock);
-        if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+        juce::ScopedLock lock(pad().sampleLock);
+        if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
         {
-            auto* sample      = samples[selectedSampleIndex];
+            auto* sample      = pad().samples[pad().selectedSampleIndex];
             snap->hasSample   = true;
             snap->sampleFile  = sample->file;
             snap->startPoint  = sample->startPointSeconds;
@@ -2880,11 +2549,11 @@ void MainComponent::flushNavigationSave()
             s.adsrReleaseMs      = sampleCard.getAdsrReleaseMs();
             s.eqEnabled          = sampleCard.isEqEnabled();
             s.eq1Freq  = sampleCard.getEqBandFreq(0); s.eq1Gain = sampleCard.getEqBandGain(0);
-            s.eq1Q     = sampleCard.getEqBandQ(0);    s.eq1Mode = eqFilterModes[0];
+            s.eq1Q     = sampleCard.getEqBandQ(0);    s.eq1Mode = pad().eqFilterModes[0];
             s.eq2Freq  = sampleCard.getEqBandFreq(1); s.eq2Gain = sampleCard.getEqBandGain(1);
-            s.eq2Q     = sampleCard.getEqBandQ(1);    s.eq2Mode = eqFilterModes[1];
+            s.eq2Q     = sampleCard.getEqBandQ(1);    s.eq2Mode = pad().eqFilterModes[1];
             s.eq3Freq  = sampleCard.getEqBandFreq(2); s.eq3Gain = sampleCard.getEqBandGain(2);
-            s.eq3Q     = sampleCard.getEqBandQ(2);    s.eq3Mode = eqFilterModes[2];
+            s.eq3Q     = sampleCard.getEqBandQ(2);    s.eq3Mode = pad().eqFilterModes[2];
         }
     }
 
@@ -2947,25 +2616,17 @@ void MainComponent::performPanicReset()
     });
 
     // 1. Silence audio thread immediately — it will bail on the next block
-    muteOutput.store(true);
+    pad().muteOutput.store(true);
 
     // 2. Clear per-sound states so stopNote() and forceStop() work correctly
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
-        {
-            s->freezeActive.store(false);
-            s->loopEnabled.store(false);
-            s->oneShotEnabled.store(false);
-        }
+    pad().clearActiveSoundFlags();
 
     // 3. Force-stop all voices (releases currentlyPlayingSound refcount)
-    for (int i = 0; i < sampler.getNumVoices(); ++i)
-        if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
-            v->forceStop();
+    pad().forceStopAllVoices();
 
     // 4. Belt-and-suspenders: MIDI all-notes-off on every channel
     for (int ch = 1; ch <= 16; ++ch)
-        sampler.allNotesOff(ch, false);
+        pad().getSynthesiser().allNotesOff(ch, false);
 
     // 5. Stop file browser preview player if open
     if (activePreviewComp != nullptr)
@@ -2991,8 +2652,8 @@ void MainComponent::performPanicReset()
     bool loopOn    = sampleCard.isLoopEnabled();
     bool oneShotOn = sampleCard.isOneShotEnabled();
     bool bounceOn  = sampleCard.isBounceEnabled();
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* s = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* s = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
         {
             s->loopEnabled.store(loopOn);
             s->oneShotEnabled.store(oneShotOn);
@@ -3000,7 +2661,7 @@ void MainComponent::performPanicReset()
         }
 
     // 10. Re-enable audio — engine is now idle and ready for new MIDI triggers
-    muteOutput.store(false);
+    pad().muteOutput.store(false);
 
     printf("[PANIC] Reset complete — audio engine ready\n");
 }
@@ -3057,16 +2718,16 @@ void MainComponent::performTrimAsync()
     int    capChannels = 1, numTotalSamples = 0;
 
     {
-        juce::ScopedLock lock(sampleLock);
-        if (samples.isEmpty() || selectedSampleIndex < 0 ||
-            selectedSampleIndex >= (int)samples.size() ||
-            samples[selectedSampleIndex] == nullptr ||
-            !samples[selectedSampleIndex]->isValid())
+        juce::ScopedLock lock(pad().sampleLock);
+        if (pad().samples.isEmpty() || pad().selectedSampleIndex < 0 ||
+            pad().selectedSampleIndex >= (int)pad().samples.size() ||
+            pad().samples[pad().selectedSampleIndex] == nullptr ||
+            !pad().samples[pad().selectedSampleIndex]->isValid())
         {
             sampleCard.setTrimInProgress(false);
             return;
         }
-        auto* s        = samples[selectedSampleIndex];
+        auto* s        = pad().samples[pad().selectedSampleIndex];
         sourceFile     = s->file;
         audioData      = s->audioData;
         startSec       = s->startPointSeconds;
@@ -3300,9 +2961,9 @@ void MainComponent::freezeChanged(bool isFrozen)
     {
         // Freeze ON — purely atomic: mark sounds frozen + ensure loop flag is set.
         // No sound rebuild, no disk write, no blocking operations.
-        for (int i = 0; i < sampler.getNumSounds(); ++i)
+        for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
         {
-            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             {
                 sound->freezeActive.store(true);
                 sound->loopEnabled.store(true);  // freeze always loops
@@ -3311,12 +2972,8 @@ void MainComponent::freezeChanged(bool isFrozen)
 
         // If no voice is currently playing, inject a phantom note to start the loop.
         // With freezeActive=true, stopNote is a no-op so the phantom loop runs until freeze is released.
-        bool anyActive = false;
-        for (int i = 0; i < sampler.getNumVoices(); ++i)
-            if (sampler.getVoice(i)->isVoiceActive()) { anyActive = true; break; }
-
-        if (!anyActive && !samples.isEmpty() && samples[0]->isValid())
-            sampler.noteOn(1, samples[0]->rootNote, 0.8f);
+        if (!pad().isAnyVoiceActive() && !pad().samples.isEmpty() && pad().samples[0]->isValid())
+            pad().getSynthesiser().noteOn(1, pad().samples[0]->rootNote, 0.8f);
 
         const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
         printf("[FREEZE-TIMING] Freeze updated atomically: %lldms — no rebuild\n", (long long)elapsed);
@@ -3336,31 +2993,29 @@ void MainComponent::freezeChanged(bool isFrozen)
         // No heap allocations, no disk writes, all steps complete in microseconds.
 
         // Step 1: Silence audio thread immediately — non-blocking atomic store.
-        muteOutput.store(true);
+        pad().muteOutput.store(true);
 
         // Step 2: Clear freezeActive on all sounds so stopNote() works normally from now on.
-        for (int i = 0; i < sampler.getNumSounds(); ++i)
-            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+        for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
                 sound->freezeActive.store(false);
 
         // Step 3: Force-stop all voices — directly releases currentlyPlayingSound refcount.
         // Safe: muteOutput=true guarantees the audio thread is not inside renderNextBlock.
-        for (int i = 0; i < sampler.getNumVoices(); ++i)
-            if (auto* v = dynamic_cast<LoopingSamplerVoice*>(sampler.getVoice(i)))
-                v->forceStop();
+        pad().forceStopAllVoices();
 
         // Step 4: Belt-and-suspenders JUCE voice-state reset (no tail-off).
-        sampler.allNotesOff(0, false);
+        pad().getSynthesiser().allNotesOff(0, false);
 
         // Step 5: Restore loop state on existing sounds (sounds stay in sampler — no rebuild needed).
         const bool loopOn = sampleCard.isLoopEnabled();
-        loopEnabled.store(loopOn);
-        for (int i = 0; i < sampler.getNumSounds(); ++i)
-            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+        pad().loopEnabled.store(loopOn);
+        for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+            if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
                 sound->loopEnabled.store(loopOn);
 
         // Step 6: Resume audio output.
-        muteOutput.store(false);
+        pad().muteOutput.store(false);
 
         const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
         printf("[FREEZE-TIMING] updateSamplerSounds called: 0ms — SKIPPED (forceStop+allNotesOff only)\n");
@@ -3379,9 +3034,9 @@ void MainComponent::handleMidiLearn(int noteNumber)
         sampleCard.setMidiNoteFromLearn(noteNumber);
         
         // If there's a selected sample, update its root note and sampler IMMEDIATELY
-        if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+        if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
         {
-            auto* sample = samples[selectedSampleIndex];
+            auto* sample = pad().samples[pad().selectedSampleIndex];
             sample->rootNote = noteNumber;
             
             // Also update low/high notes to match for single-note mode
@@ -3433,6 +3088,7 @@ void MainComponent::loadLastSession()
 
     float savedMasterVolume = configManager->getMasterVolume();
     masterVolumeGain.store(savedMasterVolume);
+    padManager.setMasterVolume(savedMasterVolume);
     masterVolumeKnob.setValue(savedMasterVolume, juce::dontSendNotification);
     masterVolValueLabel.setText(juce::String(juce::roundToInt(savedMasterVolume * 100)) + "%",
                                 juce::dontSendNotification);
@@ -3467,24 +3123,24 @@ void MainComponent::loadLastSession()
     bool savedOneShot = configManager->getOneShotEnabled();
     sampleCard.setOneShotEnabled(savedOneShot);
     // Propagate to any live sounds (none at startup, but safe to call)
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->oneShotEnabled.store(savedOneShot);
     printf("[1SHOT] Restored one shot: %s\n", savedOneShot ? "ON" : "OFF");
 
     // Restore Reverse on/off state
     bool savedReverse = configManager->getReverseEnabled();
     sampleCard.setReverseEnabled(savedReverse);
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->reverseEnabled.store(savedReverse);
     printf("[REV] Restored reverse: %s\n", savedReverse ? "ON" : "OFF");
 
     // Restore Bounce on/off state
     bool savedBounce = configManager->getBounceEnabled();
     sampleCard.setBounceEnabled(savedBounce);
-    for (int i = 0; i < sampler.getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(sampler.getSound(i).get()))
+    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
+        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->bounceEnabled.store(savedBounce);
     printf("[BNC] Restored bounce: %s\n", savedBounce ? "ON" : "OFF");
 
@@ -3575,10 +3231,10 @@ void MainComponent::loadLastSession()
 void MainComponent::saveOutgoingSampleState()
 {
     if (configManager == nullptr) return;
-    juce::ScopedLock lock(sampleLock);
-    if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size()) return;
+    juce::ScopedLock lock(pad().sampleLock);
+    if (pad().selectedSampleIndex < 0 || pad().selectedSampleIndex >= pad().samples.size()) return;
 
-    auto* sample = samples[selectedSampleIndex];
+    auto* sample = pad().samples[pad().selectedSampleIndex];
     ConfigurationManager::SampleState s;
     s.startPoint          = sample->startPointSeconds;
     s.endPoint            = sample->endPointSeconds;
@@ -3597,15 +3253,15 @@ void MainComponent::saveOutgoingSampleState()
     s.eq1Freq             = sampleCard.getEqBandFreq(0);
     s.eq1Gain             = sampleCard.getEqBandGain(0);
     s.eq1Q                = sampleCard.getEqBandQ(0);
-    s.eq1Mode             = eqFilterModes[0];
+    s.eq1Mode             = pad().eqFilterModes[0];
     s.eq2Freq             = sampleCard.getEqBandFreq(1);
     s.eq2Gain             = sampleCard.getEqBandGain(1);
     s.eq2Q                = sampleCard.getEqBandQ(1);
-    s.eq2Mode             = eqFilterModes[1];
+    s.eq2Mode             = pad().eqFilterModes[1];
     s.eq3Freq             = sampleCard.getEqBandFreq(2);
     s.eq3Gain             = sampleCard.getEqBandGain(2);
     s.eq3Q                = sampleCard.getEqBandQ(2);
-    s.eq3Mode             = eqFilterModes[2];
+    s.eq3Mode             = pad().eqFilterModes[2];
     s.normEnabled         = sampleCard.isNormEnabled();
     s.normTargetDb        = sampleCard.getNormTargetDb();
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
@@ -3627,15 +3283,15 @@ void MainComponent::saveCurrentSampleState()
            sampleCard.getAdsrSustain(),  sampleCard.getAdsrReleaseMs());
 
     if (configManager == nullptr) { printf("[ADSR-DBG]   → skipped: configManager null\n"); return; }
-    juce::ScopedLock lock(sampleLock);
-    if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size())
+    juce::ScopedLock lock(pad().sampleLock);
+    if (pad().selectedSampleIndex < 0 || pad().selectedSampleIndex >= pad().samples.size())
     {
         printf("[ADSR-DBG]   → skipped: no valid sample (idx=%d size=%d)\n",
-               selectedSampleIndex, samples.size());
+               pad().selectedSampleIndex, pad().samples.size());
         return;
     }
 
-    auto* sample = samples[selectedSampleIndex];
+    auto* sample = pad().samples[pad().selectedSampleIndex];
     ConfigurationManager::SampleState s;
     s.startPoint          = sample->startPointSeconds;
     s.endPoint            = sample->endPointSeconds;
@@ -3654,15 +3310,15 @@ void MainComponent::saveCurrentSampleState()
     s.eq1Freq             = sampleCard.getEqBandFreq(0);
     s.eq1Gain             = sampleCard.getEqBandGain(0);
     s.eq1Q                = sampleCard.getEqBandQ(0);
-    s.eq1Mode             = eqFilterModes[0];
+    s.eq1Mode             = pad().eqFilterModes[0];
     s.eq2Freq             = sampleCard.getEqBandFreq(1);
     s.eq2Gain             = sampleCard.getEqBandGain(1);
     s.eq2Q                = sampleCard.getEqBandQ(1);
-    s.eq2Mode             = eqFilterModes[1];
+    s.eq2Mode             = pad().eqFilterModes[1];
     s.eq3Freq             = sampleCard.getEqBandFreq(2);
     s.eq3Gain             = sampleCard.getEqBandGain(2);
     s.eq3Q                = sampleCard.getEqBandQ(2);
-    s.eq3Mode             = eqFilterModes[2];
+    s.eq3Mode             = pad().eqFilterModes[2];
     s.normEnabled         = sampleCard.isNormEnabled();
     s.normTargetDb        = sampleCard.getNormTargetDb();
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
@@ -3696,9 +3352,9 @@ void MainComponent::saveCurrentSession()
     // NOTE: saveAudioSettings() intentionally NOT called here — audio device settings
     // never change during normal session events. They are saved only in audioDeviceChanged().
 
-    if (selectedSampleIndex >= 0 && selectedSampleIndex < samples.size())
+    if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
     {
-        auto* sample = samples[selectedSampleIndex];
+        auto* sample = pad().samples[pad().selectedSampleIndex];
         configManager->saveLastSample(sample->file);
         configManager->saveStartPoint(sample->startPointSeconds);
         configManager->saveEndPoint(sample->endPointSeconds);
