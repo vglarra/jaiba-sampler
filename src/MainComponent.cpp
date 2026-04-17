@@ -249,6 +249,7 @@ MainComponent::~MainComponent()
     normSaveTimer.stopTimer();
     filterModeSaveTimer.stopTimer();
     loopSaveTimer.stopTimer();
+    midiSaveTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // Kill any active freeze/loop voices before audio shutdown.
@@ -955,10 +956,14 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
         pad().midiNoteOnTicks.store(juce::Time::getHighResolutionTicks(), std::memory_order_relaxed);
 
     // MIDI Learn: intercept note-on before channel filter.
+    // IMPORTANT: dispatch to message thread — handleMidiLearn must NOT run on the MIDI
+    // callback thread (it calls updateSamplerSounds which acquires the synthesizer lock,
+    // and saveCurrentSampleState which flushes disk I/O — both would block here for seconds).
     if (isLearningMode && message.isNoteOn())
     {
-        handleMidiLearn(message.getNoteNumber());
+        const int learnedNote = message.getNoteNumber();
         midiCollector.addMessageToQueue(message);
+        juce::MessageManager::callAsync([this, learnedNote] { handleMidiLearn(learnedNote); });
         return;
     }
 
@@ -1949,34 +1954,34 @@ void MainComponent::fireDebounceNavigation()
 // SampleCard::Listener implementation
 void MainComponent::midiNoteChanged(int newNote)
 {
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+
     // Always update the current sample if one is selected
     if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
     {
         auto* sample = pad().samples[pad().selectedSampleIndex];
         sample->rootNote = newNote;
-        
-        // Also update low/high notes to match for single-note mode
-        sample->lowNote = newNote;
+        sample->lowNote  = newNote;
         sample->highNote = newNote;
-        
-        printf("Sample root note updated: %s -> %d (%s) (applied immediately)\n", 
-               sample->name.toRawUTF8(),
-               newNote,
-               juce::MidiMessage::getMidiNoteName(newNote, true, true, true).toRawUTF8());
-        
-        // Update sampler with new mapping IMMEDIATELY
+
+        printf("[LEARN-TIMING] updateSamplerSounds called: %.0fms\n",
+               juce::Time::getMillisecondCounterHiRes() - t0);
+
+        // LoopingSamplerSound stores the trigger noteRange — must rebuild to change it.
+        // This is the ONE and ONLY updateSamplerSounds() call for MIDI note changes.
         updateSamplerSounds();
-        
-        // SAVE THE SESSION whenever MIDI note changes
-        saveCurrentSession();
+
+        printf("[LEARN-TIMING] updateSamplerSounds done: %.0fms\n",
+               juce::Time::getMillisecondCounterHiRes() - t0);
     }
-    else
-    {
-        printf("No sample selected to apply MIDI note change\n");
-        
-        // Even if no sample is selected, save the MIDI note for future samples
-        saveCurrentSession();
-    }
+
+    // Deferred save — in-memory only here, one disk write fires 500ms after last change.
+    // Do NOT call saveCurrentSession() / flush() synchronously — that blocks the message thread.
+    configManager->saveMidiSettings(newNote, sampleCard.getMidiChannel(), currentMidiDeviceName);
+    midiSaveTimer.startTimer(500);
+
+    printf("[LEARN-TIMING] saveCurrentSampleState called: %.0fms (deferred 500ms via midiSaveTimer)\n",
+           juce::Time::getMillisecondCounterHiRes() - t0);
 }
 
 void MainComponent::midiChannelChanged(int newChannel)
@@ -3028,35 +3033,31 @@ void MainComponent::freezeChanged(bool isFrozen)
 
 void MainComponent::handleMidiLearn(int noteNumber)
 {
-    if (isLearningMode)
-    {
-        // Update the sample card with the learned note
-        sampleCard.setMidiNoteFromLearn(noteNumber);
-        
-        // If there's a selected sample, update its root note and sampler IMMEDIATELY
-        if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
-        {
-            auto* sample = pad().samples[pad().selectedSampleIndex];
-            sample->rootNote = noteNumber;
-            
-            // Also update low/high notes to match for single-note mode
-            sample->lowNote = noteNumber;
-            sample->highNote = noteNumber;
-            
-            // Force immediate update of the sampler
-            updateSamplerSounds();
-            
-            printf("Sample %s root note updated to %d via MIDI Learn\n", 
-                   sample->name.toRawUTF8(), noteNumber);
-        }
-        else
-        {
-            printf("No sample selected, but card note updated to %d\n", noteNumber);
-        }
-        
-        // SAVE THE SESSION after MIDI learn
-        saveCurrentSession();
-    }
+    // Runs on the message thread (dispatched via callAsync in handleIncomingMidiMessage).
+    // ALL work here is message-thread-safe.
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    printf("[LEARN-TIMING] MIDI note received during learn mode: note=%d\n", noteNumber);
+
+    if (!isLearningMode)
+        return;
+
+    // setMidiNoteFromLearn:
+    //   1. Updates the card note display
+    //   2. Fires midiNoteChanged listener → updates sample->rootNote + calls updateSamplerSounds()
+    //      (exactly one rebuild — do NOT call updateSamplerSounds() again below)
+    //   3. Deactivates learn mode and fires learningModeChanged(false)
+    sampleCard.setMidiNoteFromLearn(noteNumber);
+    printf("[LEARN-TIMING] setMidiNote called: %.0fms\n",
+           juce::Time::getMillisecondCounterHiRes() - t0);
+
+    // updateSamplerSounds() was already called inside midiNoteChanged listener above.
+    // Save is deferred via midiSaveTimer started inside midiNoteChanged.
+    printf("[LEARN-TIMING] updateSamplerSounds called: (see midiNoteChanged above)\n");
+    printf("[LEARN-TIMING] saveCurrentSampleState called: (deferred 500ms via midiSaveTimer)\n");
+    printf("[LEARN-TIMING] learn mode deactivated: %.0fms\n",
+           juce::Time::getMillisecondCounterHiRes() - t0);
+    printf("[LEARN-TIMING] total learn completion time: %.0fms\n",
+           juce::Time::getMillisecondCounterHiRes() - t0);
 }
 
 //==============================================================================

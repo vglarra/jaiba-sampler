@@ -535,6 +535,16 @@ private:
     };
     LoopSaveTimer loopSaveTimer { *this };
 
+    class MidiSaveTimer : public juce::Timer
+    {
+    public:
+        MidiSaveTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+    private:
+        MainComponent& owner;
+    };
+    MidiSaveTimer midiSaveTimer { *this };
+
     // MIDI-to-audio latency measurement atomics live in PadAudioEngine (pad().midiNoteOnTicks etc.)
     // Thin accessors kept here so existing MainComponent.cpp references compile unchanged.
 
