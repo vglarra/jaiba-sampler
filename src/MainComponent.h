@@ -15,6 +15,7 @@
 #include "MidiActivityLight.h"
 #include "LoopingSampler.h"
 #include "PadManager.h"
+#include "TrianglePadGrid.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -301,6 +302,10 @@ private:
     //==============================================================================
     // Compact knob LookAndFeel — shared with SampleCard knobs (defined in KnobLookAndFeel.h)
     CompactKnobLookAndFeel compactKnobLaf;
+
+    // ── Pad grid UI (Part 1 — visual only) ──────────────────
+    GlobalControlsBar globalControlsBar;
+    TrianglePadGrid   padGrid;
 
     // UI Components
     juce::TextButton menuButton{ "Menu" };

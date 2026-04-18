@@ -31,7 +31,11 @@ MainComponent::MainComponent()
     sampleListModel = std::make_unique<SampleListModel>(*this);
     sampleListBox.setModel(sampleListModel.get());
     
-    setSize(900, 700);
+    setSize(900, 815);
+
+    // ── Pad grid + global controls (Part 1 — visual only) ──
+    addAndMakeVisible (globalControlsBar);
+    addAndMakeVisible (padGrid);
     
     formatManager.registerBasicFormats();
 
@@ -417,9 +421,9 @@ void MainComponent::paint(juce::Graphics& g)
     auto titleArea = getLocalBounds().withTrimmedLeft(80).withTrimmedRight(348).removeFromTop(40);
     g.drawText("JAIVA-SAMPLER||1.0", titleArea, juce::Justification::centred, true);
 
-    // Line above footer
+    // Line above footer (footer is 50px from bottom)
     g.setColour(juce::Colour(0xFF404040));
-    auto footerY = getHeight() - 70;
+    auto footerY = getHeight() - 55;
     g.drawHorizontalLine(footerY, 20, getWidth() - 20);
 
     // Draw dark outline around top-level buttons
@@ -433,95 +437,141 @@ void MainComponent::paint(juce::Graphics& g)
 
 void MainComponent::resized()
 {
-    // Add a flag to prevent recursive resizing
+    // Guard against recursive resizing
     static bool isResizing = false;
     if (isResizing) return;
     isResizing = true;
-    
-    // No top margin — content starts flush at the top edge
-    auto area = getLocalBounds().withTrimmedLeft(20).withTrimmedRight(20).withTrimmedBottom(20);
 
-    // Top bar: strict 40px — all elements on one horizontal line, nothing expands this
-    auto topBar = area.removeFromTop(40);
+    constexpr int kTopBarH   = 40;
+    constexpr int kGlobCtrlH = 40;
+    constexpr int kPadRowH   = 120;
+    constexpr int kCardH     = 410;
+    constexpr int kCardMaxW  = 720;
+    constexpr int kFooterH   = 50;
+    constexpr int kHMargin   = 20;
+    constexpr int kGap       = 10;
 
-    // Menu button — vertically centred in 40px bar
-    menuButton.setBounds(topBar.removeFromLeft(60).withSizeKeepingCentre(56, 30));
+    // Consume from top (full width — no horizontal margins yet)
+    auto strip = getLocalBounds();
 
-    // Right: Reset(52)+gap(6)+HzLabel(70)+gap(6)+MasterVolLabel(62)+gap(4)+knob(28)+gap(4)+value%(32)+gap(4)+MIDI(22)+gap(6)+TestTone(62) = 358px
-    auto rightSide = topBar.removeFromRight(52 + 6 + 70 + 6 + 62 + 4 + 28 + 4 + 32 + 4 + 22 + 6 + 62);
-    resetButton.setBounds(rightSide.removeFromLeft(52).withSizeKeepingCentre(48, 30));
-    rightSide.removeFromLeft(6);
-    baseTuningLabel.setBounds(rightSide.removeFromLeft(70).withSizeKeepingCentre(68, 24));
-    rightSide.removeFromLeft(6);
-
-    // Master Vol: label on left, 28x28 knob, then percentage value label
-    masterVolumeLabel.setBounds(rightSide.removeFromLeft(62).withSizeKeepingCentre(62, 16));
-    rightSide.removeFromLeft(4);
-    masterVolumeKnob.setBounds(rightSide.removeFromLeft(28).withSizeKeepingCentre(28, 28));
-    rightSide.removeFromLeft(4);
-    masterVolValueLabel.setBounds(rightSide.removeFromLeft(32).withSizeKeepingCentre(30, 16));
-    rightSide.removeFromLeft(4);
-
-    // MIDI light — vertically centred
-    midiActivityLight.setBounds(rightSide.removeFromLeft(22).withSizeKeepingCentre(20, 20));
-    rightSide.removeFromLeft(6);
-
-    // Test tone button — vertically centred
-    testToneButton.setBounds(rightSide.removeFromLeft(62).withSizeKeepingCentre(58, 30));
-    
-    // Body area - this is where the card goes
-    auto bodyArea = area.reduced(10, 5);
-    
-    // Make the card take most of the body width, but with max width to maintain proportions
-    const int cardMaxWidth = 720;  // Maximum width to keep card from getting too wide
-    const int cardHeight = 410;     // 10+24+5+165+5+24+4+139(tabContent)+24+10 — 139px for EQ display
-    
-    int cardWidth = (bodyArea.getWidth() - 40 < cardMaxWidth) ? (bodyArea.getWidth() - 40) : cardMaxWidth;
-    
-    // Ensure card width is positive
-    if (cardWidth < 100) cardWidth = 100;
-    
-    auto cardBounds = bodyArea.withWidth(cardWidth)
-                              .withHeight(cardHeight)
-                              .withCentre(bodyArea.getCentre());
-    
-    // Ensure card bounds are valid before setting
-    if (cardBounds.getWidth() > 0 && cardBounds.getHeight() > 0)
+    // =========================================================
+    // TOP BAR  (40 px, with horizontal margins)
+    // =========================================================
     {
-        sampleCard.setBounds(cardBounds);
+        auto topBar = strip.removeFromTop (kTopBarH).reduced (kHMargin, 0);
+
+        menuButton.setBounds (topBar.removeFromLeft (60).withSizeKeepingCentre (56, 30));
+
+        // Right side: Reset+Hz+MasterVol+knob+val%+MIDI+TestTone = 358 px
+        constexpr int kRightW = 52+6+70+6+62+4+28+4+32+4+22+6+62; // 358
+        auto rightSide = topBar.removeFromRight (kRightW);
+        resetButton.setBounds       (rightSide.removeFromLeft (52).withSizeKeepingCentre (48, 30));
+        rightSide.removeFromLeft (6);
+        baseTuningLabel.setBounds   (rightSide.removeFromLeft (70).withSizeKeepingCentre (68, 24));
+        rightSide.removeFromLeft (6);
+        masterVolumeLabel.setBounds (rightSide.removeFromLeft (62).withSizeKeepingCentre (62, 16));
+        rightSide.removeFromLeft (4);
+        masterVolumeKnob.setBounds  (rightSide.removeFromLeft (28).withSizeKeepingCentre (28, 28));
+        rightSide.removeFromLeft (4);
+        masterVolValueLabel.setBounds (rightSide.removeFromLeft (32).withSizeKeepingCentre (30, 16));
+        rightSide.removeFromLeft (4);
+        midiActivityLight.setBounds (rightSide.removeFromLeft (22).withSizeKeepingCentre (20, 20));
+        rightSide.removeFromLeft (6);
+        testToneButton.setBounds    (rightSide.removeFromLeft (62).withSizeKeepingCentre (58, 30));
     }
-    
-    // Footer area at bottom - reduced by 40% (from 80px to 48px, using 50px for clean math)
-    auto footerArea = getLocalBounds().reduced(20).removeFromBottom(50);
-    
-    // Left side: Device info - two rows with vertical centering
-    // Use all available space before CPU indicator
-    auto leftFooter = footerArea.withTrimmedRight(130); // Reserve space for CPU label + padding
-    
-    // Calculate row height for two rows with vertical centering
-    const int rowHeight = 20; // Each row gets 20px
-    const int totalRowsHeight = rowHeight * 2;
-    const int verticalPadding = (footerArea.getHeight() - totalRowsHeight) / 2;
-    
-    // Audio info row (top)
-    auto audioRow = leftFooter.removeFromTop(rowHeight).translated(0, verticalPadding);
-    audioRow.removeFromLeft(5); // Left margin
-    audioDeviceInfoLabel.setBounds(audioRow);
-    audioDeviceInfoLabel.setFont(juce::Font(10.0f));
-    audioDeviceInfoLabel.setJustificationType(juce::Justification::left);
-    
-    // MIDI info row (bottom)
-    auto midiRow = leftFooter.removeFromTop(rowHeight).translated(0, verticalPadding);
-    midiRow.removeFromLeft(5); // Left margin
-    midiDeviceInfoLabel.setBounds(midiRow);
-    midiDeviceInfoLabel.setFont(juce::Font(10.0f));
-    midiDeviceInfoLabel.setJustificationType(juce::Justification::left);
-    
-    // Right side: CPU usage - maintain current positioning
-    cpuUsageLabel.setBounds(footerArea.removeFromRight(120).reduced(5));
-    cpuUsageLabel.setFont(juce::Font(11.0f, juce::Font::bold));
-    cpuUsageLabel.setJustificationType(juce::Justification::right);
-    
+
+    // =========================================================
+    // GLOBAL CONTROLS BAR  (40 px, full width)
+    // =========================================================
+    globalControlsBar.setBounds (strip.removeFromTop (kGlobCtrlH));
+
+    // =========================================================
+    // TOP TRIANGLE PAD ROW  (kPadRowH, full width)
+    // =========================================================
+    const int topPadRowY = strip.getY();
+    strip.removeFromTop (kPadRowH);
+
+    strip.removeFromTop (kGap);
+
+    // =========================================================
+    // SAMPLE CARD  (kCardH, centred)
+    // =========================================================
+    {
+        auto cardStrip = strip.removeFromTop (kCardH);
+        int  cardW     = juce::jmin (getWidth() - kHMargin * 2 - 20, kCardMaxW);
+        if (cardW < 100) cardW = 100;
+        auto cardBounds = juce::Rectangle<int> (0, 0, cardW, kCardH)
+                              .withCentre (cardStrip.getCentre());
+        sampleCard.setBounds (cardBounds);
+    }
+
+    strip.removeFromTop (kGap);
+
+    // =========================================================
+    // BOTTOM TRIANGLE PAD ROW  (kPadRowH, full width)
+    // =========================================================
+    const int bottomPadRowBottom = strip.getY() + kPadRowH;
+    strip.removeFromTop (kPadRowH);
+
+    // =========================================================
+    // FOOTER  (kFooterH, anchored to bottom, with horizontal margins)
+    // =========================================================
+    {
+        auto footerArea = getLocalBounds().removeFromBottom (kFooterH).reduced (kHMargin, 0);
+
+        auto leftFooter = footerArea.withTrimmedRight (130);
+        constexpr int kRowH2       = 20;
+        const int     vertPadding  = (footerArea.getHeight() - kRowH2 * 2) / 2;
+
+        auto audioRow = leftFooter.removeFromTop (kRowH2).translated (0, vertPadding);
+        audioRow.removeFromLeft (5);
+        audioDeviceInfoLabel.setBounds (audioRow);
+        audioDeviceInfoLabel.setFont (juce::Font (10.0f));
+        audioDeviceInfoLabel.setJustificationType (juce::Justification::left);
+
+        auto midiRow = leftFooter.removeFromTop (kRowH2).translated (0, vertPadding);
+        midiRow.removeFromLeft (5);
+        midiDeviceInfoLabel.setBounds (midiRow);
+        midiDeviceInfoLabel.setFont (juce::Font (10.0f));
+        midiDeviceInfoLabel.setJustificationType (juce::Justification::left);
+
+        cpuUsageLabel.setBounds (footerArea.removeFromRight (120).reduced (5));
+        cpuUsageLabel.setFont (juce::Font (11.0f, juce::Font::bold));
+        cpuUsageLabel.setJustificationType (juce::Justification::right);
+    }
+
+    // =========================================================
+    // PAD GRID  — transparent component, spans both pad rows
+    //             (middle section passes mouse events through)
+    // =========================================================
+    {
+        const int padGridTop = topPadRowY;
+        const int padGridH   = bottomPadRowBottom - padGridTop;
+        padGrid.setRowHeight (kPadRowH);
+        padGrid.setBounds    (0, padGridTop, getWidth(), padGridH);
+    }
+
+    // =========================================================
+    // Layout diagnostics
+    // =========================================================
+    static bool printed = false;
+    if (!printed)
+    {
+        printed = true;
+        printf ("[GRID-LAYOUT] App window: %dx%d\n", getWidth(), getHeight());
+        printf ("[GRID-LAYOUT] Top bar: height=%dpx\n", kTopBarH);
+        printf ("[GRID-LAYOUT] Global controls bar: height=%dpx\n", kGlobCtrlH);
+        printf ("[GRID-LAYOUT] Top pad row: height=%dpx -- 8 pads each %dpx wide\n",
+                kPadRowH, getWidth() / 8);
+        printf ("[GRID-LAYOUT] SampleCard: height=%dpx\n", kCardH);
+        printf ("[GRID-LAYOUT] Bottom pad row: height=%dpx -- 8 pads each %dpx wide\n",
+                kPadRowH, getWidth() / 8);
+        printf ("[GRID-LAYOUT] Footer: height=%dpx\n", kFooterH);
+        const int total = kTopBarH + kGlobCtrlH + kPadRowH + kGap + kCardH + kGap + kPadRowH + kFooterH;
+        printf ("[GRID-LAYOUT] Total: %dpx -- fits window: %s\n",
+                total, total <= getHeight() ? "YES" : "NO");
+    }
+
     isResizing = false;
 }
 
