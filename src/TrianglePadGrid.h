@@ -34,12 +34,27 @@ public:
 
     void triggerFlash()
     {
-        if (flashTimer) flashTimer->stopTimer();
-        preFlashState = currentState;
+        // Set fuchsia immediately
+        preFlashState = State::Selected; // always return to Selected — not empty
         currentState  = State::Triggered;
         repaint();
-        flashTimer = std::make_unique<FlashTimer>(*this);
-        flashTimer->startTimer(200);
+
+        // Use callAfterDelay — each click schedules its own independent callback
+        // Uses SafePointer so if component is deleted callback is safe
+        juce::Timer::callAfterDelay (150,
+            [safe = juce::Component::SafePointer<TrianglePad>(this)]
+            {
+                if (safe != nullptr)
+                {
+                    // Only restore if still in Triggered state
+                    // If another flash started after this one leave it alone
+                    if (safe->currentState == State::Triggered)
+                    {
+                        safe->currentState = safe->preFlashState;
+                        safe->repaint();
+                    }
+                }
+            });
     }
 
     void mouseEnter (const juce::MouseEvent&) override { isHovered = true;  repaint(); }
@@ -108,21 +123,6 @@ public:
     }
 
 private:
-    class FlashTimer : public juce::Timer
-    {
-    public:
-        FlashTimer(TrianglePad& p) : pad(p) {}
-        void timerCallback() override
-        {
-            if (pad.currentState == TrianglePad::State::Triggered)
-                pad.currentState = pad.preFlashState;
-            pad.repaint();
-            stopTimer();
-        }
-    private:
-        TrianglePad& pad;
-    };
-
     void updatePath()
     {
         auto b = getLocalBounds().toFloat();
@@ -163,7 +163,6 @@ private:
     bool         isHovered     = false;
 
     juce::Path cachedPath;
-    std::unique_ptr<FlashTimer> flashTimer;
 };
 
 // ================================================================================
@@ -289,6 +288,7 @@ public:
     int getSelectedPadIndex() const { return selectedIndex; }
 
     std::function<void(int)> onPadSelected;
+    std::function<void(int)> onPadTriggered;
 
     void paint (juce::Graphics&) override {}
 
@@ -307,7 +307,15 @@ private:
     void handlePadClicked (int idx)
     {
         DBG ("[PAD-UI] Pad " << idx + 1 << " clicked");
-        selectPad (idx);
+
+        // Select FIRST so state is correct before flash saves it
+        if (selectedIndex != idx)
+            selectPad (idx); // sets state to Selected (purple)
+
+        // Flash AFTER selection — preFlashState will correctly save Selected
+        triggerFlash (idx);
+
+        if (onPadTriggered) onPadTriggered (idx);
     }
 };
 

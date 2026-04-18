@@ -36,6 +36,30 @@ MainComponent::MainComponent()
     // ── Pad grid + global controls (Part 1 — visual only) ──
     addAndMakeVisible (globalControlsBar);
     addAndMakeVisible (padGrid);
+
+    padGrid.onPadTriggered = [this] (int padIndex)
+    {
+        if (!padManager.hasEngine (padIndex)) return;
+        auto& engine = padManager.getEngine (padIndex);
+
+        // Read the root note assigned to this pad under the sample lock
+        int note = 60; // default if no sample loaded
+        {
+            juce::ScopedLock sl (engine.sampleLock);
+            if (engine.samples.isEmpty()) return;
+            note = engine.samples[0]->rootNote;
+        }
+
+        // Trigger note on — full velocity
+        engine.getSynthesiser().noteOn (1, note, 1.0f);
+
+        // Schedule note off after 500ms
+        juce::Timer::callAfterDelay (500, [this, padIndex, note]()
+        {
+            if (!padManager.hasEngine (padIndex)) return;
+            padManager.getEngine (padIndex).getSynthesiser().noteOff (1, note, 0.0f, true);
+        });
+    };
     
     formatManager.registerBasicFormats();
 
