@@ -63,56 +63,65 @@ MainComponent::MainComponent()
 
     padGrid.onPadSelected = [this] (int padIndex)
     {
-        DBG ("[PAD-SELECT] Pad " << padIndex + 1 << " selected");
+        const auto t0 = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
 
-        // Capture outgoing pad state before switching
-        saveOutgoingSampleState();
-
-        // Also capture current state into PadSettings for the outgoing pad
+        // ── Step 1: Capture outgoing state (in-memory only — no flush, no lock contention) ──
         captureSampleCardToPadSettings (padManager.selectedPadIndex);
+        saveOutgoingSampleState();   // in-memory saveSampleState(), no flush
 
-        // Switch the active pad
+        // ── Step 2: Switch active pad — instant ──
         padManager.selectPad (padIndex);
 
-        auto& incoming = padManager.getSettings (padIndex);
+        const auto& settings = padManager.getSettings (padIndex);
 
-        if (incoming.sampleFilePath.isEmpty())
+        // ── Step 3: Update UI immediately — instant visual response ──
+        if (settings.sampleFilePath.isEmpty())
         {
             sampleCard.setEmptyState (true);
-            sampleCard.updateUIFromSettings (incoming);
+            sampleCard.updateUIFromSettings (settings);
         }
         else
         {
             sampleCard.setEmptyState (false);
-            sampleCard.updateUIFromSettings (incoming);
+            sampleCard.updateUIFromSettings (settings);
+            baseTuningLabel.setHz (settings.baseTuningHz);
+            sampleCard.setBaseTuningHz (settings.baseTuningHz);
+            sampleCard.showLoadingState();   // "Loading..." overlay — immediate feedback
+        }
 
-            juce::File padFile (incoming.sampleFilePath);
-            if (padFile.existsAsFile())
+        // Update grid label
+        padGrid.setPadSampleName (padIndex,
+            settings.sampleFilePath.isEmpty()
+                ? juce::String{}
+                : juce::File (settings.sampleFilePath).getFileName());
+
+        printf ("[PAD-SELECT-TIMING] Pad %d selected — UI updated: 0ms\n", padIndex + 1);
+        fflush (stdout);
+
+        // ── Step 4: Load audio asynchronously — non-blocking, same as Prev/Next ──
+        if (settings.sampleFilePath.isNotEmpty())
+        {
+            juce::File sampleFile (settings.sampleFilePath);
+            if (sampleFile.existsAsFile())
             {
-                currentFolder = padFile.getParentDirectory();
-                sampleCard.restoreZoomAndScroll (incoming.zoomLevel,
-                                                  incoming.zoomScrollPosition);
+                currentFolder = sampleFile.getParentDirectory();
+                sampleCard.restoreZoomAndScroll (settings.zoomLevel,
+                                                 settings.zoomScrollPosition);
+
                 const int myGen = navigationGeneration.fetch_add(1) + 1;
-                backgroundThreads.addJob ([this, padFile, myGen]()
+
+                backgroundThreads.addJob ([this, sampleFile, myGen]()
                 {
+                    // Stale-job guard: bail if a newer load has been triggered.
                     if (myGen != navigationGeneration.load()) return;
-                    loadSampleFileAsync (padFile, false);
+                    loadSampleFileAsync (sampleFile, /*autoPlay=*/false);
                 });
             }
         }
 
-        // Sync base tuning label to the incoming pad's tuning
-        baseTuningLabel.setHz (incoming.baseTuningHz);
-        sampleCard.setBaseTuningHz (incoming.baseTuningHz);
-
-        // Update grid label (may already be set, but ensures freshness)
-        padGrid.setPadSampleName (padIndex,
-            incoming.sampleFilePath.isEmpty()
-                ? juce::String{}
-                : juce::File (incoming.sampleFilePath).getFileName());
-
-        printf ("[PAD-SELECT] Pad %d active — file='%s'\n", padIndex + 1,
-                incoming.sampleFilePath.toRawUTF8());
+        printf ("[PAD-SELECT-TIMING] Pad %d — async load dispatched: %lldms\n",
+                padIndex + 1,
+                static_cast<juce::int64>(juce::Time::getMillisecondCounter()) - t0);
         fflush (stdout);
     };
     
@@ -1105,14 +1114,16 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
     // This is the ONLY operation that affects audio latency in this path.
     midiCollector.addMessageToQueue(message);
 
-    // Flash the pad mapped to this MIDI note in the grid (Part 2G).
+    // Flash the pad mapped to this MIDI note in the grid.
+    // ONLY triggerFlash() is called — never selectPad() or onPadSelected.
+    // TrianglePadGrid::triggerFlash() is a visual-only operation.
     if (message.isNoteOn())
     {
         const int flashPad = padManager.findPadForMidiNote(
             message.getNoteNumber(), message.getChannel());
         if (flashPad >= 0)
             juce::MessageManager::callAsync([this, flashPad]()
-                { padGrid.triggerFlash(flashPad); });
+                { padGrid.triggerFlash(flashPad); }); // flash ONLY — no selectPad
     }
 
     // One-shot tail detection: note-off ignored by audio engine while 1Shot is ON.
