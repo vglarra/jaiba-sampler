@@ -63,63 +63,69 @@ MainComponent::MainComponent()
 
     padGrid.onPadSelected = [this] (int padIndex)
     {
+        // FIX 1: INSTANT pad switching — audio is ALREADY in RAM in each PadAudioEngine.
+        // Never call loadSampleFileAsync here; that reads from disk and causes multi-second lag.
+
         const auto t0 = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
 
-        // ── Step 1: Capture outgoing state (in-memory only — no flush, no lock contention) ──
+        // ── Step 1: Capture outgoing pad state (in-memory, no disk flush) ──
         captureSampleCardToPadSettings (padManager.selectedPadIndex);
         saveOutgoingSampleState();   // in-memory saveSampleState(), no flush
 
-        // ── Step 2: Switch active pad — instant ──
+        // ── Step 2: Switch active pad index — instant (atomic-equivalent for UI thread) ──
         padManager.selectPad (padIndex);
 
+        auto& engine         = padManager.getEngine (padIndex);
         const auto& settings = padManager.getSettings (padIndex);
 
-        // ── Step 3: Update UI immediately — instant visual response ──
-        if (settings.sampleFilePath.isEmpty())
+        // ── Step 3: Restore all UI controls from saved PadSettings — instant ──
+        sampleCard.updateUIFromSettings (settings);
+        baseTuningLabel.setHz (settings.baseTuningHz);
+
+        if (!engine.hasSampleLoaded())
         {
+            // Empty pad — no audio cached yet.
             sampleCard.setEmptyState (true);
-            sampleCard.updateUIFromSettings (settings);
         }
         else
         {
+            // Audio is already in RAM — no disk access needed.
             sampleCard.setEmptyState (false);
-            sampleCard.updateUIFromSettings (settings);
-            baseTuningLabel.setHz (settings.baseTuningHz);
-            sampleCard.setBaseTuningHz (settings.baseTuningHz);
-            sampleCard.showLoadingState();   // "Loading..." overlay — immediate feedback
+
+            // Update file / duration display without resetting UI controls.
+            // setWaveformFileOnly() calls setFile() which clears peaksReady,
+            // so setAudioPeaksFromBuffer() MUST come after to restore the peaks.
+            sampleCard.setWaveformFileOnly (juce::File (settings.sampleFilePath),
+                                            engine.getPeakNumSamples(),
+                                            engine.getPeakSampleRate());
+
+            // Deliver cached peak bins to WaveformComponent (deep copy — zero disk I/O).
+            sampleCard.setAudioPeaksFromBuffer (engine.getPeakBins(),
+                                                engine.getPeakNumBins(),
+                                                engine.getPeakNumCh(),
+                                                engine.getPeakNumSamples(),
+                                                engine.getPeakSampleRate());
+
+            // Restore start/end markers from saved settings.
+            // setStartPoint/setEndPoint take seconds; duration must be set first (done above).
+            sampleCard.setStartPoint (settings.startPointSeconds);
+            if (settings.endPointSeconds > 0.0)
+                sampleCard.setEndPoint (settings.endPointSeconds);
+
+            // Restore zoom / scroll position.
+            sampleCard.restoreZoomAndScroll (settings.zoomLevel,
+                                             settings.zoomScrollPosition);
+
+            currentFolder = juce::File (settings.sampleFilePath).getParentDirectory();
         }
 
-        // Update grid label
+        // Update the pad grid label.
         padGrid.setPadSampleName (padIndex,
             settings.sampleFilePath.isEmpty()
                 ? juce::String{}
                 : juce::File (settings.sampleFilePath).getFileName());
 
-        printf ("[PAD-SELECT-TIMING] Pad %d selected — UI updated: 0ms\n", padIndex + 1);
-        fflush (stdout);
-
-        // ── Step 4: Load audio asynchronously — non-blocking, same as Prev/Next ──
-        if (settings.sampleFilePath.isNotEmpty())
-        {
-            juce::File sampleFile (settings.sampleFilePath);
-            if (sampleFile.existsAsFile())
-            {
-                currentFolder = sampleFile.getParentDirectory();
-                sampleCard.restoreZoomAndScroll (settings.zoomLevel,
-                                                 settings.zoomScrollPosition);
-
-                const int myGen = navigationGeneration.fetch_add(1) + 1;
-
-                backgroundThreads.addJob ([this, sampleFile, myGen]()
-                {
-                    // Stale-job guard: bail if a newer load has been triggered.
-                    if (myGen != navigationGeneration.load()) return;
-                    loadSampleFileAsync (sampleFile, /*autoPlay=*/false);
-                });
-            }
-        }
-
-        printf ("[PAD-SELECT-TIMING] Pad %d — async load dispatched: %lldms\n",
+        printf ("[PAD-SELECT] Pad %d selected — instant switch (no disk I/O): %lldms\n",
                 padIndex + 1,
                 static_cast<juce::int64>(juce::Time::getMillisecondCounter()) - t0);
         fflush (stdout);
@@ -1712,6 +1718,10 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         // uses the peak data — zero disk I/O in paint() from this point forward.
         printf("[LOAD-TIMING] setting waveform peaks + waveform: %lldms\n",
                (juce::int64)juce::Time::getMillisecondCounter() - tMsgStart);
+        // Cache peaks in the engine so pad switching can serve them instantly
+        // (no disk access when the user clicks another pad and comes back).
+        pad().storePeakCache(peaks.get(), kWaveformPeakBins, peakNumCh, peakNSamples, peakSR);
+
         sampleCard.setWaveformPeaks(std::move(peaks), peakNumCh, peakNSamples, peakSR);
 
         // Pass sample metadata already read on the background thread — this avoids
@@ -3391,6 +3401,9 @@ void MainComponent::loadLastSession()
             padGrid.setPadSampleName(i, juce::File(ps.sampleFilePath).getFileName());
             printf("[STARTUP] Pad %d: '%s'\n", i + 1,
                    juce::File(ps.sampleFilePath).getFileName().toRawUTF8());
+            // FIX 2: Confirm per-pad MIDI routing restored from disk.
+            printf("[PERSIST] Pad %d MIDI note=%d channel=%d restored on startup\n",
+                   i + 1, ps.midiNote, ps.midiChannel);
         }
     }
 
@@ -3513,6 +3526,12 @@ void MainComponent::saveCurrentSampleState()
            s.startPoint, s.endPoint, s.volume,
            s.loopEnabled ? "ON" : "OFF",
            s.detectedNoteName.isEmpty() ? "-" : s.detectedNoteName.toRawUTF8());
+    // FIX 2: Confirm per-pad MIDI routing saved.
+    {
+        const auto& ps = padManager.padSettings[padManager.selectedPadIndex];
+        printf("[PERSIST] Pad %d MIDI note=%d channel=%d saved\n",
+               padManager.selectedPadIndex + 1, ps.midiNote, ps.midiChannel);
+    }
     fflush(stdout);
 }
 

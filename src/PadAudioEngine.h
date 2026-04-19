@@ -7,6 +7,7 @@
 #include <atomic>
 
 #include "LoopingSampler.h"
+#include "WaveformPeakBin.h"
 
 //==============================================================================
 // PadAudioEngine — self-contained audio engine for one sample pad.
@@ -563,6 +564,46 @@ public:
     juce::Synthesiser& getSynthesiser() { return sampler; }
 
     //==========================================================================
+    // Peak cache — allows instant pad switching without re-reading disk.
+    // Stored when a sample is loaded; served to SampleCard::setAudioPeaksFromBuffer()
+    // on pad selection so WaveformComponent can repaint immediately.
+
+    bool hasSampleLoaded() const
+    {
+        return cachedPeakBins != nullptr && cachedPeakNumSamples > 0;
+    }
+
+    // Store a deep copy of the peak bins computed during sample load.
+    // Called from MainComponent::loadSampleFileAsync callAsync lambda.
+    void storePeakCache(const WaveformPeakBin* src, int numBins,
+                        int numCh, juce::int64 numSamples, double sr)
+    {
+        if (src == nullptr || numBins <= 0) return;
+        cachedPeakBins = std::make_unique<WaveformPeakBin[]>((size_t)numBins);
+        std::memcpy(cachedPeakBins.get(), src, sizeof(WaveformPeakBin) * (size_t)numBins);
+        cachedPeakNumBins    = numBins;
+        cachedPeakNumCh      = numCh;
+        cachedPeakNumSamples = numSamples;
+        cachedPeakSampleRate = sr;
+    }
+
+    const WaveformPeakBin* getPeakBins()     const { return cachedPeakBins.get(); }
+    int                    getPeakNumBins()   const { return cachedPeakNumBins; }
+    int                    getPeakNumCh()     const { return cachedPeakNumCh; }
+    juce::int64            getPeakNumSamples()const { return cachedPeakNumSamples; }
+    double                 getPeakSampleRate()const { return cachedPeakSampleRate; }
+
+    // Clear peak cache (called on sample unload / pad clear).
+    void clearPeakCache()
+    {
+        cachedPeakBins.reset();
+        cachedPeakNumBins    = 0;
+        cachedPeakNumCh      = 0;
+        cachedPeakNumSamples = 0;
+        cachedPeakSampleRate = 0.0;
+    }
+
+    //==========================================================================
     // Public data — all members that MainComponent.cpp needs direct access to.
     // Keeping these public avoids verbose getter/setter boilerplate for the
     // dozens of atomic state variables and allows MainComponent to implement
@@ -612,6 +653,14 @@ private:
 
     juce::AudioFormatManager& formatManager;
     juce::Synthesiser sampler;
+
+    // Peak cache — deep copy of bins computed at load time.
+    // Allows instant pad switching (no disk access).
+    std::unique_ptr<WaveformPeakBin[]> cachedPeakBins;
+    int         cachedPeakNumBins    = 0;
+    int         cachedPeakNumCh      = 0;
+    juce::int64 cachedPeakNumSamples = 0;
+    double      cachedPeakSampleRate = 0.0;
 
     // EQ filter state — audio thread only.
     double eqZ1[3][2] {};

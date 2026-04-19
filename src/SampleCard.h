@@ -8,6 +8,7 @@
 #include <vector>
 #include "KnobLookAndFeel.h"
 #include "PadSettings.h"
+#include "WaveformPeakBin.h"
 
 // Forward declaration — EQDisplay is defined after WaveformViewport, before SampleCard.
 class EQDisplay;
@@ -587,15 +588,8 @@ private:
 
 
 // ===========================================================================
-// Pre-computed waveform peak data — one bin covers totalSamples / kWaveformPeakBins samples.
-// Computed on the audio-loading background thread so WaveformComponent::paint() has
-// zero disk I/O, eliminating the multi-second message-thread freeze.
-struct WaveformPeakBin {
-    float minL = 0.0f, maxL = 0.0f;
-    float minR = 0.0f, maxR = 0.0f;
-};
-static constexpr int kWaveformPeakBins = 8192;
-
+// WaveformPeakBin and kWaveformPeakBins are defined in WaveformPeakBin.h
+// (included above) so PadAudioEngine can also include it without a circular dep.
 // ===========================================================================
 
 class SampleCard : public juce::Component
@@ -1546,6 +1540,37 @@ public:
     {
         if (waveformComponent != nullptr)
             waveformComponent->setAudioPeaks(std::move(peaks), numCh, numSamples, sampleRate);
+    }
+
+    // Deliver cached peak data from a PadAudioEngine (for instant pad switching).
+    // Unlike setWaveformPeaks(), this takes a raw pointer + size so the engine can
+    // keep its own copy while the WaveformComponent gets a deep copy.
+    void setAudioPeaksFromBuffer(const WaveformPeakBin* src, int numBins,
+                                 int numCh, juce::int64 numSamples, double sampleRate)
+    {
+        if (waveformComponent == nullptr || src == nullptr || numBins <= 0) return;
+        auto copy = std::make_unique<WaveformPeakBin[]>((size_t)numBins);
+        std::memcpy(copy.get(), src, sizeof(WaveformPeakBin) * (size_t)numBins);
+        waveformComponent->setAudioPeaks(std::move(copy), numCh, numSamples, sampleRate);
+    }
+
+    // Update the waveform display for a new file WITHOUT resetting any UI controls
+    // (pitch, loop, ADSR, start/end markers, etc.).  Used when switching pads
+    // where the audio is already in RAM — no full setWaveform() reset needed.
+    // IMPORTANT: call setAudioPeaksFromBuffer() AFTER this so setFile()'s
+    // peaksReady.store(false) is overwritten by the subsequent setAudioPeaks().
+    void setWaveformFileOnly(const juce::File& file, juce::int64 knownSamples, double knownSR)
+    {
+        currentAudioFile = file;
+        if (waveformComponent != nullptr)
+        {
+            // setFile() clears peaksReady — caller must call setAudioPeaksFromBuffer() after this.
+            waveformComponent->setFile(file);
+        }
+        // Set duration so markers and knobs render at the correct scale.
+        if (knownSamples > 0 && knownSR > 0.0)
+            setDuration((double)knownSamples / knownSR);
+        sampleNameLabel.setText(file.getFileName(), juce::dontSendNotification);
     }
 
     // Show "Loading..." in the waveform area immediately on button press — before
