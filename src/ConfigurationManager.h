@@ -34,6 +34,10 @@ public:
     // Legacy alias kept for existing call sites in MainComponent.cpp
     void saveNow() { flush(); }
 
+    // Raw PropertiesFile access — used by PadSettings::saveToProperties / loadFromProperties.
+    juce::PropertiesFile*       getPropertiesFile()       { return propertiesFile.get(); }
+    const juce::PropertiesFile* getPropertiesFile() const { return propertiesFile.get(); }
+
     //==============================================================================
     // All setters below are in-memory only — they do NOT flush to disk.
     // Call flush() (or saveNow()) once after a batch of saves.

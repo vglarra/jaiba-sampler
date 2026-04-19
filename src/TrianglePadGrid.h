@@ -15,7 +15,10 @@ public:
     enum class Direction { Up, Down };
 
     TrianglePad (int index, Direction dir)
-        : padIndex (index), direction (dir) {}
+        : padIndex (index), direction (dir)
+    {
+        flashTimer.owner = this;
+    }
 
     void setSampleName (const juce::String& name)
     {
@@ -39,23 +42,26 @@ public:
         currentState  = State::Triggered;
         repaint();
 
-        // Use callAfterDelay — each click schedules its own independent callback
-        // Uses SafePointer so if component is deleted callback is safe
-        juce::Timer::callAfterDelay (150,
-            [safe = juce::Component::SafePointer<TrianglePad>(this)]
-            {
-                if (safe != nullptr)
-                {
-                    // Only restore if still in Triggered state
-                    // If another flash started after this one leave it alone
-                    if (safe->currentState == State::Triggered)
-                    {
-                        safe->currentState = safe->preFlashState;
-                        safe->repaint();
-                    }
-                }
-            });
+        flashTimer.stopTimer();
+        flashTimer.startTimer (120);
     }
+
+private:
+    struct FlashTimer : public juce::Timer
+    {
+        TrianglePad* owner = nullptr;
+        void timerCallback() override
+        {
+            stopTimer();  // stop first before any state changes
+            if (owner != nullptr && owner->currentState == State::Triggered)
+            {
+                owner->currentState = owner->preFlashState;
+                owner->repaint();
+            }
+        }
+    } flashTimer;
+
+public:
 
     void mouseEnter (const juce::MouseEvent&) override { isHovered = true;  repaint(); }
     void mouseExit  (const juce::MouseEvent&) override { isHovered = false; repaint(); }
@@ -308,11 +314,11 @@ private:
     {
         DBG ("[PAD-UI] Pad " << idx + 1 << " clicked");
 
-        // Select FIRST so state is correct before flash saves it
+        // Select first so preFlashState captures Selected, not Empty/Loaded
         if (selectedIndex != idx)
-            selectPad (idx); // sets state to Selected (purple)
+            selectPad (idx);
 
-        // Flash AFTER selection — preFlashState will correctly save Selected
+        // Always flash regardless of prior selection state
         triggerFlash (idx);
 
         if (onPadTriggered) onPadTriggered (idx);

@@ -340,11 +340,10 @@ private:
     // padManager must be declared AFTER formatManager (PadManager ctor takes a ref to it).
     PadManager padManager { formatManager };
 
-    // Convenience accessor — returns engine for pad 0 (the only active pad in the current build).
-    // All existing MainComponent code that previously accessed sampler/samples/eqCoeffDB etc.
-    // now goes through this accessor, keeping changes minimal and grep-able.
-    PadAudioEngine& pad() { return padManager.getEngine(0); }
-    const PadAudioEngine& pad() const { return padManager.getEngine(0); }
+    // Convenience accessor — returns engine for the currently selected pad.
+    // padManager.selectedPadIndex tracks which pad is active in the UI.
+    PadAudioEngine& pad() { return padManager.getEngine(padManager.selectedPadIndex); }
+    const PadAudioEngine& pad() const { return padManager.getEngine(padManager.selectedPadIndex); }
     
     //==============================================================================
     // MIDI components
@@ -674,6 +673,9 @@ private:
     // Session persistence
     void saveOutgoingSampleState();  // Save current sample's state BEFORE loading a new one
     void saveCurrentSampleState();   // Save current sample's state (called on every change)
+    // Capture current SampleCard UI state + sample file path into padManager.padSettings[padIdx].
+    // Called on pad switch (outgoing) and in saveCurrentSampleState (current pad).
+    void captureSampleCardToPadSettings(int padIdx);
     std::unique_ptr<ConfigurationManager> configManager;
     MidiActivityLight midiActivityLight;
     

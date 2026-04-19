@@ -7,6 +7,7 @@
 #include <cmath>
 #include <vector>
 #include "KnobLookAndFeel.h"
+#include "PadSettings.h"
 
 // Forward declaration — EQDisplay is defined after WaveformViewport, before SampleCard.
 class EQDisplay;
@@ -651,6 +652,16 @@ public:
             if (onZoomStateChanged)
                 onZoomStateChanged(waveformZoomLevel, getScrollPositionNormalized());
         };
+
+        // Empty pad overlay — shown when no sample is loaded on this pad
+        emptyStateLabel.setText("No sample loaded\nUse Prev / Next to browse",
+                                 juce::dontSendNotification);
+        emptyStateLabel.setJustificationType(juce::Justification::centred);
+        emptyStateLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFF888888));
+        emptyStateLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF2A2A2A));
+        emptyStateLabel.setFont(juce::Font(14.0f));
+        emptyStateLabel.setVisible(false);
+        addAndMakeVisible(emptyStateLabel);
 
         // Set up fixed info labels
         topInfoLabel.setJustificationType(juce::Justification::centred);
@@ -1620,6 +1631,7 @@ public:
         // Viewport needs extra height to accommodate scrollbar without squishing content
         auto waveformRect = area.removeFromTop(waveformHeight + SCROLLBAR_HEIGHT);
         waveformViewport.setBounds(waveformRect);
+        emptyStateLabel.setBounds(waveformRect);   // overlays the waveform area
         fixedViewportWidth = waveformRect.getWidth();
         
         // Position fixed info labels within the viewport area
@@ -2195,6 +2207,79 @@ public:
     {
         sampleNameLabel.setText(name, juce::dontSendNotification);
         repaint();
+    }
+
+    //==========================================================================
+    // Empty pad state — shown when the pad has no sample loaded.
+    void setEmptyState(bool isEmpty)
+    {
+        isEmptyPad = isEmpty;
+        emptyStateLabel.setVisible(isEmpty);
+        if (isEmpty)
+        {
+            if (waveformComponent != nullptr)
+                waveformComponent->setFile(juce::File{});
+            sampleNameLabel.setText ("Empty pad", juce::dontSendNotification);
+            durationLabel.setText   ("",           juce::dontSendNotification);
+            bottomInfoLabel.setText ("",           juce::dontSendNotification);
+        }
+        repaint();
+    }
+
+    //==========================================================================
+    // Restore all UI controls from a PadSettings snapshot.
+    // Called when the user switches to a different pad, silently (no listeners fired
+    // for parameter changes that would trigger saves).
+    void updateUIFromSettings(const PadSettings& s)
+    {
+        // Pitch (no listeners — caller is responsible for propagating to audio engine)
+        setPitchOffset     (s.pitchCents);
+        setBasePitchOffset (s.basePitchOffset);
+        setBaseTuningHz    (s.baseTuningHz);
+        setPitchStepCents  (s.pitchStepCents);
+        if (s.detectedNoteName.isNotEmpty())
+            setDetectedNoteName(s.detectedNoteName, s.detectedFreqHz);
+
+        // MIDI routing
+        setMidiNote    (s.midiNote);
+        setMidiChannel (s.midiChannel);
+
+        // Playback modes
+        setLoopEnabled    (s.loopEnabled);
+        setOneShotEnabled (s.oneShotEnabled);
+        setReverseEnabled (s.reverseEnabled);
+        setBounceEnabled  (s.bounceEnabled);
+
+        // Volume
+        setVolume (s.volumeLevel);
+
+        // Normalize (silent — no listener, no disk write)
+        setNormParams (s.normEnabled, s.normTargetDb, /*notifyListeners=*/false);
+
+        // ADSR (silent)
+        setAdsrParams (s.adsrEnabled,
+                       s.adsrAttackMs, s.adsrDecayMs,
+                       s.adsrSustain,  s.adsrReleaseMs,
+                       /*notifyListeners=*/false);
+
+        // EQ (silent)
+        setEqParams (s.eqEnabled,
+                     s.eq1Freq, s.eq1Gain, s.eq1Q,
+                     s.eq2Freq, s.eq2Gain, s.eq2Q,
+                     s.eq3Freq, s.eq3Gain, s.eq3Q,
+                     /*notifyListeners=*/false);
+        setEqFilterModes (s.eq1Mode, s.eq2Mode, s.eq3Mode, /*notifyListeners=*/false);
+
+        // Transient detection
+        setTransientDetectionEnabled (s.transientDetectionEnabled);
+        setTransientThreshold        (s.transientThreshold);
+
+        // Grid snap
+        setGridSnapEnabled     (s.gridSnapEnabled);
+        setGridResolutionIndex (s.gridResolutionIndex);
+
+        // Active tab
+        setActiveTabQuiet (s.activeTab);
     }
 
     void setDuration(double seconds)
@@ -4100,6 +4185,10 @@ void adjustPitchUp()
             waveformViewport.setViewPosition(0, 0);
         waveformComponent->repaint();
     }
+
+    // Empty pad overlay
+    juce::Label emptyStateLabel;
+    bool        isEmptyPad = false;
 
     // UI Components
     juce::TextButton addButton{"+"};

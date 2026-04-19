@@ -43,11 +43,11 @@ MainComponent::MainComponent()
         auto& engine = padManager.getEngine (padIndex);
 
         // Read the root note assigned to this pad under the sample lock
-        int note = 60; // default if no sample loaded
+        int note = padManager.getSettings(padIndex).midiNote;
         {
             juce::ScopedLock sl (engine.sampleLock);
-            if (engine.samples.isEmpty()) return;
-            note = engine.samples[0]->rootNote;
+            if (!engine.samples.isEmpty())
+                note = engine.samples[0]->rootNote;
         }
 
         // Trigger note on — full velocity
@@ -59,6 +59,61 @@ MainComponent::MainComponent()
             if (!padManager.hasEngine (padIndex)) return;
             padManager.getEngine (padIndex).getSynthesiser().noteOff (1, note, 0.0f, true);
         });
+    };
+
+    padGrid.onPadSelected = [this] (int padIndex)
+    {
+        DBG ("[PAD-SELECT] Pad " << padIndex + 1 << " selected");
+
+        // Capture outgoing pad state before switching
+        saveOutgoingSampleState();
+
+        // Also capture current state into PadSettings for the outgoing pad
+        captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+        // Switch the active pad
+        padManager.selectPad (padIndex);
+
+        auto& incoming = padManager.getSettings (padIndex);
+
+        if (incoming.sampleFilePath.isEmpty())
+        {
+            sampleCard.setEmptyState (true);
+            sampleCard.updateUIFromSettings (incoming);
+        }
+        else
+        {
+            sampleCard.setEmptyState (false);
+            sampleCard.updateUIFromSettings (incoming);
+
+            juce::File padFile (incoming.sampleFilePath);
+            if (padFile.existsAsFile())
+            {
+                currentFolder = padFile.getParentDirectory();
+                sampleCard.restoreZoomAndScroll (incoming.zoomLevel,
+                                                  incoming.zoomScrollPosition);
+                const int myGen = navigationGeneration.fetch_add(1) + 1;
+                backgroundThreads.addJob ([this, padFile, myGen]()
+                {
+                    if (myGen != navigationGeneration.load()) return;
+                    loadSampleFileAsync (padFile, false);
+                });
+            }
+        }
+
+        // Sync base tuning label to the incoming pad's tuning
+        baseTuningLabel.setHz (incoming.baseTuningHz);
+        sampleCard.setBaseTuningHz (incoming.baseTuningHz);
+
+        // Update grid label (may already be set, but ensures freshness)
+        padGrid.setPadSampleName (padIndex,
+            incoming.sampleFilePath.isEmpty()
+                ? juce::String{}
+                : juce::File (incoming.sampleFilePath).getFileName());
+
+        printf ("[PAD-SELECT] Pad %d active — file='%s'\n", padIndex + 1,
+                incoming.sampleFilePath.toRawUTF8());
+        fflush (stdout);
     };
     
     formatManager.registerBasicFormats();
@@ -1050,6 +1105,16 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
     // This is the ONLY operation that affects audio latency in this path.
     midiCollector.addMessageToQueue(message);
 
+    // Flash the pad mapped to this MIDI note in the grid (Part 2G).
+    if (message.isNoteOn())
+    {
+        const int flashPad = padManager.findPadForMidiNote(
+            message.getNoteNumber(), message.getChannel());
+        if (flashPad >= 0)
+            juce::MessageManager::callAsync([this, flashPad]()
+                { padGrid.triggerFlash(flashPad); });
+    }
+
     // One-shot tail detection: note-off ignored by audio engine while 1Shot is ON.
     // Timer and UI updates must run on the message thread — use callAsync.
     if (message.isNoteOff() && sampleCard.isOneShotEnabled() && !isOneShotTailPlaying)
@@ -1935,6 +2000,11 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             saveCurrentSampleState();
             saveCurrentSession();
         }
+
+        // Part 2H — update the pad grid name for the currently selected pad.
+        padManager.padSettings[padManager.selectedPadIndex].sampleFilePath =
+            file.getFullPathName();
+        padGrid.setPadSampleName(padManager.selectedPadIndex, file.getFileName());
 
         printf("[PERSIST] --- Load complete: %s ---\n", file.getFileName().toRawUTF8());
         printf("[LOAD-TIMING] total message-thread work: %lldms\n",
@@ -3299,6 +3369,23 @@ void MainComponent::loadLastSession()
         printf("[PERSIST] No last sample to restore.\n");
     }
 
+    // ── Load PadSettings for all 16 pads and update grid display names ──────────
+    padManager.loadAllPads(configManager->getPropertiesFile());
+
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        const auto& ps = padManager.padSettings[i];
+        if (ps.sampleFilePath.isNotEmpty())
+        {
+            padGrid.setPadSampleName(i, juce::File(ps.sampleFilePath).getFileName());
+            printf("[STARTUP] Pad %d: '%s'\n", i + 1,
+                   juce::File(ps.sampleFilePath).getFileName().toRawUTF8());
+        }
+    }
+
+    // Select pad 0 in the grid (already the default, but explicit is clearer)
+    padGrid.selectPad(0);
+
     printf("[PERSIST] ===== Session restore initiated =====\n");
     fflush(stdout);
 }
@@ -3399,6 +3486,12 @@ void MainComponent::saveCurrentSampleState()
     // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
 
     configManager->saveSampleState(sample->file, s);
+
+    // Also capture into the PadSettings for the currently selected pad and persist.
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    padManager.padSettings[padManager.selectedPadIndex].saveToProperties(
+        configManager->getPropertiesFile());
+
     configManager->flush();   // ONE disk write for the entire sample state batch
     printf("[ADSR SAVE] adsrEnabled=%s  atk=%.0fms  dcy=%.0fms  sus=%.0f%%  rel=%.0fms  →  %s\n",
            s.adsrEnabled ? "true" : "false",
@@ -3410,6 +3503,86 @@ void MainComponent::saveCurrentSampleState()
            s.loopEnabled ? "ON" : "OFF",
            s.detectedNoteName.isEmpty() ? "-" : s.detectedNoteName.toRawUTF8());
     fflush(stdout);
+}
+
+void MainComponent::captureSampleCardToPadSettings(int padIdx)
+{
+    if (padIdx < 0 || padIdx >= PadManager::kMaxPads) return;
+    auto& ps = padManager.getSettings(padIdx);
+    auto& engine = padManager.getEngine(padIdx);
+
+    // Sample file path
+    {
+        juce::ScopedLock lock(engine.sampleLock);
+        if (engine.selectedSampleIndex >= 0 &&
+            engine.selectedSampleIndex < engine.samples.size())
+        {
+            ps.sampleFilePath = engine.samples[engine.selectedSampleIndex]->file.getFullPathName();
+        }
+    }
+
+    // Pitch
+    ps.pitchCents      = sampleCard.getPitchOffset();
+    ps.basePitchOffset = sampleCard.getBasePitchOffset();
+    ps.baseTuningHz    = sampleCard.getBaseTuningHz();
+    ps.pitchStepCents  = 100; // getGridInterval()-style — use existing SampleCard if needed
+
+    // Detected note (may be empty for unpitched material)
+    ps.detectedNoteName = sampleCard.getDetectedNoteName();
+    ps.detectedFreqHz   = sampleCard.getDetectedFreqHz();
+
+    // Playback modes
+    ps.loopEnabled    = sampleCard.isLoopEnabled();
+    ps.oneShotEnabled = sampleCard.isOneShotEnabled();
+    ps.reverseEnabled = sampleCard.isReverseEnabled();
+    ps.bounceEnabled  = sampleCard.isBounceEnabled();
+
+    // Volume + normalize
+    ps.volumeLevel  = sampleCard.getVolume();
+    ps.normEnabled  = sampleCard.isNormEnabled();
+    ps.normTargetDb = sampleCard.getNormTargetDb();
+
+    // ADSR
+    ps.adsrEnabled   = sampleCard.isAdsrEnabled();
+    ps.adsrAttackMs  = sampleCard.getAdsrAttackMs();
+    ps.adsrDecayMs   = sampleCard.getAdsrDecayMs();
+    ps.adsrSustain   = sampleCard.getAdsrSustain();
+    ps.adsrReleaseMs = sampleCard.getAdsrReleaseMs();
+
+    // EQ
+    ps.eqEnabled = sampleCard.isEqEnabled();
+    ps.eq1Freq   = sampleCard.getEqBandFreq(0); ps.eq1Gain = sampleCard.getEqBandGain(0);
+    ps.eq1Q      = sampleCard.getEqBandQ(0);    ps.eq1Mode = engine.eqFilterModes[0];
+    ps.eq2Freq   = sampleCard.getEqBandFreq(1); ps.eq2Gain = sampleCard.getEqBandGain(1);
+    ps.eq2Q      = sampleCard.getEqBandQ(1);    ps.eq2Mode = engine.eqFilterModes[1];
+    ps.eq3Freq   = sampleCard.getEqBandFreq(2); ps.eq3Gain = sampleCard.getEqBandGain(2);
+    ps.eq3Q      = sampleCard.getEqBandQ(2);    ps.eq3Mode = engine.eqFilterModes[2];
+
+    // Markers
+    {
+        juce::ScopedLock lock(engine.sampleLock);
+        if (engine.selectedSampleIndex >= 0 &&
+            engine.selectedSampleIndex < engine.samples.size())
+        {
+            ps.startPointSeconds = engine.samples[engine.selectedSampleIndex]->startPointSeconds;
+            ps.endPointSeconds   = engine.samples[engine.selectedSampleIndex]->endPointSeconds;
+        }
+    }
+
+    // Transient detection
+    ps.transientDetectionEnabled = sampleCard.isTransientDetectionEnabled();
+    ps.transientThreshold        = (float)sampleCard.getTransientThreshold();
+
+    // Grid snap
+    ps.gridSnapEnabled     = sampleCard.isGridSnapEnabled();
+    ps.gridResolutionIndex = sampleCard.getGridResolutionIndex();
+
+    // MIDI routing
+    ps.midiNote    = sampleCard.getMidiNote();
+    ps.midiChannel = sampleCard.getMidiChannel();
+
+    // Active tab
+    ps.activeTab = sampleCard.getActiveTabIndex();
 }
 
 void MainComponent::saveCurrentSession()
