@@ -135,33 +135,69 @@ public:
         }
 
                 if (currentState != State::Empty && sampleName.isNotEmpty())
-        {
-            auto dn = sampleName.upToLastOccurrenceOf (".", false, false);
-            if (dn.isEmpty()) dn = sampleName;
-            if (dn.length() > 12) dn = dn.substring (0, 9) + "...";
-            g.saveState();
-            g.reduceClipRegion (cachedPath);
-            g.setColour (juce::Colours::white);
-            g.setFont (juce::Font (9.0f));
-            auto b = getLocalBounds().toFloat();
+                {
+                    auto dn = sampleName.upToLastOccurrenceOf (".", false, false);
+                    if (dn.isEmpty()) dn = sampleName;
+                    // Increased from 12 to 18 characters before truncation
+                    if (dn.length() > 18) dn = dn.substring (0, 15) + "...";
+                    g.saveState();
+                    g.reduceClipRegion (cachedPath);
+                    g.setColour (juce::Colours::white);
+                    g.setFont (juce::Font (9.0f));
+                    auto b = getLocalBounds().toFloat();
             
-            // Position text based on trapezoid direction
-            if (direction == Direction::Down)
-            {
-                // Down-pointing trapezoid: wider base at TOP, text at top
-                g.drawText (dn, (int)b.getX() + 4, (int)b.getY() + 2,
-                            (int)b.getWidth() - 8, 14,
-                            juce::Justification::topLeft, true);
-            }
-            else
-            {
-                // Up-pointing trapezoid: wider base at BOTTOM, text at bottom
-                g.drawText (dn, (int)b.getX() + 4, (int)b.getBottom() - 16,
-                            (int)b.getWidth() - 8, 14,
-                            juce::Justification::bottomLeft, true);
-            }
-            g.restoreState();
-        }
+                    // Calculate the visible left edge of the trapezoid
+                    float visibleLeftEdge = 0.0f;
+                    float visibleRightEdge = b.getWidth();
+            
+                    // Fixed proportion from your sketch: narrow / wide = 13.555 / 44.694
+                    constexpr float narrowToWideRatio = 13.555f / 44.694f;  // ≈ 0.3033
+                    float narrowW = b.getWidth() * narrowToWideRatio;
+                    float narrowX = (b.getWidth() - narrowW) * 0.5f;
+            
+                    // Check if this is an edge pad
+                    bool isLeftEdge = (padIndex == 0 || padIndex == 8);
+                    bool isRightEdge = (padIndex == 7 || padIndex == 15);
+            
+                    if (isLeftEdge)
+                    {
+                        // Left edge pad: visible area starts at narrowX
+                        visibleLeftEdge = narrowX;
+                    }
+                    else if (isRightEdge)
+                    {
+                        // Right edge pad: visible area ends at narrowX + narrowW
+                        visibleRightEdge = narrowX + narrowW;
+                    }
+                    // For interior pads, visible area is full width (0 to width)
+            
+                    // Calculate text bounds based on visible area
+                    // For left edge pads, use 11px margin (≈3mm) from visible edge
+                    // For other pads, use 4px margin
+                    float marginFromVisibleEdge = isLeftEdge ? 11.0f : 4.0f;
+                    float textX = visibleLeftEdge + marginFromVisibleEdge;
+                    float textWidth = visibleRightEdge - visibleLeftEdge - (marginFromVisibleEdge * 2.0f);
+            
+                    // Ensure text width is positive
+                    textWidth = juce::jmax(1.0f, textWidth);
+            
+                    // Position text based on trapezoid direction
+                    if (direction == Direction::Down)
+                    {
+                        // Down-pointing trapezoid: wider base at TOP, text at top
+                        g.drawText (dn, (int)textX, (int)b.getY() + 2,
+                                    (int)textWidth, 14,
+                                    juce::Justification::topLeft, true);
+                    }
+                    else
+                    {
+                        // Up-pointing trapezoid: wider base at BOTTOM, text at bottom
+                        g.drawText (dn, (int)textX, (int)b.getBottom() - 16,
+                                    (int)textWidth, 14,
+                                    juce::Justification::bottomLeft, true);
+                    }
+                    g.restoreState();
+                }
     }
 
     bool hitTest (int x, int y) override
