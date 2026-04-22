@@ -134,7 +134,7 @@ public:
             g.fillEllipse (cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
         }
 
-        if (currentState != State::Empty && sampleName.isNotEmpty())
+                if (currentState != State::Empty && sampleName.isNotEmpty())
         {
             auto dn = sampleName.upToLastOccurrenceOf (".", false, false);
             if (dn.isEmpty()) dn = sampleName;
@@ -144,9 +144,22 @@ public:
             g.setColour (juce::Colours::white);
             g.setFont (juce::Font (9.0f));
             auto b = getLocalBounds().toFloat();
-            g.drawText (dn, (int)b.getX() + 4, (int)b.getBottom() - 16,
-                        (int)b.getWidth() - 8, 14,
-                        juce::Justification::bottomLeft, true);
+            
+            // Position text based on trapezoid direction
+            if (direction == Direction::Down)
+            {
+                // Down-pointing trapezoid: wider base at TOP, text at top
+                g.drawText (dn, (int)b.getX() + 4, (int)b.getY() + 2,
+                            (int)b.getWidth() - 8, 14,
+                            juce::Justification::topLeft, true);
+            }
+            else
+            {
+                // Up-pointing trapezoid: wider base at BOTTOM, text at bottom
+                g.drawText (dn, (int)b.getX() + 4, (int)b.getBottom() - 16,
+                            (int)b.getWidth() - 8, 14,
+                            juce::Justification::bottomLeft, true);
+            }
             g.restoreState();
         }
     }
