@@ -161,8 +161,9 @@ public:
             
                     if (isLeftEdge)
                     {
-                        // Left edge pad: visible area starts at narrowX
-                        visibleLeftEdge = narrowX;
+                        // Left edge pad: visible area starts at 0 (trapezoid starts at component edge)
+                        visibleLeftEdge = 0.0f;
+                        // For left edge pads, the narrow side is at 0, not narrowX
                     }
                     else if (isRightEdge)
                     {
@@ -172,9 +173,10 @@ public:
                     // For interior pads, visible area is full width (0 to width)
             
                     // Calculate text bounds based on visible area
-                    // For left edge pads, use 11px margin (≈3mm) from visible edge
-                    // For other pads, use 4px margin
-                    float marginFromVisibleEdge = isLeftEdge ? 11.0f : 4.0f;
+                    // Add 2 character margin (18px) to all pads for better visual spacing
+                    // Left edge pads: 56px + 18px = 74px
+                    // Other pads: 4px + 18px = 22px
+                    float marginFromVisibleEdge = isLeftEdge ? 74.0f : 22.0f;
                     float textX = visibleLeftEdge + marginFromVisibleEdge;
                     float textWidth = visibleRightEdge - visibleLeftEdge - (marginFromVisibleEdge * 2.0f);
             
