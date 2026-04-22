@@ -142,6 +142,9 @@ private:
     // trimSnapshot: when valid=true, restore all settings from snapshot instead of config lookup.
     void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, bool resetZoom = false,
                               bool deferTransients = false, TrimSettingsSnapshot trimSnapshot = {});
+    // Loads a sample into a specific pad engine WITHOUT touching the SampleCard UI.
+    // Used at startup to restore all saved pads into RAM so pad switching is instant.
+    void preloadPadEngineAsync(int padIdx, juce::File file, PadSettings settings);
     void updateSamplerSounds();
 
     // Audio device management
@@ -543,7 +546,15 @@ private:
     {
     public:
         MidiSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
+        void timerCallback() override
+        {
+            stopTimer();
+            // Always flush — MIDI settings must persist even when the pad has no sample loaded.
+            if (owner.configManager != nullptr)
+                owner.configManager->flush();
+            // Also save full sample state if a sample is loaded.
+            owner.saveCurrentSampleState();
+        }
     private:
         MainComponent& owner;
     };

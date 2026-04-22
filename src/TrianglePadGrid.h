@@ -35,33 +35,57 @@ public:
 
     std::function<void(int)> onClicked;
 
+    // Go fuchsia immediately with no auto-restore timer.
+    // Use for MIDI note-on and mouse-down — colour lasts until triggerEnd() is called.
+    void triggerStart()
+    {
+        flashTimer.stopTimer();
+        if (currentState != State::Triggered)
+            preFlashState = currentState;
+        currentState = State::Triggered;
+        repaint();
+    }
+
+    // Restore from fuchsia back to preFlashState (Selected / Loaded / Empty).
+    // minHoldMs > 0 ensures the fuchsia is visible even for very short notes.
+    void triggerEnd (int minHoldMs = 80)
+    {
+        if (currentState != State::Triggered)
+            return;
+        flashTimer.stopTimer();
+        if (minHoldMs > 0)
+            flashTimer.startTimer (minHoldMs);
+        else
+            restoreFromFlash();
+    }
+
+    // Legacy wrapper kept for code paths that have no paired noteOff (e.g. one-shot test tones).
+    // Always restores after a fixed 150ms so fuchsia never gets stuck.
     void triggerFlash()
     {
-        // Set fuchsia immediately
-        preFlashState = State::Selected; // always return to Selected — not empty
-        currentState  = State::Triggered;
-        repaint();
-
-        flashTimer.stopTimer();
-        flashTimer.startTimer (120);
+        triggerStart();
+        flashTimer.startTimer (150);
     }
 
 private:
+    void restoreFromFlash()
+    {
+        flashTimer.stopTimer();
+        if (currentState == State::Triggered)
+        {
+            currentState = preFlashState;
+            repaint();
+        }
+    }
+
     struct FlashTimer : public juce::Timer
     {
         TrianglePad* owner = nullptr;
-        void timerCallback() override
-        {
-            stopTimer();  // stop first before any state changes
-            if (owner != nullptr && owner->currentState == State::Triggered)
-            {
-                owner->currentState = owner->preFlashState;
-                owner->repaint();
-            }
-        }
+        void timerCallback() override { owner->restoreFromFlash(); }
     } flashTimer;
 
 public:
+    std::function<void(int)> onReleased;  // called on mouseUp — use to stop note early
 
     void mouseEnter (const juce::MouseEvent&) override { isHovered = true;  repaint(); }
     void mouseExit  (const juce::MouseEvent&) override { isHovered = false; repaint(); }
@@ -69,6 +93,15 @@ public:
     {
         if (cachedPath.contains (e.position) && onClicked)
             onClicked (padIndex);
+        // triggerStart() is called by the grid's handlePadClicked after onClicked.
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        // Restore fuchsia after button release, with 80ms minimum visibility.
+        triggerEnd (80);
+        if (cachedPath.contains (e.position) && onReleased)
+            onReleased (padIndex);
     }
 
     void paint (juce::Graphics& g) override
@@ -197,7 +230,11 @@ public:
         return nullptr;
     }
 
+    void triggerStart (int i) { if (auto* p = getPad (i)) p->triggerStart(); }
+    void triggerEnd   (int i, int minHoldMs = 80) { if (auto* p = getPad (i)) p->triggerEnd (minHoldMs); }
+
     std::function<void(int)> onPadClicked;
+    std::function<void(int)> onPadReleased;
 
     void paint (juce::Graphics& g) override
     {
@@ -283,6 +320,7 @@ public:
                                 : TrianglePad::State::Empty);
         selectedIndex = idx;
         if (auto* p = padAt (idx)) p->setState (TrianglePad::State::Selected);
+        printf ("[MOUSE-SELECT] Pad %d selected by mouse — state=Selected\n", idx + 1);
         if (onPadSelected) onPadSelected (idx);
     }
 

@@ -151,33 +151,60 @@ public:
     void releaseResources() {}
 
     // Render this pad's audio into [startSample, startSample+numSamples) of outputBuffer.
-    // Applies: sampler → normGain → volumeGain → EQ → push to FFT FIFO.
+    // Applies: sampler → normGain → volumeGain → EQ → push to FFT FIFO → accumulate into outputBuffer.
+    //
+    // KEY ISOLATION: the sampler renders into a PRIVATE scratch buffer (ownBuffer), not directly
+    // into outputBuffer. EQ and FFT operate on ownBuffer — so the FFT spectrum shows ONLY this
+    // pad's audio, not the accumulated mix of all engines rendered before it. Only after EQ and
+    // FFT capture is ownBuffer added into outputBuffer.
+    //
     // Master volume is intentionally NOT applied — PadManager does that after mixing.
     void renderNextBlock(juce::AudioBuffer<float>& outputBuffer,
                          const juce::MidiBuffer& midiMessages,
                          int startSample, int numSamples)
     {
-        sampler.renderNextBlock(outputBuffer, midiMessages, startSample, numSamples);
+        const int nCh = outputBuffer.getNumChannels();
+
+        // ── Grow private scratch buffer if needed (no allocation in the common case) ──
+        if (ownBuffer.getNumChannels() < nCh || ownBuffer.getNumSamples() < numSamples)
+            ownBuffer.setSize(nCh, numSamples, false, true, true);
+
+        // Render sampler into our private buffer (cleared to silence first by JUCE Synthesiser)
+        {
+            // Synthesiser expects a buffer large enough from sample 0.
+            // We use a sub-buffer view trick: set the ownBuffer to zeros then render.
+            ownBuffer.clear(0, numSamples);
+            juce::AudioBuffer<float> subBuf(ownBuffer.getArrayOfWritePointers(),
+                                            nCh, 0, numSamples);
+            // Use startSample=0 in subBuf — MIDI events reference absolute sample within block,
+            // so we need to pass the same midiMessages but shifted. Use an offset MidiBuffer view.
+            juce::MidiBuffer shiftedMidi;
+            for (const auto& meta : midiMessages)
+            {
+                const int pos = meta.samplePosition - startSample;
+                if (pos >= 0 && pos < numSamples)
+                    shiftedMidi.addEvent(meta.getMessage(), pos);
+            }
+            sampler.renderNextBlock(subBuf, shiftedMidi, 0, numSamples);
+        }
 
         // Normalization gain (before per-pad volume)
         {
             float ng = normGain.load();
             if (ng != 1.0f)
-                outputBuffer.applyGain(startSample, numSamples, ng);
+                ownBuffer.applyGain(0, numSamples, ng);
         }
 
         // Per-pad volume gain
         {
             float g = volumeGain.load();
             if (g != 1.0f)
-                outputBuffer.applyGain(startSample, numSamples, g);
+                ownBuffer.applyGain(0, numSamples, g);
         }
 
         // ── Parametric EQ — single-pass cascade, lock-free double-buffer coeffs ──
         if (eqActive.load())
         {
-            const int nCh = outputBuffer.getNumChannels();
-
             // Measure EQ Reset round-trip (no printf in audio thread)
             const juce::int64 resetReqMs = eqResetRequestedMs.load(std::memory_order_relaxed);
             if (resetReqMs > 0)
@@ -191,7 +218,7 @@ public:
 
             for (int ch = 0; ch < juce::jmin(nCh, 2); ++ch)
             {
-                float* data = outputBuffer.getWritePointer(ch, startSample);
+                float* data = ownBuffer.getWritePointer(ch, 0);
                 double z1_0 = eqZ1[0][ch], z2_0 = eqZ2[0][ch];
                 double z1_1 = eqZ1[1][ch], z2_1 = eqZ2[1][ch];
                 double z1_2 = eqZ1[2][ch], z2_2 = eqZ2[2][ch];
@@ -217,9 +244,8 @@ public:
             }
         }
 
-        // ── Push mono samples to FFT circular buffer (< 1 µs) ────────────────
+        // ── Push THIS PAD'S audio to FFT (from ownBuffer, not the accumulated mix) ──
         {
-            const int nCh     = outputBuffer.getNumChannels();
             const int toWrite = juce::jmin(numSamples, fftAbstractFifo.getFreeSpace());
 
             if (toWrite > 0)
@@ -231,7 +257,7 @@ public:
                 {
                     float mono = 0.0f;
                     for (int ch = 0; ch < juce::jmin(nCh, 2); ++ch)
-                        mono += outputBuffer.getReadPointer(ch, startSample)[i];
+                        mono += ownBuffer.getReadPointer(ch, 0)[i];
                     if (nCh > 0) mono /= static_cast<float>(nCh);
                     fftCircularBuffer[start1 + i] = mono;
                 }
@@ -239,13 +265,17 @@ public:
                 {
                     float mono = 0.0f;
                     for (int ch = 0; ch < juce::jmin(nCh, 2); ++ch)
-                        mono += outputBuffer.getReadPointer(ch, startSample)[size1 + i];
+                        mono += ownBuffer.getReadPointer(ch, 0)[size1 + i];
                     if (nCh > 0) mono /= static_cast<float>(nCh);
                     fftCircularBuffer[start2 + i] = mono;
                 }
                 fftAbstractFifo.finishedWrite(size1 + size2);
             }
         }
+
+        // ── Accumulate this pad's processed audio into the shared output buffer ──
+        for (int ch = 0; ch < juce::jmin(nCh, ownBuffer.getNumChannels()); ++ch)
+            outputBuffer.addFrom(ch, startSample, ownBuffer, ch, 0, numSamples);
     }
 
     //==========================================================================
@@ -677,6 +707,10 @@ private:
     static constexpr float kSpecSmoothDown = 0.3f;
 
     std::unique_ptr<juce::dsp::FFT> fft;
+
+    // Private scratch buffer — renderNextBlock() renders into this, not into the shared
+    // outputBuffer, so EQ and FFT see only this pad's audio before mixing.
+    juce::AudioBuffer<float> ownBuffer;
 
     juce::AbstractFifo fftAbstractFifo { kFFTSize * 2 };
     float              fftCircularBuffer[kFFTSize * 2] {};

@@ -67,10 +67,14 @@ MainComponent::MainComponent()
         // Never call loadSampleFileAsync here; that reads from disk and causes multi-second lag.
 
         const auto t0 = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
+        printf("[PAD-TIMING] Pad %d → Pad %d: starting switch\n",
+               padManager.selectedPadIndex + 1, padIndex + 1);
 
         // ── Step 1: Capture outgoing pad state (in-memory, no disk flush) ──
         captureSampleCardToPadSettings (padManager.selectedPadIndex);
-        saveOutgoingSampleState();   // in-memory saveSampleState(), no flush
+        saveOutgoingSampleState();
+        printf("[PAD-TIMING] Step 1 capture+save: %lldms\n",
+               (long long)(juce::Time::getMillisecondCounter() - t0));
 
         // ── Step 2: Switch active pad index — instant (atomic-equivalent for UI thread) ──
         padManager.selectPad (padIndex);
@@ -81,6 +85,29 @@ MainComponent::MainComponent()
         // ── Step 3: Restore all UI controls from saved PadSettings — instant ──
         sampleCard.updateUIFromSettings (settings);
         baseTuningLabel.setHz (settings.baseTuningHz);
+        printf("[PAD-TIMING] Step 3 updateUIFromSettings: %lldms\n",
+               (long long)(juce::Time::getMillisecondCounter() - t0));
+
+        // ── Step 3b: Push EQ state to the new engine's audio pipeline ─────────────
+        // updateUIFromSettings uses notifyListeners=false for EQ — the UI is updated
+        // but eqParamsChanged listener is NOT fired, so the engine's eqCoeffDB is stale.
+        // We must push the coefficients and filter modes manually here.
+        {
+            engine.eqActive.store(settings.eqEnabled);
+            engine.eqFilterModes[0] = settings.eq1Mode;
+            engine.eqFilterModes[1] = settings.eq2Mode;
+            engine.eqFilterModes[2] = settings.eq3Mode;
+
+            const double sr = engine.getSampleRate() > 0.0 ? engine.getSampleRate() : 44100.0;
+            PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+            newCoeffs[0] = engine.computeEqCoeffs(settings.eq1Freq, settings.eq1Gain, settings.eq1Q, settings.eq1Mode, sr);
+            newCoeffs[1] = engine.computeEqCoeffs(settings.eq2Freq, settings.eq2Gain, settings.eq2Q, settings.eq2Mode, sr);
+            newCoeffs[2] = engine.computeEqCoeffs(settings.eq3Freq, settings.eq3Gain, settings.eq3Q, settings.eq3Mode, sr);
+            engine.eqCoeffDB.writeFromUI(newCoeffs);
+        }
+
+        printf("[PAD-TIMING] Step 3b EQ push: %lldms\n",
+               (long long)(juce::Time::getMillisecondCounter() - t0));
 
         if (!engine.hasSampleLoaded())
         {
@@ -1295,6 +1322,162 @@ void MainComponent::clearAllSamples()
     fflush(stdout);
 }
 
+void MainComponent::preloadPadEngineAsync(int padIdx, juce::File file, PadSettings settings)
+{
+    // Run on a background thread so disk I/O never blocks the message thread.
+    backgroundThreads.addJob([this, padIdx, file, settings]()
+    {
+        printf("[PRELOAD] Pad %d: reading '%s'...\n", padIdx + 1,
+               file.getFileName().toRawUTF8());
+        fflush(stdout);
+
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+        if (reader == nullptr)
+        {
+            printf("[PRELOAD] Pad %d: ERROR — cannot read '%s'\n", padIdx + 1,
+                   file.getFileName().toRawUTF8());
+            return;
+        }
+
+        auto* sample = new MappedSample();
+        sample->file            = file;
+        sample->name            = file.getFileName();
+        sample->rootNote        = settings.midiNote;
+        sample->lowNote         = settings.midiNote;
+        sample->highNote        = settings.midiNote;
+        sample->sampleRate      = reader->sampleRate;
+        sample->numChannels     = reader->numChannels;
+        sample->lengthInSamples = reader->lengthInSamples;
+        sample->attack          = 0.01;
+        sample->release         = 0.1;
+        sample->startPointSeconds = settings.startPointSeconds;
+        sample->endPointSeconds   = settings.endPointSeconds;
+        sample->pitchOffset       = settings.pitchCents;
+
+        auto buffer = std::make_shared<juce::AudioBuffer<float>>(
+            (int)reader->numChannels, (int)reader->lengthInSamples);
+        if (!reader->read(buffer.get(), 0, (int)reader->lengthInSamples, 0, true, true))
+        {
+            printf("[PRELOAD] Pad %d: ERROR — failed to decode '%s'\n", padIdx + 1,
+                   file.getFileName().toRawUTF8());
+            delete sample;
+            return;
+        }
+        sample->audioData = std::move(buffer);
+
+        // Pre-compute waveform peaks for instant display on pad switch.
+        const int    peakNumCh    = (int)reader->numChannels;
+        const juce::int64 peakNS = reader->lengthInSamples;
+        const double peakSR      = reader->sampleRate;
+
+        auto peaks = std::make_unique<WaveformPeakBin[]>(kWaveformPeakBins);
+        {
+            const float* L = sample->audioData->getReadPointer(0);
+            const float* R = (peakNumCh > 1) ? sample->audioData->getReadPointer(1) : L;
+            for (int bin = 0; bin < kWaveformPeakBins; ++bin)
+            {
+                const juce::int64 sS = (juce::int64)((double)bin       / kWaveformPeakBins * peakNS);
+                const juce::int64 sE = juce::jmin((juce::int64)((double)(bin+1) / kWaveformPeakBins * peakNS), peakNS);
+                WaveformPeakBin& pb = peaks[bin];
+                pb.minL = pb.minR = 1.0f; pb.maxL = pb.maxR = -1.0f;
+                for (juce::int64 s = sS; s < sE; ++s)
+                {
+                    pb.minL = juce::jmin(pb.minL, L[s]); pb.maxL = juce::jmax(pb.maxL, L[s]);
+                    pb.minR = juce::jmin(pb.minR, R[s]); pb.maxR = juce::jmax(pb.maxR, R[s]);
+                }
+            }
+        }
+
+        printf("[PRELOAD] Pad %d: audio read OK (%lld samples), installing on message thread\n",
+               padIdx + 1, peakNS);
+        fflush(stdout);
+
+        juce::MessageManager::callAsync(
+            [this, padIdx, sample, settings, file,
+             peaks = std::move(peaks), peakNumCh, peakNS, peakSR]() mutable
+        {
+            PadAudioEngine& engine = padManager.getEngine(padIdx);
+
+            // Hard-stop any existing audio in that engine slot.
+            engine.muteOutput.store(true);
+            engine.clearActiveSoundFlags();
+            engine.forceStopAllVoices();
+            engine.clearSoundsAndVoices();
+            engine.allNotesOff(0, false);
+
+            // Install audio buffer.
+            {
+                juce::ScopedLock lock(engine.sampleLock);
+                engine.samples.clear();
+                engine.selectedSampleIndex = 0;
+                engine.samples.add(sample);
+            }
+
+            // Store peak cache for instant waveform display on pad switch.
+            engine.storePeakCache(peaks.get(), kWaveformPeakBins, peakNumCh, peakNS, peakSR);
+
+            // Create LoopingSamplerSound so MIDI notes trigger this pad.
+            class DummyAudioReader : public juce::AudioFormatReader
+            {
+            public:
+                DummyAudioReader(double sr, unsigned int ch)
+                    : juce::AudioFormatReader(nullptr, "Dummy")
+                { sampleRate=sr; numChannels=ch; lengthInSamples=1; bitsPerSample=32; usesFloatingPointData=true; }
+                bool readSamples(int* const* dest, int numDest, int startOff,
+                                 juce::int64, int num) override
+                {
+                    for (int ch=0;ch<numDest;++ch)
+                        if(dest[ch]) memset(reinterpret_cast<float*>(dest[ch])+startOff,0,(size_t)num*sizeof(float));
+                    return true;
+                }
+            };
+            DummyAudioReader dummyReader(sample->sampleRate, (unsigned int)sample->numChannels);
+
+            const juce::int64 bufTotal = (juce::int64)sample->audioData->getNumSamples();
+            juce::int64 startSmp = 0, endSmp = juce::jmax((juce::int64)1, bufTotal - 1);
+            if (sample->startPointSeconds > 0.0 && sample->sampleRate > 0)
+                startSmp = juce::jlimit((juce::int64)0, endSmp-1, (juce::int64)(sample->startPointSeconds * sample->sampleRate));
+            if (sample->endPointSeconds > 0.0 && sample->sampleRate > 0)
+                endSmp = juce::jlimit(startSmp+1, bufTotal-1, (juce::int64)(sample->endPointSeconds * sample->sampleRate));
+
+            juce::BigInteger noteRange;
+            noteRange.setRange(0, 128, false);
+            noteRange.setBit(sample->rootNote);
+
+            auto* sound = new LoopingSamplerSound(
+                sample->name, dummyReader, noteRange,
+                sample->rootNote, sample->attack, sample->release, 10.0);
+            sound->fullAudioData = sample->audioData;
+            sound->startSampleAtomic.store(startSmp);
+            sound->endSampleAtomic.store(endSmp);
+            sound->loopEnabled.store(settings.loopEnabled);
+            sound->pitchOffsetAtomic.store(settings.pitchCents);
+            sound->oneShotEnabled.store(settings.oneShotEnabled);
+            sound->baseTuningRatioAtomic.store(1.0f);  // 440 Hz default at startup
+            sound->customAdsrEnabled.store(settings.adsrEnabled);
+            sound->customAdsrAttackMs.store(settings.adsrAttackMs);
+            sound->customAdsrDecayMs.store(settings.adsrDecayMs);
+            sound->customAdsrSustain.store(settings.adsrSustain);
+            sound->customAdsrReleaseMs.store(settings.adsrReleaseMs);
+            sound->reverseEnabled.store(settings.reverseEnabled);
+            sound->bounceEnabled.store(settings.bounceEnabled);
+            engine.getSynthesiser().addSound(sound);
+
+            engine.loopEnabled.store(settings.loopEnabled);
+            engine.volumeGain.store(settings.volumeLevel);
+
+            engine.muteOutput.store(false);
+
+            // Update grid label with filename (in case it wasn't set yet).
+            padGrid.setPadSampleName(padIdx, file.getFileName());
+
+            printf("[PRELOAD] Pad %d: '%s' installed and ready\n", padIdx + 1,
+                   file.getFileName().toRawUTF8());
+            fflush(stdout);
+        });
+    });
+}
+
 void MainComponent::updateSamplerSounds()
 {
     pad().getSynthesiser().clearSounds();
@@ -1713,6 +1896,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         }
 
         sampleCard.setSampleName(file.getFileName());
+        sampleCard.setEmptyState(false);  // Clear "No sample loaded" overlay now that audio is ready
 
         // Deliver pre-computed peaks BEFORE setWaveform() so the very first repaint
         // uses the peak data — zero disk I/O in paint() from this point forward.
@@ -2140,6 +2324,13 @@ void MainComponent::midiNoteChanged(int newNote)
                juce::Time::getMillisecondCounterHiRes() - t0);
     }
 
+    // Always persist the MIDI note into the pad settings — even if no sample is loaded
+    // (empty pads must remember their MIDI mapping across restarts).
+    padManager.padSettings[padManager.selectedPadIndex].midiNote = newNote;
+    padManager.padSettings[padManager.selectedPadIndex].midiChannel = sampleCard.getMidiChannel();
+    padManager.padSettings[padManager.selectedPadIndex].saveToProperties(
+        configManager->getPropertiesFile());
+
     // Deferred save — in-memory only here, one disk write fires 500ms after last change.
     // Do NOT call saveCurrentSession() / flush() synchronously — that blocks the message thread.
     configManager->saveMidiSettings(newNote, sampleCard.getMidiChannel(), currentMidiDeviceName);
@@ -2151,9 +2342,9 @@ void MainComponent::midiNoteChanged(int newNote)
 
 void MainComponent::midiChannelChanged(int newChannel)
 {
-    printf("MIDI channel filter set to: %s\n", 
+    printf("MIDI channel filter set to: %s\n",
            newChannel == 0 ? "All Channels" : juce::String(newChannel).toRawUTF8());
-    
+
     // The actual filtering happens in handleIncomingMidiMessage
     // No need to update samples, but we might want to stop currently playing notes
     // when changing channels to avoid stuck notes
@@ -2162,9 +2353,15 @@ void MainComponent::midiChannelChanged(int newChannel)
         // Stop all notes when changing channels to avoid confusion
         pad().getSynthesiser().allNotesOff(1, false);
     }
-    
-    // SAVE THE SESSION when MIDI channel changes
-    saveCurrentSession();
+
+    // Always persist the MIDI channel into the pad settings — even if no sample is loaded.
+    padManager.padSettings[padManager.selectedPadIndex].midiNote    = sampleCard.getMidiNote();
+    padManager.padSettings[padManager.selectedPadIndex].midiChannel = newChannel;
+    padManager.padSettings[padManager.selectedPadIndex].saveToProperties(
+        configManager->getPropertiesFile());
+
+    configManager->saveMidiSettings(sampleCard.getMidiNote(), newChannel, currentMidiDeviceName);
+    midiSaveTimer.startTimer(500);
 }
 
 void MainComponent::learningModeChanged(bool isLearning)
@@ -3231,12 +3428,25 @@ void MainComponent::loadLastSession()
 {
     printf("[PERSIST] ===== App startup: restoring session =====\n");
 
-    // ── Global settings (not per-sample) ──────────────────────────────────────────
-    int savedNote    = configManager->getMidiNote();
-    int savedChannel = configManager->getMidiChannel();
+    // ── Load all pad settings FIRST — before any listener-triggering calls ────────
+    // midiNoteChanged fires as a side effect of setMidiNote below. If loadAllPads
+    // runs after that, it reads the correct per-pad values. But if setMidiNote fires
+    // first, it writes padSettings[0].midiNote = global-flat-default (60/ch1) into
+    // the in-memory PropertiesFile via saveToProperties(), clobbering the saved value
+    // that loadAllPads would otherwise read.
+    padManager.loadAllPads(configManager->getPropertiesFile());
+
+    // ── Use pad 0's per-pad MIDI settings (not global flat key defaults) ──────────
+    // The global flat key is only a migration fallback; per-pad keys are authoritative.
+    int savedNote    = padManager.padSettings[0].midiNote > 0
+                       ? padManager.padSettings[0].midiNote
+                       : configManager->getMidiNote();
+    int savedChannel = padManager.padSettings[0].midiChannel > 0
+                       ? padManager.padSettings[0].midiChannel
+                       : configManager->getMidiChannel();
     juce::String savedDevice = configManager->getMidiDevice();
 
-    printf("[PERSIST] Global: midi_note=%d  midi_channel=%d  device=%s\n",
+    printf("[PERSIST] Pad0 MIDI: midi_note=%d  midi_channel=%d  device=%s\n",
            savedNote, savedChannel, savedDevice.toRawUTF8());
 
     // ── Restore global pitch FIRST — before any callbacks that call saveCurrentSession ──
@@ -3390,20 +3600,25 @@ void MainComponent::loadLastSession()
         printf("[PERSIST] No last sample to restore.\n");
     }
 
-    // ── Load PadSettings for all 16 pads and update grid display names ──────────
-    padManager.loadAllPads(configManager->getPropertiesFile());
-
+    // ── Populate grid display names from the padSettings already loaded above ──────
     for (int i = 0; i < PadManager::kMaxPads; ++i)
     {
         const auto& ps = padManager.padSettings[i];
         if (ps.sampleFilePath.isNotEmpty())
         {
-            padGrid.setPadSampleName(i, juce::File(ps.sampleFilePath).getFileName());
-            printf("[STARTUP] Pad %d: '%s'\n", i + 1,
-                   juce::File(ps.sampleFilePath).getFileName().toRawUTF8());
-            // FIX 2: Confirm per-pad MIDI routing restored from disk.
-            printf("[PERSIST] Pad %d MIDI note=%d channel=%d restored on startup\n",
-                   i + 1, ps.midiNote, ps.midiChannel);
+            const juce::File padFile(ps.sampleFilePath);
+            padGrid.setPadSampleName(i, padFile.getFileName());
+            printf("[STARTUP] Pad %d: '%s'  (midi=%d ch=%d)\n", i + 1,
+                   padFile.getFileName().toRawUTF8(), ps.midiNote, ps.midiChannel);
+
+            // Pad 0 is already loaded via loadSampleFileAsync above.
+            // Pads 1–15: preload audio into their engines in the background so pad
+            // switching is instant and MIDI triggers work without selecting the pad first.
+            if (i != 0 && padFile.existsAsFile() &&
+                formatManager.findFormatForFileExtension(padFile.getFileExtension()) != nullptr)
+            {
+                preloadPadEngineAsync(i, padFile, ps);
+            }
         }
     }
 

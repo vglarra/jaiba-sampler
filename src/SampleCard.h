@@ -2001,12 +2001,12 @@ public:
 
     double getTransientThreshold() const { return transientThreshold; }
 
-    void setTransientThreshold(double threshold)
+    void setTransientThreshold(double threshold, bool runDetection = true)
     {
         transientThreshold = juce::jlimit(1.5, 10.0, threshold);
         sensKnob.setValue(transientThreshold, juce::dontSendNotification);
         sensValueLabel.setText(juce::String(transientThreshold, 1) + "x", juce::dontSendNotification);
-        if (currentAudioFile.existsAsFile())
+        if (runDetection && currentAudioFile.existsAsFile())
             detectTransients(currentAudioFile);
     }
 
@@ -2197,34 +2197,40 @@ public:
         }
     }
 
-    void setMidiNote(int note)
+    // notify=false: update the UI display only — no listener fired.
+    // Use notify=false during pad switch (updateUIFromSettings) to avoid triggering
+    // updateSamplerSounds() and allNotesOff() which are not needed when the engine
+    // was already preloaded with the correct MIDI note.
+    void setMidiNote(int note, bool notify = true)
     {
         if (note >= 0 && note <= 127 && note != currentMidiNote)
         {
             currentMidiNote = note;
             updateMidiNoteDisplay();
-            
-            // Notify listeners
-            listeners.call([this](Listener& l) { l.midiNoteChanged(currentMidiNote); });
-            
-            printf("MIDI note set to: %d (%s)\n", 
-                   currentMidiNote, 
-                   juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true).toRawUTF8());
+
+            if (notify)
+                listeners.call([this](Listener& l) { l.midiNoteChanged(currentMidiNote); });
+
+            printf("MIDI note set to: %d (%s)%s\n",
+                   currentMidiNote,
+                   juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true).toRawUTF8(),
+                   notify ? "" : " [silent]");
         }
     }
-    
-    void setMidiChannel(int channel)
+
+    void setMidiChannel(int channel, bool notify = true)
     {
         if (channel >= 0 && channel <= 16 && channel != currentMidiChannel)
         {
             currentMidiChannel = channel;
             updateMidiChannelDisplay();
-            
-            // Notify listeners
-            listeners.call([this](Listener& l) { l.midiChannelChanged(currentMidiChannel); });
-            
-            printf("MIDI channel set to: %s\n", 
-                   currentMidiChannel == 0 ? "All Channels" : juce::String(currentMidiChannel).toRawUTF8());
+
+            if (notify)
+                listeners.call([this](Listener& l) { l.midiChannelChanged(currentMidiChannel); });
+
+            printf("MIDI channel set to: %s%s\n",
+                   currentMidiChannel == 0 ? "All Channels" : juce::String(currentMidiChannel).toRawUTF8(),
+                   notify ? "" : " [silent]");
         }
     }
     
@@ -2265,9 +2271,10 @@ public:
         if (s.detectedNoteName.isNotEmpty())
             setDetectedNoteName(s.detectedNoteName, s.detectedFreqHz);
 
-        // MIDI routing
-        setMidiNote    (s.midiNote);
-        setMidiChannel (s.midiChannel);
+        // MIDI routing — silent: engine already has the correct MIDI note from preloading.
+        // Firing the listener would call updateSamplerSounds() + allNotesOff() unnecessarily.
+        setMidiNote    (s.midiNote,    /*notify=*/false);
+        setMidiChannel (s.midiChannel, /*notify=*/false);
 
         // Playback modes
         setLoopEnabled    (s.loopEnabled);
@@ -2295,9 +2302,10 @@ public:
                      /*notifyListeners=*/false);
         setEqFilterModes (s.eq1Mode, s.eq2Mode, s.eq3Mode, /*notifyListeners=*/false);
 
-        // Transient detection
+        // Transient detection — runDetection=false prevents blocking disk I/O during pad switch;
+        // detection runs later when the waveform is actually displayed for this pad.
         setTransientDetectionEnabled (s.transientDetectionEnabled);
-        setTransientThreshold        (s.transientThreshold);
+        setTransientThreshold        (s.transientThreshold, /*runDetection=*/false);
 
         // Grid snap
         setGridSnapEnabled     (s.gridSnapEnabled);
