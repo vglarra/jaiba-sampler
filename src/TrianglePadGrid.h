@@ -163,36 +163,89 @@ public:
 
 private:
     void updatePath()
-    {
-        auto b = getLocalBounds().toFloat();
-        float w = b.getWidth();
-        float h = b.getHeight();
-        if (w <= 0.0f || h <= 0.0f) return;
-
-        // Fixed proportion from your sketch: narrow / wide = 13.555 / 44.694
-        constexpr float narrowToWideRatio = 13.555f / 44.694f;  // ≈ 0.3033
-        float narrowW = w * narrowToWideRatio;
-        float narrowX = (w - narrowW) * 0.5f;
-
-        juce::Path p;
-        if (direction == Direction::Down)
         {
-            p.startNewSubPath (0.0f, 0.0f);
-            p.lineTo         (w,    0.0f);
-            p.lineTo         (narrowX + narrowW, h);
-            p.lineTo         (narrowX, h);
-            p.closeSubPath();
+            auto b = getLocalBounds().toFloat();
+            float w = b.getWidth();
+            float h = b.getHeight();
+            if (w <= 0.0f || h <= 0.0f) return;
+
+            // Fixed proportion from your sketch: narrow / wide = 13.555 / 44.694
+            constexpr float narrowToWideRatio = 13.555f / 44.694f;  // ≈ 0.3033
+            float narrowW = w * narrowToWideRatio;
+            float narrowX = (w - narrowW) * 0.5f;
+
+            juce::Path p;
+        
+            // Check if this is an edge pad that needs to be a half-trapezoid
+            bool isLeftEdge = (padIndex == 0 || padIndex == 8);     // Pad 1 or 9
+            bool isRightEdge = (padIndex == 7 || padIndex == 15);   // Pad 8 or 16
+        
+            if (isLeftEdge)
+            {
+                // Left edge pad - half trapezoid flush against left edge
+                if (direction == Direction::Down)
+                {
+                    // Pad 1: Down direction, narrow at bottom, wide at top
+                    p.startNewSubPath (0.0f, 0.0f);
+                    p.lineTo         (w,    0.0f);
+                    p.lineTo         (narrowX + narrowW, h);
+                    p.lineTo         (0.0f, h);  // Changed from narrowX to 0.0f for flush left edge
+                    p.closeSubPath();
+                }
+                else // Up direction (Pad 9)
+                {
+                    // Pad 9: Up direction, narrow at top, wide at bottom
+                    p.startNewSubPath (0.0f, 0.0f);  // Changed from narrowX to 0.0f for flush left edge
+                    p.lineTo         (narrowX + narrowW, 0.0f);
+                    p.lineTo         (w,    h);
+                    p.lineTo         (0.0f, h);
+                    p.closeSubPath();
+                }
+            }
+            else if (isRightEdge)
+            {
+                // Right edge pad - half trapezoid flush against right edge
+                if (direction == Direction::Up)
+                {
+                    // Pad 8: Up direction, narrow at top, wide at bottom
+                    p.startNewSubPath (narrowX, 0.0f);
+                    p.lineTo         (w, 0.0f);  // Changed from narrowX + narrowW to w for flush right edge
+                    p.lineTo         (w,    h);
+                    p.lineTo         (0.0f, h);
+                    p.closeSubPath();
+                }
+                else // Down direction (Pad 16)
+                {
+                    // Pad 16: Down direction, narrow at bottom, wide at top
+                    p.startNewSubPath (0.0f, 0.0f);
+                    p.lineTo         (w,    0.0f);
+                    p.lineTo         (w, h);  // Changed from narrowX + narrowW to w for flush right edge
+                    p.lineTo         (narrowX, h);
+                    p.closeSubPath();
+                }
+            }
+            else
+            {
+                // Regular interior pad - full trapezoid
+                if (direction == Direction::Down)
+                {
+                    p.startNewSubPath (0.0f, 0.0f);
+                    p.lineTo         (w,    0.0f);
+                    p.lineTo         (narrowX + narrowW, h);
+                    p.lineTo         (narrowX, h);
+                    p.closeSubPath();
+                }
+                else // Up
+                {
+                    p.startNewSubPath (narrowX, 0.0f);
+                    p.lineTo         (narrowX + narrowW, 0.0f);
+                    p.lineTo         (w,    h);
+                    p.lineTo         (0.0f, h);
+                    p.closeSubPath();
+                }
+            }
+            cachedPath = p;
         }
-        else // Up
-        {
-            p.startNewSubPath (narrowX, 0.0f);
-            p.lineTo         (narrowX + narrowW, 0.0f);
-            p.lineTo         (w,    h);
-            p.lineTo         (0.0f, h);
-            p.closeSubPath();
-        }
-        cachedPath = p;
-    }
 
     int          padIndex;
     Direction    direction;
