@@ -3886,47 +3886,23 @@ public:
     
 void adjustPitchDown()
 {
-    const juce::int64 t0 = juce::Time::getMillisecondCounter();
-    printf("[PITCH-TIMING] Down button clicked — current=%+d cents  step=%d cents\n",
-           pitchOffset, currentPitchStepCents);
-    fflush(stdout);
-
-    int newOffset = pitchOffset - currentPitchStepCents;
-
+    const int newOffset = pitchOffset - currentPitchStepCents;
     if (newOffset >= -4800 && newOffset <= 4800)
     {
         pitchOffset = newOffset;
-        updatePitchDisplay(pitchOffset);  // FIX 5: visual update happens before listener call
+        updatePitchDisplay(pitchOffset);
         listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
-
-        const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
-        printf("[PITCH-TIMING] Pitch updated atomically: %lldms  new=%+d cents\n",
-               (long long)elapsed, pitchOffset);
-        printf("[PITCH-TIMING] Save deferred: 500ms timer started\n");
-        fflush(stdout);
     }
 }
 
 void adjustPitchUp()
 {
-    const juce::int64 t0 = juce::Time::getMillisecondCounter();
-    printf("[PITCH-TIMING] Up button clicked — current=%+d cents  step=%d cents\n",
-           pitchOffset, currentPitchStepCents);
-    fflush(stdout);
-
-    int newOffset = pitchOffset + currentPitchStepCents;
-
+    const int newOffset = pitchOffset + currentPitchStepCents;
     if (newOffset >= -4800 && newOffset <= 4800)
     {
         pitchOffset = newOffset;
-        updatePitchDisplay(pitchOffset);  // FIX 5: visual update happens before listener call
+        updatePitchDisplay(pitchOffset);
         listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
-
-        const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
-        printf("[PITCH-TIMING] Pitch updated atomically: %lldms  new=%+d cents\n",
-               (long long)elapsed, pitchOffset);
-        printf("[PITCH-TIMING] Save deferred: 500ms timer started\n");
-        fflush(stdout);
     }
 }
     
@@ -4602,7 +4578,7 @@ void adjustPitchUp()
             if (direction > 0 && onUp)   onUp();
             else if (direction < 0 && onDown) onDown();
 
-            startTimer(50);   // poll every 50ms — matches our fastest repeat rate
+            startTimer(16);   // poll every 16ms (~60fps) — finer than fastest repeat interval
             updateButtonVisual(dir, true);
         }
 
@@ -4621,10 +4597,11 @@ void adjustPitchUp()
             const juce::int64 heldMs        = now - holdStartMs;
             const juce::int64 sinceLastFire = now - lastFireMs;
 
-            if (heldMs < 400) return;   // Initial hold delay — no repeat yet
+            if (heldMs < 150) return;   // Initial hold delay — no repeat yet
 
-            // 400–1000ms: slow repeat every 100ms.  >1000ms: fast repeat every 50ms.
-            const juce::int64 repeatMs = (heldMs < 1000) ? 100LL : 50LL;
+            // 150–500ms: slow repeat every 70ms (~14 steps/s).
+            // >500ms: fast repeat every 30ms (~33 steps/s) for rapid sweeping.
+            const juce::int64 repeatMs = (heldMs < 500) ? 70LL : 30LL;
 
             if (sinceLastFire >= repeatMs)
             {

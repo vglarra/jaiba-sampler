@@ -94,7 +94,7 @@ public:
             pitchRatio = basePitchRatio * (double)tuningRatio * std::pow(2.0, offset / 1200.0);
             smoothedPitchRatio = pitchRatio;   // align immediately at note start — no ramp at attack
             // Cache pitch smooth coefficient — avoids std::exp() every block (SR never changes mid-note).
-            pitchSmoothCoeff = 1.0 - std::exp(-1.0 / (getSampleRate() * 0.010));
+            pitchSmoothCoeff = 1.0 - std::exp(-1.0 / (getSampleRate() * 0.005)); // 5ms ramp — snappy for live tuning, still click-free
 
             // Start playback at the correct boundary for current direction.
             // Reverse: start at End−1 and count down toward Start.

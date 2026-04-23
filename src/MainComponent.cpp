@@ -2394,23 +2394,14 @@ void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->pitchOffsetAtomic.store(totalCents);
 
-    const juce::int64 tAtomic = juce::Time::getMillisecondCounter();
-    printf("[PITCH-TIMING] updateSamplerSounds called: 0ms — SKIPPED (atomic pitchOffsetAtomic store)\n");
-    printf("[PITCH-TIMING] Ramp started: target=%.6f (10ms IIR smoothing on audio thread)\n",
-           std::pow(2.0, totalCents / 1200.0));
-
     // In-memory save only (no disk flush) — deferred 500ms timer handles the flush.
     if (configManager != nullptr)
-        configManager->savePitchOffset(userPitchOffsetCents);  // in-memory setValue only
+        configManager->savePitchOffset(userPitchOffsetCents);
 
     // Restart debounce timer — one disk write fires 500ms after the last pitch change.
     pitchSaveTimer.startTimer(500);
 
-    const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
-    printf("[PITCH-TIMING] saveCurrentSampleState called: deferred 500ms\n");
-    printf("[PITCH-TIMING] total handler time: %lldms  (user=%+d cents  total=%+d cents)\n",
-           (long long)elapsed, userPitchOffsetCents, totalCents);
-    fflush(stdout);
+    juce::ignoreUnused(t0);
 }
 
 void MainComponent::volumeChanged(float volume)
