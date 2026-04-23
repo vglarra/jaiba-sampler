@@ -566,11 +566,14 @@ void MainComponent::resized()
     constexpr int kTopBarH   = 40;
     constexpr int kGlobCtrlH = 40;
     constexpr int kPadRowH   = 120;
-    constexpr int kCardH     = 410;
-    constexpr int kCardMaxW  = 720;
+    constexpr int kCardMinH  = 250;
     constexpr int kFooterH   = 50;
     constexpr int kHMargin   = 20;
     constexpr int kGap       = 10;
+
+    // Card height fills whatever space is left between the two pad rows.
+    const int fixedRowsH   = kTopBarH + kGlobCtrlH + kPadRowH + kGap + kGap + kPadRowH + kFooterH;
+    const int dynamicCardH = juce::jmax(kCardMinH, getHeight() - fixedRowsH);
 
     // Consume from top (full width — no horizontal margins yet)
     auto strip = getLocalBounds();
@@ -618,10 +621,10 @@ void MainComponent::resized()
     // SAMPLE CARD  (kCardH, centred)
     // =========================================================
     {
-        auto cardStrip = strip.removeFromTop (kCardH);
-        int  cardW     = juce::jmin (getWidth() - kHMargin * 2 - 20, kCardMaxW);
+        auto cardStrip = strip.removeFromTop (dynamicCardH);
+        int  cardW     = getWidth() - kHMargin * 2;
         if (cardW < 100) cardW = 100;
-        auto cardBounds = juce::Rectangle<int> (0, 0, cardW, kCardH)
+        auto cardBounds = juce::Rectangle<int> (0, 0, cardW, dynamicCardH)
                               .withCentre (cardStrip.getCentre());
         sampleCard.setBounds (cardBounds);
     }
@@ -684,11 +687,11 @@ void MainComponent::resized()
         printf ("[GRID-LAYOUT] Global controls bar: height=%dpx\n", kGlobCtrlH);
         printf ("[GRID-LAYOUT] Top pad row: height=%dpx -- 8 pads each %dpx wide\n",
                 kPadRowH, getWidth() / 8);
-        printf ("[GRID-LAYOUT] SampleCard: height=%dpx\n", kCardH);
+        printf ("[GRID-LAYOUT] SampleCard: height=%dpx (dynamic, min=%d)\n", dynamicCardH, kCardMinH);
         printf ("[GRID-LAYOUT] Bottom pad row: height=%dpx -- 8 pads each %dpx wide\n",
                 kPadRowH, getWidth() / 8);
         printf ("[GRID-LAYOUT] Footer: height=%dpx\n", kFooterH);
-        const int total = kTopBarH + kGlobCtrlH + kPadRowH + kGap + kCardH + kGap + kPadRowH + kFooterH;
+        const int total = kTopBarH + kGlobCtrlH + kPadRowH + kGap + dynamicCardH + kGap + kPadRowH + kFooterH;
         printf ("[GRID-LAYOUT] Total: %dpx -- fits window: %s\n",
                 total, total <= getHeight() ? "YES" : "NO");
     }

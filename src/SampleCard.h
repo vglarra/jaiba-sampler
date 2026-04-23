@@ -1649,8 +1649,23 @@ public:
         // Add 5px margin between top row and waveform
         area.removeFromTop(5);
         
-        // Calculate waveform height based on 4cm at 96 DPI (fixed height)
-        const int waveformHeight = static_cast<int>(4 * 37.8); // ~151px
+        // Dynamic waveform height — depends on active tab:
+        //
+        //  EQ tab  → 50/50 split with the EQ display.
+        //    Fixed overhead (no control rows):
+        //      top-margin(10) + top-row(24) + gap(5)      = 39
+        //      scrollbar(14)                               = 14
+        //      gap(5) + tab-bar(24) + tab-gap(4)          = 33
+        //      footer(24) + bottom-margin(10)             = 34
+        //      ──────────────────────────────────────────   120
+        //    Each half = (getHeight() - 120) / 2
+        //
+        //  Other tabs → waveform fills card, leaving fixed control rows below.
+        //    Total overhead = 200px (adds 3 control rows+gaps = 80px)
+        constexpr int kMinWaveformH = 80;
+        const int waveformHeight = (activeTab == 2)
+            ? juce::jmax(kMinWaveformH, (getHeight() - 120) / 2)
+            : juce::jmax(kMinWaveformH, getHeight() - 200);
         
         // ===== CRITICAL FIX #1: Reserve scrollbar space in viewport bounds =====
         // Viewport needs extra height to accommodate scrollbar without squishing content
@@ -1722,7 +1737,7 @@ public:
         if (!diagPrinted)
         {
             diagPrinted = true;
-            const int wvH = static_cast<int>(4 * 37.8) + SCROLLBAR_HEIGHT;
+            const int wvH = juce::jmax(80, getHeight() - 200) + SCROLLBAR_HEIGHT;
             printf("[LAYOUT] SamplerPad total height:  %dpx\n", getHeight());
             printf("[LAYOUT] Waveform area:            %dpx  (y=%d)\n", wvH, 10 + 24 + 5);
             printf("[LAYOUT] Tab bar area:             24px  (y=%d)\n", 10 + 24 + 5 + wvH + 5);

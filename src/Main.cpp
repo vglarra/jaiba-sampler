@@ -65,8 +65,11 @@ private:
             centreWithSize(getWidth(), getHeight());
             printf("DEBUG: centreWithSize completed\n");
             fflush(stdout);
-            
+
             setVisible(true);
+
+            // Start maximized so the layout fills the screen on a micro-computer.
+            setFullScreen(true);
             printf("DEBUG: MainWindow constructor completed\n");
             fflush(stdout);
         }
