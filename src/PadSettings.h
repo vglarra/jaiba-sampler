@@ -1,6 +1,18 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
+#include <map>
+#include <vector>
+
+//==============================================================================
+// A single timestamped pad-hit event inside a recorded pattern.
+// Stored as beat-relative time so patterns are tempo-agnostic.
+
+struct PatternEvent
+{
+    int    padIndex = 0;
+    double beatTime = 0.0;   // beat offset from pattern start (e.g. 0.0, 0.25, 0.5 …)
+};
 
 //==============================================================================
 // PadSettings — all serializable state for one sample pad.
@@ -93,6 +105,35 @@ struct PadSettings
     //==========================================================================
     // Active tab (0=Controls, 1=ADSR, 2=EQ)
     int activeTab = 0;
+
+    //==========================================================================
+    // Saved patterns — name → list of quantised events.
+    // Persist via XML (kit files) only; PropertiesFile is flat key-value and can't represent them.
+
+    std::map<juce::String, std::vector<PatternEvent>> savedPatterns;
+
+    void addPattern(const juce::String& name, const std::vector<PatternEvent>& events)
+    {
+        savedPatterns[name] = events;
+    }
+
+    std::vector<PatternEvent> getPattern(const juce::String& name) const
+    {
+        auto it = savedPatterns.find(name);
+        if (it != savedPatterns.end()) return it->second;
+        return {};
+    }
+
+    juce::StringArray getPatternNames() const
+    {
+        juce::StringArray names;
+        for (auto& kv : savedPatterns)
+            names.add(kv.first);
+        return names;
+    }
+
+    void removePattern(const juce::String& name)  { savedPatterns.erase(name); }
+    void clearPatterns()                           { savedPatterns.clear(); }
 
     //==========================================================================
     // Helpers
@@ -190,6 +231,23 @@ struct PadSettings
         el.setAttribute ("zoom",        zoomLevel);
         el.setAttribute ("zoomScroll",  (double)zoomScrollPosition);
         el.setAttribute ("tab",         activeTab);
+
+        // Saved patterns — stored as <Patterns><Pattern name="..."><Event .../></Pattern></Patterns>
+        if (!savedPatterns.empty())
+        {
+            auto* patternsEl = el.createNewChildElement ("Patterns");
+            for (auto& kv : savedPatterns)
+            {
+                auto* patEl = patternsEl->createNewChildElement ("Pattern");
+                patEl->setAttribute ("name", kv.first);
+                for (auto& ev : kv.second)
+                {
+                    auto* evEl = patEl->createNewChildElement ("Event");
+                    evEl->setAttribute ("padIndex", ev.padIndex);
+                    evEl->setAttribute ("beatTime", ev.beatTime);
+                }
+            }
+        }
     }
 
     void loadFromXml (const juce::XmlElement& el)
@@ -229,6 +287,26 @@ struct PadSettings
         zoomLevel          =        el.getDoubleAttribute ("zoom",       1.0);
         zoomScrollPosition = (float)el.getDoubleAttribute ("zoomScroll", 0.0);
         activeTab = el.getIntAttribute ("tab", 0);
+
+        // Load saved patterns
+        savedPatterns.clear();
+        if (auto* patternsEl = el.getChildByName ("Patterns"))
+        {
+            for (auto* patEl : patternsEl->getChildWithTagNameIterator ("Pattern"))
+            {
+                const juce::String name = patEl->getStringAttribute ("name", "");
+                if (name.isEmpty()) continue;
+                std::vector<PatternEvent> events;
+                for (auto* evEl : patEl->getChildWithTagNameIterator ("Event"))
+                {
+                    PatternEvent e;
+                    e.padIndex = evEl->getIntAttribute    ("padIndex", 0);
+                    e.beatTime = evEl->getDoubleAttribute ("beatTime", 0.0);
+                    events.push_back (e);
+                }
+                savedPatterns[name] = std::move (events);
+            }
+        }
     }
 
     //==========================================================================

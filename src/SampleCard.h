@@ -2628,10 +2628,15 @@ public:
         // Rec tab — called when the user hits Record, Stop, or Playback in the Rec tab.
         // quantInBeats: 0.25=1/4, 0.125=1/8, 0.0625=1/16, 0.03125=1/32,
         //               1.0/6.0=1/8 triplet, 1.0/12.0=1/16 triplet
+        // overdub=true: merge new events with the existing quantised pattern.
         virtual void beginRecording(double bpm, double quantInBeats,
-                                    bool metronomeOn, int targetPadIndex) = 0;
+                                    bool metronomeOn, int targetPadIndex, bool overdub) = 0;
         virtual void endRecording() = 0;
         virtual void playbackQuantisedEvents() = 0;
+        // Pattern persistence — save/load/clear the current quantised pattern on the target pad.
+        virtual void savePattern() = 0;
+        virtual void loadPattern() = 0;
+        virtual void clearPattern() = 0;
     };
     
     void addListener(Listener* listener)
@@ -4410,6 +4415,15 @@ void adjustPitchUp()
             metronomeButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
             addAndMakeVisible(metronomeButton);
 
+            // ----- Overdub toggle -----
+            overdubButton.setButtonText("Overdub");
+            overdubButton.setClickingTogglesState(true);
+            overdubButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+            overdubButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFCC7700));
+            overdubButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+            overdubButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+            addAndMakeVisible(overdubButton);
+
             // ----- Record -----
             recordButton.setButtonText("Record");
             recordButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF8B0000));
@@ -4420,11 +4434,12 @@ void adjustPitchUp()
                 const double quantBeats = quantIdToBeats(quantCombo.getSelectedId());
                 const bool   metro      = metronomeButton.getToggleState();
                 const int    target     = currentTargetPad;
+                const bool   overdub    = overdubButton.getToggleState();
                 recordButton.setEnabled(false);
                 stopButton.setEnabled(true);
                 setStatus("Recording... (target pad " + juce::String(target) + ")");
-                owner.listeners.call([bpm, quantBeats, metro, target](Listener& l) {
-                    l.beginRecording(bpm, quantBeats, metro, target);
+                owner.listeners.call([bpm, quantBeats, metro, target, overdub](Listener& l) {
+                    l.beginRecording(bpm, quantBeats, metro, target, overdub);
                 });
             };
             addAndMakeVisible(recordButton);
@@ -4454,6 +4469,36 @@ void adjustPitchUp()
             };
             addAndMakeVisible(playButton);
 
+            // ----- Save Pattern -----
+            savePatternButton.setButtonText("Save");
+            savePatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A4A2A));
+            savePatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            savePatternButton.onClick = [this]
+            {
+                owner.listeners.call([](Listener& l) { l.savePattern(); });
+            };
+            addAndMakeVisible(savePatternButton);
+
+            // ----- Load Pattern -----
+            loadPatternButton.setButtonText("Load");
+            loadPatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A2A4A));
+            loadPatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            loadPatternButton.onClick = [this]
+            {
+                owner.listeners.call([](Listener& l) { l.loadPattern(); });
+            };
+            addAndMakeVisible(loadPatternButton);
+
+            // ----- Clear Pattern -----
+            clearPatternButton.setButtonText("Clear");
+            clearPatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A2A1A));
+            clearPatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            clearPatternButton.onClick = [this]
+            {
+                owner.listeners.call([](Listener& l) { l.clearPattern(); });
+            };
+            addAndMakeVisible(clearPatternButton);
+
             // ----- Status -----
             statusLabel.setText("Ready", juce::dontSendNotification);
             statusLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
@@ -4473,6 +4518,12 @@ void adjustPitchUp()
                 setStatus("Stopped");
         }
 
+        // Public so SampleCard::setRecStatus() can forward here.
+        void setStatus(const juce::String& msg)
+        {
+            statusLabel.setText(msg, juce::dontSendNotification);
+        }
+
         int  getTargetPad() const  { return currentTargetPad; }
         double getBpm()    const   { return bpmSlider.getValue(); }
         double getQuantBeats() const { return quantIdToBeats(quantCombo.getSelectedId()); }
@@ -4480,7 +4531,7 @@ void adjustPitchUp()
 
         void resized() override
         {
-            // Three rows of 20px with 4px gaps — matches Controls tab row height.
+            // Four rows of 20px with 4px gaps — matches Controls tab row height.
             constexpr int kRowH = 20;
             constexpr int kGap  = 4;
             auto area = getLocalBounds().reduced(2, 2);
@@ -4507,16 +4558,28 @@ void adjustPitchUp()
             row2.removeFromLeft(8);
             metronomeButton.setBounds(row2.removeFromLeft(62).withSizeKeepingCentre(60, kRowH));
 
-            // ---- Row 3: Record | Stop | Play Pattern | Status ----
+            // ---- Row 3: Overdub | Record | Stop | Play Pattern | Status ----
             auto row3 = area.removeFromTop(kRowH);
+            area.removeFromTop(kGap);
 
-            recordButton.setBounds(row3.removeFromLeft(62).withSizeKeepingCentre(60, kRowH));
+            overdubButton.setBounds(row3.removeFromLeft(66).withSizeKeepingCentre(64, kRowH));
             row3.removeFromLeft(4);
-            stopButton  .setBounds(row3.removeFromLeft(50).withSizeKeepingCentre(48, kRowH));
+            recordButton.setBounds(row3.removeFromLeft(58).withSizeKeepingCentre(56, kRowH));
             row3.removeFromLeft(4);
-            playButton  .setBounds(row3.removeFromLeft(88).withSizeKeepingCentre(86, kRowH));
+            stopButton  .setBounds(row3.removeFromLeft(46).withSizeKeepingCentre(44, kRowH));
+            row3.removeFromLeft(4);
+            playButton  .setBounds(row3.removeFromLeft(84).withSizeKeepingCentre(82, kRowH));
             row3.removeFromLeft(6);
             statusLabel .setBounds(row3);
+
+            // ---- Row 4: Save | Load | Clear pattern ----
+            auto row4 = area.removeFromTop(kRowH);
+
+            savePatternButton .setBounds(row4.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
+            row4.removeFromLeft(4);
+            loadPatternButton .setBounds(row4.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
+            row4.removeFromLeft(4);
+            clearPatternButton.setBounds(row4.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
         }
 
     private:
@@ -4531,9 +4594,13 @@ void adjustPitchUp()
         juce::Label      quantLabel;
         juce::ComboBox   quantCombo;
         juce::TextButton metronomeButton;
+        juce::TextButton overdubButton;
         juce::TextButton recordButton;
         juce::TextButton stopButton;
         juce::TextButton playButton;
+        juce::TextButton savePatternButton;
+        juce::TextButton loadPatternButton;
+        juce::TextButton clearPatternButton;
         juce::Label      statusLabel;
 
         void adjustTargetPad(int delta)
@@ -4541,11 +4608,6 @@ void adjustPitchUp()
             currentTargetPad = juce::jlimit(0, 15, currentTargetPad + delta);
             targetPadLabel.setText("Target: " + juce::String(currentTargetPad),
                                    juce::dontSendNotification);
-        }
-
-        void setStatus(const juce::String& msg)
-        {
-            statusLabel.setText(msg, juce::dontSendNotification);
         }
 
         static double quantIdToBeats(int id)
@@ -4900,6 +4962,13 @@ public:
             waveformComponent->setRecordingOverlay(recording);
         if (recContent != nullptr)
             recContent->setRecordingActive(recording, targetPadIndex);
+    }
+
+    // Update the Rec tab status label from outside (e.g. after save/load/clear).
+    void setRecStatus(const juce::String& msg)
+    {
+        if (recContent != nullptr)
+            recContent->setStatus(msg);
     }
 
     // Restore saved zoom level and scroll position after a sample load.

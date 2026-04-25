@@ -3220,12 +3220,13 @@ void MainComponent::performTrimAsync()
 // Recording engine implementations
 
 void MainComponent::beginRecording (double bpm, double quantInBeats,
-                                    bool metronomeOn, int targetPadIndex)
+                                    bool metronomeOn, int targetPadIndex, bool overdub)
 {
     DBG ("[REC] beginRecording  bpm=" + juce::String (bpm, 1)
          + "  quant=" + juce::String (quantInBeats, 4)
          + "  metro=" + juce::String ((int)metronomeOn)
-         + "  target=" + juce::String (targetPadIndex));
+         + "  target=" + juce::String (targetPadIndex)
+         + "  overdub=" + juce::String ((int)overdub));
 
     // Stop any running pattern playback
     patternPlayTimer.stopTimer();
@@ -3234,10 +3235,21 @@ void MainComponent::beginRecording (double bpm, double quantInBeats,
     // Store message-thread-only params before activating the audio-thread flag
     recTargetPad    = targetPadIndex;
     recQuantInBeats = quantInBeats;
+    overdubMode     = overdub;
     recBpmAtomic.store (bpm, std::memory_order_relaxed);
 
-    // Reset state
-    recEvents.clear();
+    // Seed recEvents with existing quantised pattern when overdubbing.
+    // quantiseRecordedEvents() will sort+snap+dedup the merged set when recording stops.
+    if (overdub && !recQuantised.empty())
+    {
+        recEvents = recQuantised;   // copy existing events as seed
+        DBG ("[REC] Overdub: seeding " + juce::String ((int)recEvents.size()) + " existing events");
+    }
+    else
+    {
+        recEvents.clear();
+    }
+
     recSongBeatPos.store (0.0, std::memory_order_relaxed);
 
     // Audio-thread state — safe to write here because recIsActive is still false
@@ -3585,6 +3597,113 @@ void MainComponent::tickPatternPlayback()
         recPatternPlaying = false;
         DBG ("[REC] Pattern playback complete");
     }
+}
+
+//==============================================================================
+// Pattern persistence Listener overrides
+
+void MainComponent::savePattern()
+{
+    saveCurrentPattern();
+}
+
+void MainComponent::loadPattern()
+{
+    loadPatternFromPad();
+}
+
+void MainComponent::clearPattern()
+{
+    recEvents.clear();
+    recQuantised.clear();
+    sampleCard.setRecStatus ("Pattern cleared");
+    DBG ("[REC] Pattern cleared");
+}
+
+//==============================================================================
+// Pattern persistence helpers
+
+void MainComponent::saveCurrentPattern()
+{
+    if (recQuantised.empty())
+    {
+        sampleCard.setRecStatus ("Nothing to save — record first");
+        return;
+    }
+
+    // Prompt for a name using a modal AlertWindow
+    auto* dialog = new juce::AlertWindow ("Save Pattern",
+                                          "Enter a name for this pattern:",
+                                          juce::AlertWindow::NoIcon);
+    dialog->addTextEditor ("name", "Pattern 1", "Name:");
+    dialog->addButton ("Save",   1, juce::KeyPress (juce::KeyPress::returnKey));
+    dialog->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // Capture everything by value — dialog lives until the callback fires.
+    const int targetPad = recTargetPad;
+    std::vector<RecordedEvent> snap = recQuantised;
+
+    dialog->enterModalState (true,
+        juce::ModalCallbackFunction::create ([this, dialog, targetPad, snap](int result)
+        {
+            if (result == 1)
+            {
+                juce::String name = dialog->getTextEditorContents ("name").trim();
+                if (name.isEmpty()) name = "Pattern";
+
+                // Convert RecordedEvent → PatternEvent and store in PadSettings
+                std::vector<PatternEvent> events;
+                events.reserve (snap.size());
+                for (auto& ev : snap)
+                    events.push_back ({ ev.padIndex, ev.beatTime });
+
+                padManager.getSettings (targetPad).addPattern (name, events);
+
+                // Persist to the currently loaded kit file if one is active
+                if (currentKitFile.existsAsFile())
+                    saveKitToFile (currentKitFile);
+
+                sampleCard.setRecStatus ("Saved: " + name
+                    + " (" + juce::String ((int)events.size()) + " events)");
+                DBG ("[REC] Pattern saved: '" + name + "'  target pad=" + juce::String (targetPad));
+            }
+            delete dialog;
+        }), true);
+}
+
+void MainComponent::loadPatternFromPad()
+{
+    const auto& settings = padManager.getSettings (recTargetPad);
+    const juce::StringArray names = settings.getPatternNames();
+
+    if (names.isEmpty())
+    {
+        sampleCard.setRecStatus ("No patterns saved for pad " + juce::String (recTargetPad));
+        return;
+    }
+
+    juce::PopupMenu menu;
+    for (int i = 0; i < names.size(); ++i)
+        menu.addItem (i + 1, names[i]);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&sampleCard),
+        [this, names](int result)
+        {
+            if (result > 0 && result <= names.size())
+            {
+                const juce::String name = names[result - 1];
+                const auto events = padManager.getSettings (recTargetPad).getPattern (name);
+
+                recQuantised.clear();
+                recQuantised.reserve (events.size());
+                for (auto& e : events)
+                    recQuantised.push_back ({ e.padIndex, e.beatTime });
+
+                sampleCard.setRecStatus ("Loaded: " + name
+                    + " (" + juce::String ((int)recQuantised.size()) + " events)");
+                DBG ("[REC] Pattern loaded: '" + name + "'");
+            }
+        });
 }
 
 bool MainComponent::keyPressed(const juce::KeyPress& key)

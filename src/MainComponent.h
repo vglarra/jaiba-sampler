@@ -251,9 +251,12 @@ private:
     void eqFilterModesChanged(int mode1, int mode2, int mode3) override;
     void normChanged(bool enabled, float targetDb) override;
     void beginRecording(double bpm, double quantInBeats,
-                        bool metronomeOn, int targetPadIndex) override;
+                        bool metronomeOn, int targetPadIndex, bool overdub) override;
     void endRecording() override;
     void playbackQuantisedEvents() override;
+    void savePattern() override;
+    void loadPattern() override;
+    void clearPattern() override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -609,6 +612,7 @@ private:
     // Message-thread-only parameters (written before recIsActive becomes true)
     int    recTargetPad    = 15;
     double recQuantInBeats = 0.0625;
+    bool   overdubMode     = false;  // true = merge new events with existing recQuantised
 
     // Audio-thread-only metronome state (no sync needed)
     int    recLastBeat       = -1;
@@ -637,6 +641,8 @@ private:
     void quantiseRecordedEvents();
     void renderRecordingToTargetPad();
     void tickPatternPlayback();
+    void saveCurrentPattern();   // shows input dialog, saves to padManager.getSettings(recTargetPad)
+    void loadPatternFromPad();   // shows popup menu, loads into recQuantised
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
