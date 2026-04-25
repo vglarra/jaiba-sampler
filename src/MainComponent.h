@@ -250,9 +250,24 @@ private:
                          float f3, float g3, float q3) override;
     void eqFilterModesChanged(int mode1, int mode2, int mode3) override;
     void normChanged(bool enabled, float targetDb) override;
-    void beginRecording(double /*bpm*/, int /*quantNoteValue*/, bool /*metronomeOn*/) override {}
-    void endRecording() override {}
-    void playbackQuantisedEvents() override {}
+    void beginRecording(double bpm, double quantInBeats,
+                        bool metronomeOn, int targetPadIndex) override
+    {
+        DBG("[REC] beginRecording bpm=" + juce::String(bpm, 1)
+            + " quant=" + juce::String(quantInBeats, 4)
+            + " metro=" + juce::String((int)metronomeOn)
+            + " target=" + juce::String(targetPadIndex));
+        sampleCard.setRecordingActive(true, targetPadIndex);
+    }
+    void endRecording() override
+    {
+        DBG("[REC] endRecording");
+        sampleCard.setRecordingActive(false);
+    }
+    void playbackQuantisedEvents() override
+    {
+        DBG("[REC] playbackQuantisedEvents");
+    }
 
     //==============================================================================
     // MIDI Learn handling

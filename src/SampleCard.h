@@ -1214,7 +1214,7 @@ public:
         recTabButton.onClick = [this] { setActiveTab(3); };
         addAndMakeVisible(recTabButton);
 
-        recContent = std::make_unique<juce::Component>();
+        recContent = std::make_unique<RecControlPanel>(*this);
         recContent->setVisible(false);
         addAndMakeVisible(*recContent);
 
@@ -2626,7 +2626,10 @@ public:
         // Called when Norm toggle or target dB changes.
         virtual void normChanged(bool enabled, float targetDb) = 0;
         // Rec tab — called when the user hits Record, Stop, or Playback in the Rec tab.
-        virtual void beginRecording(double bpm, int quantNoteValue, bool metronomeOn) = 0;
+        // quantInBeats: 0.25=1/4, 0.125=1/8, 0.0625=1/16, 0.03125=1/32,
+        //               1.0/6.0=1/8 triplet, 1.0/12.0=1/16 triplet
+        virtual void beginRecording(double bpm, double quantInBeats,
+                                    bool metronomeOn, int targetPadIndex) = 0;
         virtual void endRecording() = 0;
         virtual void playbackQuantisedEvents() = 0;
     };
@@ -2857,6 +2860,12 @@ public:
             void setLoading(bool loading)
             {
                 isLoading = loading;
+                repaint();
+            }
+
+            void setRecordingOverlay(bool active)
+            {
+                isRecordingOverlayActive = active;
                 repaint();
             }
 
@@ -3311,6 +3320,16 @@ public:
                     }
                     g.fillPath(phTri);
                 }
+
+                // ===== RECORDING OVERLAY — drawn on top of everything =====
+                if (isRecordingOverlayActive)
+                {
+                    g.setColour(juce::Colour(0x55FF0000));  // semi-transparent red
+                    g.fillRect(bounds);
+                    g.setColour(juce::Colour(0xFFFFFFFF));
+                    g.setFont(juce::Font(16.0f, juce::Font::bold));
+                    g.drawText("RECORDING...", bounds, juce::Justification::centred, false);
+                }
             }
 
             void setPitchFactor(double factor, int semitones)
@@ -3686,6 +3705,7 @@ public:
             float endMarkerNormalized   = 1.0f;
             bool loopHighlightEnabled   = false;
             bool isLoading              = false;  // true while background thread reads new file
+            bool isRecordingOverlayActive = false;  // true while Rec tab is recording
 
             // Grid snap display state
             bool   gridSnapActive        = false;
@@ -4319,6 +4339,237 @@ void adjustPitchUp()
     int fixedViewportWidth = 700;  // Will be updated in resized()
     double waveformZoomLevel = 1.0;
 
+    // ===== REC TAB PANEL =====
+    // Self-contained UI for the Rec tab. All controls are owned here.
+    // The parent SampleCard passes a reference to itself so the panel can fire Listener calls.
+    class RecControlPanel : public juce::Component
+    {
+    public:
+        explicit RecControlPanel(SampleCard& o) : owner(o)
+        {
+            // ----- Target pad -----
+            targetPadLabel.setText("Target: 15", juce::dontSendNotification);
+            targetPadLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
+            targetPadLabel.setFont(juce::Font(11.0f));
+            targetPadLabel.setJustificationType(juce::Justification::centredLeft);
+            addAndMakeVisible(targetPadLabel);
+
+            styleCompact(targetPadMinusButton, "-");
+            targetPadMinusButton.onClick = [this] { adjustTargetPad(-1); };
+            addAndMakeVisible(targetPadMinusButton);
+
+            styleCompact(targetPadPlusButton, "+");
+            targetPadPlusButton.onClick = [this] { adjustTargetPad(+1); };
+            addAndMakeVisible(targetPadPlusButton);
+
+            // ----- BPM -----
+            bpmLabel.setText("BPM", juce::dontSendNotification);
+            bpmLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
+            bpmLabel.setFont(juce::Font(11.0f));
+            bpmLabel.setJustificationType(juce::Justification::centredRight);
+            addAndMakeVisible(bpmLabel);
+
+            bpmSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+            bpmSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 38, 18);
+            bpmSlider.setRange(60.0, 180.0, 1.0);
+            bpmSlider.setValue(120.0, juce::dontSendNotification);
+            bpmSlider.setColour(juce::Slider::backgroundColourId,   juce::Colour(0xFF3A3A3A));
+            bpmSlider.setColour(juce::Slider::trackColourId,        juce::Colour(0xFF5A5A5A));
+            bpmSlider.setColour(juce::Slider::thumbColourId,        juce::Colour(0xFFCECECE));
+            bpmSlider.setColour(juce::Slider::textBoxTextColourId,  juce::Colour(0xFFCECECE));
+            bpmSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colour(0xFF2A2A2A));
+            bpmSlider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colour(0xFF0A0A0A));
+            addAndMakeVisible(bpmSlider);
+
+            // ----- Quantize -----
+            quantLabel.setText("Quant", juce::dontSendNotification);
+            quantLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
+            quantLabel.setFont(juce::Font(11.0f));
+            quantLabel.setJustificationType(juce::Justification::centredRight);
+            addAndMakeVisible(quantLabel);
+
+            quantCombo.addItem("1/4",        1);
+            quantCombo.addItem("1/8",        2);
+            quantCombo.addItem("1/16",       3);
+            quantCombo.addItem("1/32",       4);
+            quantCombo.addItem("1/8 triplet", 5);
+            quantCombo.addItem("1/16 triplet", 6);
+            quantCombo.setSelectedId(3, juce::dontSendNotification);  // default 1/16
+            quantCombo.setColour(juce::ComboBox::backgroundColourId,  juce::Colour(0xFF3A3A3A));
+            quantCombo.setColour(juce::ComboBox::textColourId,        juce::Colour(0xFFCECECE));
+            quantCombo.setColour(juce::ComboBox::outlineColourId,     juce::Colour(0xFF0A0A0A));
+            quantCombo.setColour(juce::ComboBox::arrowColourId,       juce::Colour(0xFFCECECE));
+            addAndMakeVisible(quantCombo);
+
+            // ----- Metronome -----
+            metronomeButton.setButtonText("Metro");
+            metronomeButton.setClickingTogglesState(true);
+            metronomeButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+            metronomeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFF00CF7F));
+            metronomeButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+            metronomeButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+            addAndMakeVisible(metronomeButton);
+
+            // ----- Record -----
+            recordButton.setButtonText("Record");
+            recordButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF8B0000));
+            recordButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
+            recordButton.onClick = [this]
+            {
+                const double bpm        = bpmSlider.getValue();
+                const double quantBeats = quantIdToBeats(quantCombo.getSelectedId());
+                const bool   metro      = metronomeButton.getToggleState();
+                const int    target     = currentTargetPad;
+                recordButton.setEnabled(false);
+                stopButton.setEnabled(true);
+                setStatus("Recording... (target pad " + juce::String(target) + ")");
+                owner.listeners.call([bpm, quantBeats, metro, target](Listener& l) {
+                    l.beginRecording(bpm, quantBeats, metro, target);
+                });
+            };
+            addAndMakeVisible(recordButton);
+
+            // ----- Stop -----
+            stopButton.setButtonText("Stop");
+            stopButton.setEnabled(false);
+            stopButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+            stopButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            stopButton.onClick = [this]
+            {
+                stopButton.setEnabled(false);
+                recordButton.setEnabled(true);
+                setStatus("Stopped");
+                owner.listeners.call([](Listener& l) { l.endRecording(); });
+            };
+            addAndMakeVisible(stopButton);
+
+            // ----- Play Pattern -----
+            playButton.setButtonText("Play Pattern");
+            playButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A5A1A));
+            playButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            playButton.onClick = [this]
+            {
+                setStatus("Playing pattern");
+                owner.listeners.call([](Listener& l) { l.playbackQuantisedEvents(); });
+            };
+            addAndMakeVisible(playButton);
+
+            // ----- Status -----
+            statusLabel.setText("Ready", juce::dontSendNotification);
+            statusLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
+            statusLabel.setFont(juce::Font(11.0f, juce::Font::italic));
+            statusLabel.setJustificationType(juce::Justification::centredLeft);
+            addAndMakeVisible(statusLabel);
+        }
+
+        // Called by SampleCard::setRecordingActive — syncs UI state from outside.
+        void setRecordingActive(bool recording, int targetPadIndex)
+        {
+            recordButton.setEnabled(!recording);
+            stopButton.setEnabled(recording);
+            if (recording)
+                setStatus("Recording... (target pad " + juce::String(targetPadIndex) + ")");
+            else
+                setStatus("Stopped");
+        }
+
+        int  getTargetPad() const  { return currentTargetPad; }
+        double getBpm()    const   { return bpmSlider.getValue(); }
+        double getQuantBeats() const { return quantIdToBeats(quantCombo.getSelectedId()); }
+        bool  isMetronomeOn() const { return metronomeButton.getToggleState(); }
+
+        void resized() override
+        {
+            // Three rows of 20px with 4px gaps — matches Controls tab row height.
+            constexpr int kRowH = 20;
+            constexpr int kGap  = 4;
+            auto area = getLocalBounds().reduced(2, 2);
+
+            // ---- Row 1: Target pad selector | BPM slider ----
+            auto row1 = area.removeFromTop(kRowH);
+            area.removeFromTop(kGap);
+
+            // Target pad: [label 72px] [-20px] [+20px]
+            targetPadLabel.setBounds(row1.removeFromLeft(86));
+            targetPadMinusButton.setBounds(row1.removeFromLeft(20).withSizeKeepingCentre(18, kRowH));
+            targetPadPlusButton .setBounds(row1.removeFromLeft(20).withSizeKeepingCentre(18, kRowH));
+            row1.removeFromLeft(8); // gap
+            // BPM: [label 32px] [slider fills rest]
+            bpmLabel.setBounds(row1.removeFromLeft(32));
+            bpmSlider.setBounds(row1);
+
+            // ---- Row 2: Quant combo | Metronome ----
+            auto row2 = area.removeFromTop(kRowH);
+            area.removeFromTop(kGap);
+
+            quantLabel.setBounds(row2.removeFromLeft(42));
+            quantCombo.setBounds(row2.removeFromLeft(110).withSizeKeepingCentre(108, kRowH));
+            row2.removeFromLeft(8);
+            metronomeButton.setBounds(row2.removeFromLeft(62).withSizeKeepingCentre(60, kRowH));
+
+            // ---- Row 3: Record | Stop | Play Pattern | Status ----
+            auto row3 = area.removeFromTop(kRowH);
+
+            recordButton.setBounds(row3.removeFromLeft(62).withSizeKeepingCentre(60, kRowH));
+            row3.removeFromLeft(4);
+            stopButton  .setBounds(row3.removeFromLeft(50).withSizeKeepingCentre(48, kRowH));
+            row3.removeFromLeft(4);
+            playButton  .setBounds(row3.removeFromLeft(88).withSizeKeepingCentre(86, kRowH));
+            row3.removeFromLeft(6);
+            statusLabel .setBounds(row3);
+        }
+
+    private:
+        SampleCard& owner;
+        int currentTargetPad = 15;
+
+        juce::Label      targetPadLabel;
+        juce::TextButton targetPadMinusButton;
+        juce::TextButton targetPadPlusButton;
+        juce::Label      bpmLabel;
+        juce::Slider     bpmSlider;
+        juce::Label      quantLabel;
+        juce::ComboBox   quantCombo;
+        juce::TextButton metronomeButton;
+        juce::TextButton recordButton;
+        juce::TextButton stopButton;
+        juce::TextButton playButton;
+        juce::Label      statusLabel;
+
+        void adjustTargetPad(int delta)
+        {
+            currentTargetPad = juce::jlimit(0, 15, currentTargetPad + delta);
+            targetPadLabel.setText("Target: " + juce::String(currentTargetPad),
+                                   juce::dontSendNotification);
+        }
+
+        void setStatus(const juce::String& msg)
+        {
+            statusLabel.setText(msg, juce::dontSendNotification);
+        }
+
+        static double quantIdToBeats(int id)
+        {
+            switch (id)
+            {
+                case 1: return 0.25;
+                case 2: return 0.125;
+                case 3: return 0.0625;
+                case 4: return 0.03125;
+                case 5: return 1.0 / 6.0;
+                case 6: return 1.0 / 12.0;
+                default: return 0.0625;
+            }
+        }
+
+        static void styleCompact(juce::TextButton& btn, const juce::String& text)
+        {
+            btn.setButtonText(text);
+            btn.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
+            btn.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        }
+    };
+
     // ===== TAB BAR =====
     int activeTab = 0;  // 0=Controls, 1=ADSR, 2=EQ, 3=Rec
     juce::TextButton controlsTabButton { "Controls" };
@@ -4326,7 +4577,7 @@ void adjustPitchUp()
     juce::TextButton eqTabButton       { "EQ" };
     juce::TextButton recTabButton      { "Rec" };
     juce::Label      eqPlaceholderLabel;
-    std::unique_ptr<juce::Component> recContent;
+    std::unique_ptr<RecControlPanel> recContent;
 
     // ===== ADSR ENVELOPE CONTROLS =====
     bool   adsrEnabled       = false;
@@ -4639,6 +4890,16 @@ public:
         recTabButton.setVisible(visible);
         if (!visible && activeTab == 3)
             setActiveTab(0);
+    }
+
+    // Activate/deactivate the waveform recording overlay and sync the panel UI.
+    // Call with recording=true when recording starts, false when it stops.
+    void setRecordingActive(bool recording, int targetPadIndex = -1)
+    {
+        if (waveformComponent != nullptr)
+            waveformComponent->setRecordingOverlay(recording);
+        if (recContent != nullptr)
+            recContent->setRecordingActive(recording, targetPadIndex);
     }
 
     // Restore saved zoom level and scroll position after a sample load.
