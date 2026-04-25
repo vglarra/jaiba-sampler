@@ -169,6 +169,16 @@ MainComponent::MainComponent()
     kitNameLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(kitNameLabel);
 
+    // Kit navigation buttons — step through .jai files in the same folder
+    for (auto* btn : { &kitPrevButton, &kitNextButton })
+    {
+        btn->setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF2A3A4A));
+        btn->setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF8AACCC));
+        addAndMakeVisible(*btn);
+    }
+    kitPrevButton.onClick = [this] { navigateKit (-1); };
+    kitNextButton.onClick = [this] { navigateKit (+1); };
+
     // Reset / Panic button — dark red, signals STOP/DANGER
     resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF8B0000));
     resetButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
@@ -492,6 +502,8 @@ void MainComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xFF0A0A0A));
     g.drawRect(menuButton.getBounds(), 1);
     g.drawRect(kitButton.getBounds(), 1);
+    g.drawRect(kitPrevButton.getBounds(), 1);
+    g.drawRect(kitNextButton.getBounds(), 1);
     g.drawRect(resetButton.getBounds(), 1);
     g.drawRect(baseTuningLabel.getBounds(), 1);
     g.drawRect(testToneButton.getBounds(), 1);
@@ -583,8 +595,15 @@ void MainComponent::resized()
         kitArea.removeFromLeft (4);        // gap after bankDownBtn
         kitButton.setBounds    (kitArea.removeFromLeft (44).withSizeKeepingCentre (40, 20));
         kitArea.removeFromLeft (4);
-        const int labelW = juce::jmin (180, kitArea.getWidth() - 8);
-        kitNameLabel.setBounds (kitArea.removeFromLeft (labelW).withSizeKeepingCentre (labelW, 20));
+        // Reserve space for < > buttons (24px each) + 2px gap + 4px trailing gap = 54px
+        constexpr int kNavBtnW = 24;
+        constexpr int kNavReserve = kNavBtnW + 2 + kNavBtnW + 4;
+        const int labelW = juce::jmin (180, kitArea.getWidth() - kNavReserve - 4);
+        kitNameLabel.setBounds   (kitArea.removeFromLeft (labelW).withSizeKeepingCentre (labelW, 20));
+        kitArea.removeFromLeft (4);
+        kitPrevButton.setBounds  (kitArea.removeFromLeft (kNavBtnW).withSizeKeepingCentre (kNavBtnW, 20));
+        kitArea.removeFromLeft (2);
+        kitNextButton.setBounds  (kitArea.removeFromLeft (kNavBtnW).withSizeKeepingCentre (kNavBtnW, 20));
     }
 
     // =========================================================
@@ -1579,6 +1598,7 @@ void MainComponent::saveKitToFile (const juce::File& file)
 
     if (root->writeTo (file))
     {
+        currentKitFile = file;
         kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
         kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
         kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
@@ -1658,10 +1678,39 @@ void MainComponent::loadKitFromFile (const juce::File& file)
         }
     }
 
+    currentKitFile = file;
     kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
     kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
     kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
     sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
+}
+
+void MainComponent::navigateKit (int direction)
+{
+    if (!currentKitFile.existsAsFile()) return;
+
+    const juce::File folder = currentKitFile.getParentDirectory();
+    juce::Array<juce::File> kits;
+    folder.findChildFiles (kits, juce::File::findFiles, false, "*.jai");
+    kits.sort();
+
+    if (kits.isEmpty()) return;
+
+    int current = -1;
+    for (int i = 0; i < kits.size(); ++i)
+        if (kits[i] == currentKitFile) { current = i; break; }
+
+    // Wrap around: if kit was renamed/moved since load, current == -1 → start at 0 or last
+    int next = 0;
+    if (current >= 0)
+        next = (current + direction + kits.size()) % kits.size();
+    else
+        next = (direction > 0) ? 0 : kits.size() - 1;
+
+    if (kits[next] == currentKitFile) return;   // only one .jai in folder
+
+    configManager->saveLastKitFolder (folder.getFullPathName());
+    loadKitFromFile (kits[next]);
 }
 
 MainComponent::TrimSettingsSnapshot MainComponent::padSettingsToSnapshot (const PadSettings& ps) const

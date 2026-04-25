@@ -214,8 +214,9 @@ private:
     bool hasAnySamplesLoaded() const;
     void showSettingsMenu();
     void showKitMenu();
-    void saveKitToFile (const juce::File& file);
+    void saveKitToFile   (const juce::File& file);
     void loadKitFromFile (const juce::File& file);
+    void navigateKit     (int direction);   // -1 = prev, +1 = next .jai in same folder
     TrimSettingsSnapshot padSettingsToSnapshot (const PadSettings& ps) const;
     void scanCurrentFolderForAudioFiles();
     void navigateToFile(int index);
@@ -327,8 +328,10 @@ private:
 
     // UI Components
     juce::TextButton menuButton{ "Menu" };
-    juce::TextButton kitButton { "Kit"  };
-    juce::Label      kitNameLabel;          // shiny display showing the loaded kit name
+    juce::TextButton kitButton     { "Kit" };
+    juce::Label      kitNameLabel;              // shiny display showing the loaded kit name
+    juce::TextButton kitPrevButton { "<" };     // navigate to previous .jai file in same folder
+    juce::TextButton kitNextButton { ">" };     // navigate to next .jai file in same folder
     juce::TextButton resetButton{ "Reset" };
     juce::TextButton testToneButton{ "Test tone" };
     juce::Slider masterVolumeKnob;
@@ -343,6 +346,10 @@ private:
     std::unique_ptr<juce::FileChooser> kitFileChooser;  // kept alive during async kit dialogs
     AudioPreviewComponent* activePreviewComp = nullptr;  // non-owning; JUCE owns via fileChooser
     
+    //==============================================================================
+    // Kit navigation
+    juce::File currentKitFile;   // last successfully loaded/saved .jai file; empty if none
+
     //==============================================================================
     // Folder navigation
     juce::File currentFolder;
