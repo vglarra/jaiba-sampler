@@ -37,6 +37,7 @@ public:
 
     //==============================================================================
     void paint(juce::Graphics& g) override;
+    void paintOverChildren(juce::Graphics& g) override;
     void resized() override;
 
     //==============================================================================
@@ -80,6 +81,9 @@ public:
         pad().selectedSampleIndex = index;
         updateMappingUI();
     }
+
+    // Called by Main.cpp closeButtonPressed — shows save-before-close dialog if needed.
+    void requestQuit();
 
 private:
     //==============================================================================
@@ -132,6 +136,14 @@ private:
         // Grid
         bool gridSnapEnabled    = false;
         int  gridResolutionIndex= 5;
+
+        // MIDI routing
+        int midiNote    = 60;
+        int midiChannel = 1;
+
+        // Start / end markers — restored for kit loads; trim loads leave at defaults (0.0 / -1.0)
+        double startPointSeconds = 0.0;
+        double endPointSeconds   = -1.0;
     };
 
     //==============================================================================
@@ -199,8 +211,7 @@ private:
     // Runs transient detection on the current sample (called 800ms after navigation stops).
     void runDeferredTransientDetection();
 
-    //==============================================================================
-    // New UI functionality
+    bool hasAnySamplesLoaded() const;
     void showSettingsMenu();
     void showKitMenu();
     void saveKitToFile (const juce::File& file);
@@ -317,6 +328,7 @@ private:
     // UI Components
     juce::TextButton menuButton{ "Menu" };
     juce::TextButton kitButton { "Kit"  };
+    juce::Label      kitNameLabel;          // shiny display showing the loaded kit name
     juce::TextButton resetButton{ "Reset" };
     juce::TextButton testToneButton{ "Test tone" };
     juce::Slider masterVolumeKnob;
@@ -429,17 +441,6 @@ private:
     void checkOneShotTailDone();
 
     //==============================================================================
-    // Opt 2 — deferred settings flush: writes once after 500ms of navigation idle
-    class NavSaveTimer : public juce::Timer
-    {
-    public:
-        NavSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.flushNavigationSave(); }
-    private:
-        MainComponent& owner;
-    };
-    NavSaveTimer navSaveTimer { *this };
-
     // Opt 3 — deferred transient detection: runs once after 800ms of navigation idle
     class TransientDetectionTimer : public juce::Timer
     {
@@ -450,121 +451,6 @@ private:
         MainComponent& owner;
     };
     TransientDetectionTimer transientDetectionTimer { *this };
-
-    // Deferred pitch save — fires 300ms after the last pitch Up/Down press.
-    // Keeps the message thread free during rapid button presses; one disk write when idle.
-    class PitchSaveTimer : public juce::Timer
-    {
-    public:
-        PitchSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
-    private:
-        MainComponent& owner;
-    };
-    PitchSaveTimer pitchSaveTimer { *this };
-
-    // Deferred EQ save — fires 400ms after the last EQ drag event ends.
-    // Prevents flooding disk with saves during control point dragging.
-    class EqSaveTimer : public juce::Timer
-    {
-    public:
-        EqSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
-    private:
-        MainComponent& owner;
-    };
-    EqSaveTimer eqSaveTimer { *this };
-
-    // Deferred marker save — fires 400ms after the last Start/End knob or waveform drag.
-    // The atomic sound update in startPointChanged/endPointChanged is instant; only the
-    // disk flush is deferred.  One write fires after the user stops dragging.
-    class MarkerSaveTimer : public juce::Timer
-    {
-    public:
-        MarkerSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
-    private:
-        MainComponent& owner;
-    };
-    MarkerSaveTimer markerSaveTimer { *this };
-
-    // Deferred volume save — fires 400ms after the last Vol knob change.
-    // The atomic store in volumeChanged() is instant; only the disk flush is deferred.
-    class VolSaveTimer : public juce::Timer
-    {
-    public:
-        VolSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
-    private:
-        MainComponent& owner;
-    };
-    VolSaveTimer volSaveTimer { *this };
-
-    // Deferred ADSR save — fires 400ms after the last ADSR knob drag ends.
-    // Atomic propagation to sounds is instant; only the disk flush is deferred.
-    class AdsrSaveTimer : public juce::Timer
-    {
-    public:
-        AdsrSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
-    private:
-        MainComponent& owner;
-    };
-    AdsrSaveTimer adsrSaveTimer { *this };
-
-    // Deferred normalize save — fires 400ms after the last Norm target button click.
-    // Peak scan is instant (or async for large files); only the disk flush is deferred.
-    class NormSaveTimer : public juce::Timer
-    {
-    public:
-        NormSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
-    private:
-        MainComponent& owner;
-    };
-    NormSaveTimer normSaveTimer { *this };
-
-    // Deferred filter-mode save — fires 400ms after the last filter mode button click.
-    // Coefficient recompute is instant (UI thread math); only the disk flush is deferred.
-    class FilterModeSaveTimer : public juce::Timer
-    {
-    public:
-        FilterModeSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
-    private:
-        MainComponent& owner;
-    };
-    FilterModeSaveTimer filterModeSaveTimer { *this };
-
-    // Deferred loop-state save — fires 400ms after the last Loop toggle.
-    // The atomic store in loopEnabledChanged() is instant; only the disk flush is deferred.
-    class LoopSaveTimer : public juce::Timer
-    {
-    public:
-        LoopSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override { stopTimer(); owner.saveCurrentSampleState(); }
-    private:
-        MainComponent& owner;
-    };
-    LoopSaveTimer loopSaveTimer { *this };
-
-    class MidiSaveTimer : public juce::Timer
-    {
-    public:
-        MidiSaveTimer(MainComponent& o) : owner(o) {}
-        void timerCallback() override
-        {
-            stopTimer();
-            // Always flush — MIDI settings must persist even when the pad has no sample loaded.
-            if (owner.configManager != nullptr)
-                owner.configManager->flush();
-            // Also save full sample state if a sample is loaded.
-            owner.saveCurrentSampleState();
-        }
-    private:
-        MainComponent& owner;
-    };
-    MidiSaveTimer midiSaveTimer { *this };
 
     // MIDI-to-audio latency measurement atomics live in PadAudioEngine (pad().midiNoteOnTicks etc.)
     // Thin accessors kept here so existing MainComponent.cpp references compile unchanged.

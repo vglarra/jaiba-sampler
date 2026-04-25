@@ -319,6 +319,17 @@ public:
         return propertiesFile->getFile().getFullPathName();
     }
 
+    void saveLastKitFolder(const juce::String& folderPath)
+    {
+        propertiesFile->setValue("lastKitFolder", folderPath);
+        flush();
+    }
+
+    juce::String getLastKitFolder() const
+    {
+        return propertiesFile->getValue("lastKitFolder", "");
+    }
+
     //==============================================================================
     // Per-sample state — each sample file has its own independently saved values.
     struct SampleState

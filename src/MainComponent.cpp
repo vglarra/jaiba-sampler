@@ -160,6 +160,15 @@ MainComponent::MainComponent()
     addAndMakeVisible(kitButton);
     kitButton.onClick = [this] { showKitMenu(); };
 
+    // Kit name display — backlit panel showing the loaded kit filename
+    kitNameLabel.setFont(juce::Font(12.0f, juce::Font::bold));
+    kitNameLabel.setJustificationType(juce::Justification::centred);
+    kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF101820));  // dark no-kit state
+    kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFF3A5A7A));
+    kitNameLabel.setText("no kit loaded", juce::dontSendNotification);
+    kitNameLabel.setInterceptsMouseClicks(false, false);
+    addAndMakeVisible(kitNameLabel);
+
     // Reset / Panic button — dark red, signals STOP/DANGER
     resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF8B0000));
     resetButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
@@ -281,9 +290,8 @@ MainComponent::MainComponent()
           const juce::int64 tWrite = juce::Time::getMillisecondCounter();
           // FIX 3: No updateSamplerSounds.
 
-          // FIX 4: Defer save — no synchronous disk write on Reset.
-          eqSaveTimer.startTimer(400);
-          const juce::int64 tSave = juce::Time::getMillisecondCounter();
+          // No disk save — kit must be saved explicitly by the user.
+          captureSampleCardToPadSettings(padManager.selectedPadIndex);
       };
 
       // Set initial sample name
@@ -343,18 +351,8 @@ MainComponent::~MainComponent()
     heartbeatThread.stopThread(500);
     masterVolumeKnob.setLookAndFeel(nullptr);
     cpuTimer.stopTimer();
-    navSaveTimer.stopTimer();
     transientDetectionTimer.stopTimer();
     navDebounceTimer.stopTimer();
-    pitchSaveTimer.stopTimer();
-    eqSaveTimer.stopTimer();
-    markerSaveTimer.stopTimer();
-    volSaveTimer.stopTimer();
-    adsrSaveTimer.stopTimer();
-    normSaveTimer.stopTimer();
-    filterModeSaveTimer.stopTimer();
-    loopSaveTimer.stopTimer();
-    midiSaveTimer.stopTimer();
     deviceManager.removeChangeListener(this);
 
     // Kill any active freeze/loop voices before audio shutdown.
@@ -364,17 +362,6 @@ MainComponent::~MainComponent()
     pad().forceStopAllVoices();
     pad().clearSoundsAndVoices();
     pad().allNotesOff(0, false);
-
-    // Shutdown save — flush current state to disk before the app closes.
-    // Also covers the case where navSaveTimer was still pending (user closed the app
-    // quickly after navigation before the 500ms timer fired).
-    if (configManager != nullptr)
-    {
-        configManager->savePitchOffset(sampleCard.getPitchOffset());
-        configManager->saveMasterVolume(masterVolumeGain.load());
-        saveCurrentSampleState();
-        configManager->saveNow();
-    }
 
     shutdownAudio();
 }
@@ -490,10 +477,10 @@ void MainComponent::paint(juce::Graphics& g)
     g.fillAll(juce::Colour(0xFF1E1E1E));
     
     // Draw title centred in the 40px top bar, between Menu button (left) and right controls
-    // Left trim: 20px margin + 60px menu = 80; Right trim: 20px margin + 250px right group = 270
+    // Left trim: margin(20) + menu(60) + gap(4+4) = 88px
     g.setColour(juce::Colour(0xFFCECECE));
     g.setFont(juce::Font(18.0f, juce::Font::bold));
-    auto titleArea = getLocalBounds().withTrimmedLeft(80).withTrimmedRight(348).removeFromTop(40);
+    auto titleArea = getLocalBounds().withTrimmedLeft(88).withTrimmedRight(348).removeFromTop(40);
     g.drawText("JAIVA-SAMPLER||1.0", titleArea, juce::Justification::centred, true);
 
     // Line above footer (footer is 50px from bottom)
@@ -509,6 +496,27 @@ void MainComponent::paint(juce::Graphics& g)
     g.drawRect(baseTuningLabel.getBounds(), 1);
     g.drawRect(testToneButton.getBounds(), 1);
     g.drawRect(masterVolumeKnob.getBounds(), 1);
+}
+
+void MainComponent::paintOverChildren(juce::Graphics& g)
+{
+    // Draw decorative kit-name panel border after children have painted.
+    // The label itself draws its own solid background; we add glow + top-edge highlight.
+    const auto b = kitNameLabel.getBounds().toFloat();
+    const bool hasKit = kitNameLabel.getText() != "no kit loaded";
+
+    // Outer dark bezel (just outside the label bounds — doesn't cover text)
+    g.setColour(juce::Colour(0xFF050C14));
+    g.drawRoundedRectangle(b.expanded(1.0f), 5.0f, 1.5f);
+
+    // Inner top-edge highlight — simulates a backlit edge
+    g.setColour(hasKit ? juce::Colour(0x6080C8FF) : juce::Colour(0x304060A0));
+    g.drawLine(b.getX() + 5.0f, b.getY() + 1.0f,
+               b.getRight() - 5.0f, b.getY() + 1.0f, 1.0f);
+
+    // Subtle rim glow
+    g.setColour(hasKit ? juce::Colour(0xFF1A5080) : juce::Colour(0xFF0A1828));
+    g.drawRoundedRectangle(b, 4.0f, 1.0f);
 }
 
 void MainComponent::resized()
@@ -541,7 +549,6 @@ void MainComponent::resized()
 
         menuButton.setBounds (topBar.removeFromLeft (60).withSizeKeepingCentre (56, 30));
         topBar.removeFromLeft (4);
-        kitButton.setBounds  (topBar.removeFromLeft (48).withSizeKeepingCentre (44, 30));
 
         // Right side: Reset+Hz+MasterVol+knob+val%+MIDI+TestTone = 358 px
         constexpr int kRightW = 52+6+70+6+62+4+28+4+32+4+22+6+62; // 358
@@ -564,7 +571,21 @@ void MainComponent::resized()
     // =========================================================
     // GLOBAL CONTROLS BAR  (40 px, full width)
     // =========================================================
-    globalControlsBar.setBounds (strip.removeFromTop (kGlobCtrlH));
+    {
+        auto globRow = strip.removeFromTop (kGlobCtrlH);
+        globalControlsBar.setBounds (globRow);
+
+        // Kit button + name display: placed after bank controls in the same row.
+        // GlobalControlsBar uses reduced(8,0) internally; bank controls = 144px.
+        // We mirror that offset so kit controls align flush with bank buttons.
+        auto kitArea = globRow.reduced (8, 0);
+        kitArea.removeFromLeft (144);      // skip bank controls
+        kitArea.removeFromLeft (4);        // gap after bankDownBtn
+        kitButton.setBounds    (kitArea.removeFromLeft (44).withSizeKeepingCentre (40, 20));
+        kitArea.removeFromLeft (4);
+        const int labelW = juce::jmin (180, kitArea.getWidth() - 8);
+        kitNameLabel.setBounds (kitArea.removeFromLeft (labelW).withSizeKeepingCentre (labelW, 20));
+    }
 
     // =========================================================
     // TOP TRIANGLE PAD ROW  (kPadRowH, full width)
@@ -1489,9 +1510,14 @@ void MainComponent::showKitMenu()
                 // Capture current pad before opening dialog.
                 captureSampleCardToPadSettings (padManager.selectedPadIndex);
 
+                const juce::String savedFolder = configManager->getLastKitFolder();
+                const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
+                                                ? juce::File(savedFolder)
+                                                : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
                 kitFileChooser = std::make_unique<juce::FileChooser> (
                     "Save Bank Kit",
-                    juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                    startDir,
                     "*.jai");
 
                 kitFileChooser->launchAsync (
@@ -1506,15 +1532,21 @@ void MainComponent::showKitMenu()
                         if (chosen.getFileExtension().toLowerCase() != ".jai")
                             chosen = chosen.withFileExtension ("jai");
 
+                        configManager->saveLastKitFolder(chosen.getParentDirectory().getFullPathName());
                         saveKitToFile (chosen);
                     });
             }
             else if (result == 2)
             {
                 // --- Load Bank Kit ---
+                const juce::String savedFolder = configManager->getLastKitFolder();
+                const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
+                                                ? juce::File(savedFolder)
+                                                : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+
                 kitFileChooser = std::make_unique<juce::FileChooser> (
                     "Load Bank Kit",
-                    juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                    startDir,
                     "*.jai");
 
                 kitFileChooser->launchAsync (
@@ -1524,6 +1556,7 @@ void MainComponent::showKitMenu()
                     {
                         auto chosen = fc.getResult();
                         if (chosen == juce::File{} || !chosen.existsAsFile()) return;
+                        configManager->saveLastKitFolder(chosen.getParentDirectory().getFullPathName());
                         loadKitFromFile (chosen);
                     });
             }
@@ -1545,7 +1578,12 @@ void MainComponent::saveKitToFile (const juce::File& file)
     }
 
     if (root->writeTo (file))
+    {
+        kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
+        kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
+        kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
         sampleCard.showTrimToast ("Kit saved: " + file.getFileName(), false);
+    }
     else
         juce::AlertWindow::showMessageBoxAsync (
             juce::MessageBoxIconType::WarningIcon,
@@ -1620,6 +1658,9 @@ void MainComponent::loadKitFromFile (const juce::File& file)
         }
     }
 
+    kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
+    kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
+    kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
     sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
 }
 
@@ -1653,6 +1694,10 @@ MainComponent::TrimSettingsSnapshot MainComponent::padSettingsToSnapshot (const 
     snap.transientThreshold        = ps.transientThreshold;
     snap.gridSnapEnabled           = ps.gridSnapEnabled;
     snap.gridResolutionIndex       = ps.gridResolutionIndex;
+    snap.midiNote                  = ps.midiNote;
+    snap.midiChannel               = ps.midiChannel;
+    snap.startPointSeconds         = ps.startPointSeconds;
+    snap.endPointSeconds           = ps.endPointSeconds;
     return snap;
 }
 
@@ -1805,9 +1850,7 @@ void MainComponent::navigateToFile(int index)
     // Must be synchronous here so the card still holds the true values.
     saveOutgoingSampleState();
 
-    // Reset both deferred timers: if user navigates again before they fire, the
-    // timers restart — saves and transient detection only run once navigation stops.
-    navSaveTimer.stopTimer();
+    // Stop transient detection timer so it restarts cleanly after the new load.
     transientDetectionTimer.stopTimer();
 
     currentFileIndex = index;
@@ -1960,10 +2003,6 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                                /*knownSampleRate=*/peakSR);
         sampleCard.setDuration(sample->lengthInSamples / sample->sampleRate);
 
-        sample->rootNote = sampleCard.getMidiNote();
-        sample->lowNote  = sample->rootNote;
-        sample->highNote = sample->rootNote;
-
         // ── Steps 5-7: Restore per-sample state ──────────────────────────────────
         // Start/end always reset to 0 / full-length (trim changes sample length).
         // For trim loads, all other settings come from the TrimSettingsSnapshot.
@@ -2016,11 +2055,18 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
 
         if (trimSnapshot.valid)
         {
-            // ── TRIM LOAD: restore all settings from pre-trim snapshot ────────────
-            // Start/end intentionally NOT restored — trimmed file has new length.
+            // ── TRIM LOAD / KIT LOAD: restore all settings from snapshot ──────────
+            // Start/end: kit loads restore saved values; trim loads leave at defaults
+            // (0.0 / -1.0) because the trimmed file's content IS the old start..end region.
+            effectiveStart = trimSnapshot.startPointSeconds;
+            effectiveEnd   = trimSnapshot.endPointSeconds;
 
             effectiveVol  = trimSnapshot.volumeLevel;
             effectiveLoop = trimSnapshot.loopEnabled;
+
+            // MIDI routing — silent (no listener, no updateSamplerSounds rebuild)
+            sampleCard.setMidiNote   (trimSnapshot.midiNote,    /*notify=*/false);
+            sampleCard.setMidiChannel(trimSnapshot.midiChannel, /*notify=*/false);
 
             // Pitch
             sampleCard.setPitchOffset(trimSnapshot.pitchCents);
@@ -2087,6 +2133,12 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                 applyNormState(false, -6.0f);
             }
         }
+
+        // MIDI routing: resolve rootNote AFTER all restore blocks so kit-loaded
+        // and trim-preserved MIDI notes are correctly reflected.
+        sample->rootNote = sampleCard.getMidiNote();
+        sample->lowNote  = sample->rootNote;
+        sample->highNote = sample->rootNote;
 
         // Pitch: total = global user offset + per-sample base (from Tune).
         // For trim loads, both were restored from the snapshot above.
@@ -2203,18 +2255,11 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
 
         if (deferTransients)
         {
-            // Opt 2: Batch disk saves — wait 500ms after navigation stops, write once.
-            // Opt 3: Detect transients — wait 800ms after navigation stops.
-            // Starting the timer again resets it, so rapid navigation only fires once.
-            navSaveTimer.startTimer(500);
+            // Detect transients after navigation stops (800ms debounce).
             transientDetectionTimer.startTimer(800);
         }
-        else
-        {
-            // Normal load (+button, startup): save immediately as before.
-            saveCurrentSampleState();
-            saveCurrentSession();
-        }
+        // No disk save — kit must be saved explicitly by the user.
+        captureSampleCardToPadSettings(padManager.selectedPadIndex);
 
         // Part 2H — update the pad grid name for the currently selected pad.
         padManager.padSettings[padManager.selectedPadIndex].sampleFilePath =
@@ -2316,17 +2361,9 @@ void MainComponent::midiNoteChanged(int newNote)
 
     }
 
-    // Always persist the MIDI note into the pad settings — even if no sample is loaded
-    // (empty pads must remember their MIDI mapping across restarts).
-    padManager.padSettings[padManager.selectedPadIndex].midiNote = newNote;
+    // Keep in-memory pad settings in sync — no disk write.
+    padManager.padSettings[padManager.selectedPadIndex].midiNote    = newNote;
     padManager.padSettings[padManager.selectedPadIndex].midiChannel = sampleCard.getMidiChannel();
-    padManager.padSettings[padManager.selectedPadIndex].saveToProperties(
-        configManager->getPropertiesFile());
-
-    // Deferred save — in-memory only here, one disk write fires 500ms after last change.
-    // Do NOT call saveCurrentSession() / flush() synchronously — that blocks the message thread.
-    configManager->saveMidiSettings(newNote, sampleCard.getMidiChannel(), currentMidiDeviceName);
-    midiSaveTimer.startTimer(500);
 
 }
 
@@ -2342,14 +2379,9 @@ void MainComponent::midiChannelChanged(int newChannel)
         pad().getSynthesiser().allNotesOff(1, false);
     }
 
-    // Always persist the MIDI channel into the pad settings — even if no sample is loaded.
+    // Keep in-memory pad settings in sync — no disk write.
     padManager.padSettings[padManager.selectedPadIndex].midiNote    = sampleCard.getMidiNote();
     padManager.padSettings[padManager.selectedPadIndex].midiChannel = newChannel;
-    padManager.padSettings[padManager.selectedPadIndex].saveToProperties(
-        configManager->getPropertiesFile());
-
-    configManager->saveMidiSettings(sampleCard.getMidiNote(), newChannel, currentMidiDeviceName);
-    midiSaveTimer.startTimer(500);
 }
 
 void MainComponent::learningModeChanged(bool isLearning)
@@ -2378,17 +2410,16 @@ void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->pitchOffsetAtomic.store(totalCents);
 
-    // Restart debounce timer — one disk write fires 500ms after the last pitch change.
-    pitchSaveTimer.startTimer(500);
+    // Keep in-memory pad settings in sync — no disk write.
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 
     juce::ignoreUnused(t0);
 }
 
 void MainComponent::volumeChanged(float volume)
 {
-    auto t0 = juce::Time::getMillisecondCounterHiRes();
     pad().volumeGain.store(volume);
-    volSaveTimer.startTimer(400);  // one disk write fires 400ms after dragging stops
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
 void MainComponent::startPointChanged(double startPointSeconds)
@@ -2420,7 +2451,7 @@ void MainComponent::startPointChanged(double startPointSeconds)
         }
     }
 
-    markerSaveTimer.startTimer(400);  // one disk write 400ms after last movement
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 
     const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
 }
@@ -2461,7 +2492,7 @@ void MainComponent::endPointChanged(double endPointSeconds)
         }
     }
 
-    markerSaveTimer.startTimer(400);  // one disk write 400ms after last movement
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 
     const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
 }
@@ -2475,7 +2506,7 @@ void MainComponent::loopEnabledChanged(bool isLooping)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->loopEnabled.store(isLooping);
 
-    loopSaveTimer.startTimer(400);  // one disk write 400ms after toggle
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
 void MainComponent::gridSnapChanged(bool isEnabled)
@@ -2497,7 +2528,7 @@ void MainComponent::gridResolutionChanged(int index)
 
 void MainComponent::detectedNoteChanged(const juce::String& noteName, double freqHz)
 {
-    saveCurrentSampleState();
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
 void MainComponent::transientDetectionEnabledChanged(bool enabled)
@@ -2526,14 +2557,7 @@ void MainComponent::adsrParamsChanged(bool enabled, float attackMs, float decayM
             sound->customAdsrReleaseMs.store(releaseMs);
         }
     double elapsed = juce::Time::getMillisecondCounterHiRes() - t0;
-    if (sampleCard.isAdsrDragging())
-    {
-        adsrSaveTimer.startTimer(400);  // one disk write fires 400ms after drag stops
-    }
-    else
-    {
-        saveCurrentSampleState();  // toggle or program change — save immediately
-    }
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
 void MainComponent::activeTabChanged(int tabIndex)
@@ -2567,10 +2591,7 @@ void MainComponent::eqParamsChanged(bool enabled,
     // FIX 7: resetEqState() is ONLY safe when muteOutput=true (audio thread not running).
     // resetEqState() is intentionally NOT called here.
 
-    // FIX 4: Always defer save — no synchronous disk write from eqParamsChanged.
-    const bool isDragging = sampleCard.isEqDisplayDragging();
-    eqSaveTimer.startTimer(400);
-
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
 void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
@@ -2597,10 +2618,7 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
 
     // NO updateSamplerSounds() — coefficients written atomically above.
 
-    // Defer disk save — one write fires 400ms after the click.
-    filterModeSaveTimer.startTimer(400);
-
-    const auto tDone = juce::Time::getMillisecondCounter();
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
 // computeNormGainFromAudio is defined in PadAudioEngine.h and forwarded
@@ -2608,13 +2626,11 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
 
 void MainComponent::normChanged(bool enabled, float targetDb)
 {
-    const auto t0 = juce::Time::getMillisecondCounter();
-
     if (!enabled)
     {
         pad().normGain.store(1.0f);
         sampleCard.setNormGainDisplay(0.0f);
-        normSaveTimer.startTimer(400);
+        captureSampleCardToPadSettings(padManager.selectedPadIndex);
         return;
     }
 
@@ -2631,41 +2647,31 @@ void MainComponent::normChanged(bool enabled, float targetDb)
 
     if (scanSamples <= kBgScanThreshold || scanSamples == 0)
     {
-        // Small sample — scan on message thread, fast enough.
         const float gain   = pad().computeNormGainFromAudio(targetDb);
         pad().normGain.store(gain);
         const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
         sampleCard.setNormGainDisplay(gainDb);
-
-        const auto tGain = juce::Time::getMillisecondCounter();
-
-        normSaveTimer.startTimer(400);
-        const auto tDone = juce::Time::getMillisecondCounter();
+        captureSampleCardToPadSettings(padManager.selectedPadIndex);
     }
     else
     {
-        // Large sample — show Scanning... label, run peak scan on background thread.
-        sampleCard.setNormGainDisplay(0.0f);  // clear stale display while scanning
+        // Large sample — run peak scan on background thread.
+        sampleCard.setNormGainDisplay(0.0f);
 
         const float capturedTarget = targetDb;
         backgroundThreads.addJob([this, capturedTarget]()
         {
-            const auto tBg = juce::Time::getMillisecondCounter();
             const float gain   = pad().computeNormGainFromAudio(capturedTarget);
             const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
-            const auto tScan = juce::Time::getMillisecondCounter();
 
             juce::MessageManager::callAsync([this, gain, gainDb]()
             {
                 pad().normGain.store(gain);
                 sampleCard.setNormGainDisplay(gainDb);
-                normSaveTimer.startTimer(400);
+                captureSampleCardToPadSettings(padManager.selectedPadIndex);
             });
         });
-
-        const auto tDone = juce::Time::getMillisecondCounter();
     }
-
 }
 
 void MainComponent::oneShotEnabledChanged(bool enabled)
@@ -2756,94 +2762,8 @@ void MainComponent::checkOneShotTailDone()
 
 void MainComponent::flushNavigationSave()
 {
-    // Called once, 500ms after the last Prev/Next press.
-    // Snapshot all saveable state on the message thread (fast, memory-only reads),
-    // then hand the disk write to a background thread so the message thread never blocks.
-
-    if (configManager == nullptr) return;
-
-    const auto tSnap = (juce::int64)juce::Time::getMillisecondCounter();
-
-    // ── Build snapshot on message thread ─────────────────────────────────────────
-    struct SaveSnap
-    {
-        int          midiNote, midiChannel, pitchOffsetCents;
-        juce::String midiDevice;
-        float        volume, masterVolume;
-        bool         loopEnabled;
-        bool         hasSample;
-        juce::File   sampleFile;
-        double       startPoint, endPoint;
-        ConfigurationManager::SampleState sampleState;
-    };
-
-    auto snap = std::make_shared<SaveSnap>();
-    snap->midiNote         = sampleCard.getMidiNote();
-    snap->midiChannel      = sampleCard.getMidiChannel();
-    snap->midiDevice       = currentMidiDeviceName;
-    snap->pitchOffsetCents = sampleCard.getPitchOffset();
-    snap->volume           = sampleCard.getVolume();
-    snap->masterVolume     = masterVolumeGain.load();
-    snap->loopEnabled      = sampleCard.isLoopEnabled();
-    snap->hasSample        = false;
-
-    {
-        juce::ScopedLock lock(pad().sampleLock);
-        if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
-        {
-            auto* sample      = pad().samples[pad().selectedSampleIndex];
-            snap->hasSample   = true;
-            snap->sampleFile  = sample->file;
-            snap->startPoint  = sample->startPointSeconds;
-            snap->endPoint    = sample->endPointSeconds;
-
-            auto& s = snap->sampleState;
-            s.startPoint         = sample->startPointSeconds;
-            s.endPoint           = sample->endPointSeconds;
-            s.volume             = sampleCard.getVolume();
-            s.loopEnabled        = sampleCard.isLoopEnabled();
-            s.transientThreshold = sampleCard.getTransientThreshold();
-            s.detectedNoteName   = sampleCard.getDetectedNoteName();
-            s.detectedFreqHz     = sampleCard.getDetectedFreqHz();
-            s.basePitchOffset    = sampleCard.getBasePitchOffset();
-            s.adsrEnabled        = sampleCard.isAdsrEnabled();
-            s.adsrAttackMs       = sampleCard.getAdsrAttackMs();
-            s.adsrDecayMs        = sampleCard.getAdsrDecayMs();
-            s.adsrSustain        = sampleCard.getAdsrSustain();
-            s.adsrReleaseMs      = sampleCard.getAdsrReleaseMs();
-            s.eqEnabled          = sampleCard.isEqEnabled();
-            s.eq1Freq  = sampleCard.getEqBandFreq(0); s.eq1Gain = sampleCard.getEqBandGain(0);
-            s.eq1Q     = sampleCard.getEqBandQ(0);    s.eq1Mode = pad().eqFilterModes[0];
-            s.eq2Freq  = sampleCard.getEqBandFreq(1); s.eq2Gain = sampleCard.getEqBandGain(1);
-            s.eq2Q     = sampleCard.getEqBandQ(1);    s.eq2Mode = pad().eqFilterModes[1];
-            s.eq3Freq  = sampleCard.getEqBandFreq(2); s.eq3Gain = sampleCard.getEqBandGain(2);
-            s.eq3Q     = sampleCard.getEqBandQ(2);    s.eq3Mode = pad().eqFilterModes[2];
-        }
-    }
-
-
-    // ── All disk I/O on background thread ────────────────────────────────────────
-    backgroundThreads.addJob([this, snap]()
-    {
-        const auto t0 = (juce::int64)juce::Time::getMillisecondCounter();
-
-        configManager->saveMidiSettings(snap->midiNote, snap->midiChannel, snap->midiDevice);
-        configManager->savePitchOffset(snap->pitchOffsetCents);
-        configManager->saveVolume(snap->volume);
-        configManager->saveMasterVolume(snap->masterVolume);
-        configManager->saveLoopEnabled(snap->loopEnabled);
-
-        if (snap->hasSample)
-        {
-            configManager->saveLastSample(snap->sampleFile);
-            configManager->saveStartPoint(snap->startPoint);
-            configManager->saveEndPoint(snap->endPoint);
-            configManager->saveSampleState(snap->sampleFile, snap->sampleState);
-        }
-
-        configManager->flush();   // ONE disk write for everything above
-
-    });
+    // In-memory only — capture current state so it's ready for kit save.
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
 void MainComponent::runDeferredTransientDetection()
@@ -3272,117 +3192,18 @@ void MainComponent::handleMidiLearn(int noteNumber)
     sampleCard.setMidiNoteFromLearn(noteNumber);
 
     // updateSamplerSounds() was already called inside midiNoteChanged listener above.
-    // Save is deferred via midiSaveTimer started inside midiNoteChanged.
+    // Pad settings are captured inside midiNoteChanged.
 }
 
 //==============================================================================
 // Session persistence methods
 void MainComponent::loadLastSession()
 {
-
-    // ── Load all pad settings FIRST — before any listener-triggering calls ────────
-    // midiNoteChanged fires as a side effect of setMidiNote below. If loadAllPads
-    // runs after that, it reads the correct per-pad values. But if setMidiNote fires
-    // first, it writes padSettings[0].midiNote = global-flat-default (60/ch1) into
-    // the in-memory PropertiesFile via saveToProperties(), clobbering the saved value
-    // that loadAllPads would otherwise read.
-    padManager.loadAllPads(configManager->getPropertiesFile());
-
-    // ── Use pad 0's per-pad MIDI settings (not global flat key defaults) ──────────
-    // The global flat key is only a migration fallback; per-pad keys are authoritative.
-    int savedNote    = padManager.padSettings[0].midiNote > 0
-                       ? padManager.padSettings[0].midiNote
-                       : configManager->getMidiNote();
-    int savedChannel = padManager.padSettings[0].midiChannel > 0
-                       ? padManager.padSettings[0].midiChannel
-                       : configManager->getMidiChannel();
-    juce::String savedDevice = configManager->getMidiDevice();
-
-
-    // ── Restore global pitch FIRST — before any callbacks that call saveCurrentSession ──
-    // setMidiNote/setMidiChannel fire listeners → saveCurrentSession → savePitchOffset.
-    // If pitch is still 0 at that point it overwrites the saved value on disk.
-    // Setting pitch first ensures every subsequent saveCurrentSession writes the correct value.
-    int savedPitch = configManager->getPitchOffset();
-    sampleCard.setPitchOffset(savedPitch);
-
-    sampleCard.setMidiNote(savedNote);
-    if (savedChannel >= 0 && savedChannel <= 16)
-        sampleCard.setMidiChannel(savedChannel);
-
-    float savedMasterVolume = configManager->getMasterVolume();
-    masterVolumeGain.store(savedMasterVolume);
-    padManager.setMasterVolume(savedMasterVolume);
-    masterVolumeKnob.setValue(savedMasterVolume, juce::dontSendNotification);
-    masterVolValueLabel.setText(juce::String(juce::roundToInt(savedMasterVolume * 100)) + "%",
-                                juce::dontSendNotification);
-
-    bool savedGridSnap = configManager->getGridSnapEnabled();
-    sampleCard.setGridSnapEnabled(savedGridSnap);
-
-    // Restore base tuning frequency
-    double savedTuningHz = configManager->getBaseTuningHz();
-    baseTuningLabel.setHz(savedTuningHz);
-    sampleCard.setBaseTuningHz(savedTuningHz);
-
-    // Restore pitch step size
-    int savedStepCents = configManager->getPitchStepCents();
-    sampleCard.setPitchStepCents(savedStepCents);
-
-    // Restore active tab
-    int savedTab = configManager->getActiveTab();
-    sampleCard.setActiveTabQuiet(savedTab);
-
-    // FIX 3: restore transient detection (CRA) on/off state
-    bool savedCRA = configManager->getTransientDetectionEnabled();
-    sampleCard.setTransientDetectionEnabled(savedCRA);
-
-    // Restore One Shot on/off state
-    bool savedOneShot = configManager->getOneShotEnabled();
-    sampleCard.setOneShotEnabled(savedOneShot);
-    // Propagate to any live sounds (none at startup, but safe to call)
-    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
-            sound->oneShotEnabled.store(savedOneShot);
-
-    // Restore Reverse on/off state
-    bool savedReverse = configManager->getReverseEnabled();
-    sampleCard.setReverseEnabled(savedReverse);
-    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
-            sound->reverseEnabled.store(savedReverse);
-
-    // Restore Bounce on/off state
-    bool savedBounce = configManager->getBounceEnabled();
-    sampleCard.setBounceEnabled(savedBounce);
-    for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
-        if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
-            sound->bounceEnabled.store(savedBounce);
-
-    // FIX 2: restore user-selected grid resolution from 'gridResolution' (ms) key if present
-    {
-        static const double resVals[] = { 0.001, 0.01, 0.05, 0.1, 0.5, 1.0 };
-        double savedMs = configManager->getGridResolutionMs();
-        if (savedMs > 0.0)
-        {
-            // Convert ms back to index (find closest match)
-            double savedSec = savedMs / 1000.0;
-            int idx = 5; // default 1s
-            double bestDiff = 1e9;
-            for (int i = 0; i < 6; ++i)
-            {
-                double diff = std::abs(resVals[i] - savedSec);
-                if (diff < bestDiff) { bestDiff = diff; idx = i; }
-            }
-            sampleCard.setGridResolutionIndex(idx); // also sets userHasSetGridResolution = true
-        }
-        else
-        {
-            // No user preference saved — keep default; auto-select will apply on first load
-        }
-    }
+    // App starts fresh — no samples or kit loaded automatically.
+    // Only audio and MIDI device selections are restored (system-level settings).
 
     // ── Restore MIDI device ────────────────────────────────────────────────────────
+    juce::String savedDevice = configManager->getMidiDevice();
     if (savedDevice.isNotEmpty() && isValidMidiDevice(savedDevice))
     {
         currentMidiDeviceName = savedDevice;
@@ -3393,172 +3214,26 @@ void MainComponent::loadLastSession()
             {
                 midiInput = juce::MidiInput::openDevice(device.identifier, this);
                 if (midiInput != nullptr)
-                {
                     midiInput->start();
-                }
                 break;
             }
         }
     }
 
-    // ── Load last sample ──────────────────────────────────────────────────────────
-    // Per-sample state (start, end, vol, loop) is looked up inside loadSampleFileAsync.
-    // Pitch is NOT restored here — it was already restored above as a global value.
-    juce::File lastSample = configManager->getLastSample();
-    if (lastSample.existsAsFile() &&
-        formatManager.findFormatForFileExtension(lastSample.getFileExtension()) != nullptr)
-    {
-        // Peek at what the settings file contains for this sample BEFORE any load begins.
-        // This lets us verify the save survived the previous session.
-        {
-            auto peek = configManager->getSampleState(lastSample);
-        }
-        currentFolder = lastSample.getParentDirectory();
-        // Don't scan the folder on startup — only one file needs to load.
-        // The folder listing is built lazily on the first Prev/Next press.
-
-        // autoPlay=false → no preview note played on startup
-        backgroundThreads.addJob([this, lastSample]() {
-            loadSampleFileAsync(lastSample, false);
-        });
-    }
-    else
-    {
-    }
-
-    // ── Populate grid display names from the padSettings already loaded above ──────
-    for (int i = 0; i < PadManager::kMaxPads; ++i)
-    {
-        const auto& ps = padManager.padSettings[i];
-        if (ps.sampleFilePath.isNotEmpty())
-        {
-            const juce::File padFile(ps.sampleFilePath);
-            padGrid.setPadSampleName(i, padFile.getFileName());
-
-            // Pad 0 is already loaded via loadSampleFileAsync above.
-            // Pads 1–15: preload audio into their engines in the background so pad
-            // switching is instant and MIDI triggers work without selecting the pad first.
-            if (i != 0 && padFile.existsAsFile() &&
-                formatManager.findFormatForFileExtension(padFile.getFileExtension()) != nullptr)
-            {
-                preloadPadEngineAsync(i, padFile, ps);
-            }
-        }
-    }
-
-    // Select pad 0 in the grid (already the default, but explicit is clearer)
     padGrid.selectPad(0);
-
 }
 
 void MainComponent::saveOutgoingSampleState()
 {
-    if (configManager == nullptr) return;
-    juce::ScopedLock lock(pad().sampleLock);
-    if (pad().selectedSampleIndex < 0 || pad().selectedSampleIndex >= pad().samples.size()) return;
-
-    auto* sample = pad().samples[pad().selectedSampleIndex];
-    ConfigurationManager::SampleState s;
-    s.startPoint          = sample->startPointSeconds;
-    s.endPoint            = sample->endPointSeconds;
-    s.volume              = sampleCard.getVolume();
-    s.loopEnabled         = sampleCard.isLoopEnabled();
-    s.transientThreshold  = sampleCard.getTransientThreshold();
-    s.detectedNoteName    = sampleCard.getDetectedNoteName();
-    s.detectedFreqHz      = sampleCard.getDetectedFreqHz();
-    s.basePitchOffset     = sampleCard.getBasePitchOffset();
-    s.adsrEnabled         = sampleCard.isAdsrEnabled();
-    s.adsrAttackMs        = sampleCard.getAdsrAttackMs();
-    s.adsrDecayMs         = sampleCard.getAdsrDecayMs();
-    s.adsrSustain         = sampleCard.getAdsrSustain();
-    s.adsrReleaseMs       = sampleCard.getAdsrReleaseMs();
-    s.eqEnabled           = sampleCard.isEqEnabled();
-    s.eq1Freq             = sampleCard.getEqBandFreq(0);
-    s.eq1Gain             = sampleCard.getEqBandGain(0);
-    s.eq1Q                = sampleCard.getEqBandQ(0);
-    s.eq1Mode             = pad().eqFilterModes[0];
-    s.eq2Freq             = sampleCard.getEqBandFreq(1);
-    s.eq2Gain             = sampleCard.getEqBandGain(1);
-    s.eq2Q                = sampleCard.getEqBandQ(1);
-    s.eq2Mode             = pad().eqFilterModes[1];
-    s.eq3Freq             = sampleCard.getEqBandFreq(2);
-    s.eq3Gain             = sampleCard.getEqBandGain(2);
-    s.eq3Q                = sampleCard.getEqBandQ(2);
-    s.eq3Mode             = pad().eqFilterModes[2];
-    s.normEnabled         = sampleCard.isNormEnabled();
-    s.normTargetDb        = sampleCard.getNormTargetDb();
-    // User pitchOffset is NOT saved here — it is a global value saved via savePitchOffset()
-
-    configManager->saveSampleState(sample->file, s);
+    // In-memory only — capture outgoing pad state so pad switching is instant.
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
 void MainComponent::saveCurrentSampleState()
 {
-    if (configManager == nullptr) return;
-
-    // Capture snapshot on message thread — no PropertiesFile access, just plain reads.
-    ConfigurationManager::SampleState s;
-    juce::File sampleFile;
-    {
-        juce::ScopedLock lock(pad().sampleLock);
-        if (pad().selectedSampleIndex < 0 || pad().selectedSampleIndex >= pad().samples.size())
-            return;
-        auto* sample = pad().samples[pad().selectedSampleIndex];
-        sampleFile           = sample->file;
-        s.startPoint         = sample->startPointSeconds;
-        s.endPoint           = sample->endPointSeconds;
-    }
-
-    s.volume              = sampleCard.getVolume();
-    s.loopEnabled         = sampleCard.isLoopEnabled();
-    s.transientThreshold  = sampleCard.getTransientThreshold();
-    s.detectedNoteName    = sampleCard.getDetectedNoteName();
-    s.detectedFreqHz      = sampleCard.getDetectedFreqHz();
-    s.basePitchOffset     = sampleCard.getBasePitchOffset();
-    s.adsrEnabled         = sampleCard.isAdsrEnabled();
-    s.adsrAttackMs        = sampleCard.getAdsrAttackMs();
-    s.adsrDecayMs         = sampleCard.getAdsrDecayMs();
-    s.adsrSustain         = sampleCard.getAdsrSustain();
-    s.adsrReleaseMs       = sampleCard.getAdsrReleaseMs();
-    s.eqEnabled           = sampleCard.isEqEnabled();
-    s.eq1Freq             = sampleCard.getEqBandFreq(0);
-    s.eq1Gain             = sampleCard.getEqBandGain(0);
-    s.eq1Q                = sampleCard.getEqBandQ(0);
-    s.eq1Mode             = pad().eqFilterModes[0];
-    s.eq2Freq             = sampleCard.getEqBandFreq(1);
-    s.eq2Gain             = sampleCard.getEqBandGain(1);
-    s.eq2Q                = sampleCard.getEqBandQ(1);
-    s.eq2Mode             = pad().eqFilterModes[1];
-    s.eq3Freq             = sampleCard.getEqBandFreq(2);
-    s.eq3Gain             = sampleCard.getEqBandGain(2);
-    s.eq3Q                = sampleCard.getEqBandQ(2);
-    s.eq3Mode             = pad().eqFilterModes[2];
-    s.normEnabled         = sampleCard.isNormEnabled();
-    s.normTargetDb        = sampleCard.getNormTargetDb();
-
-    // Snapshot global values needed for the session save.
-    const int   userPitch   = sampleCard.getPitchOffset();
-    const float masterVol   = masterVolumeGain.load();
-    const int   midiNote    = sampleCard.getMidiNote();
-    const int   midiCh      = sampleCard.getMidiChannel();
-    const juce::String midiDev = currentMidiDeviceName;
-
-    // Capture pad settings snapshot (reads from sampleCard getters, no disk I/O).
+    // In-memory only — no disk writes during runtime.
+    // State is only written to disk when the user explicitly saves a kit.
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
-    PadSettings padSnap = padManager.padSettings[padManager.selectedPadIndex];
-
-    // Push ALL PropertiesFile writes and the disk flush to a background thread.
-    // Message thread returns immediately — no UI stutter.
-    backgroundThreads.addJob([this, sampleFile, s, padSnap,
-                               userPitch, masterVol, midiNote, midiCh, midiDev]() mutable {
-        if (configManager == nullptr) return;
-        configManager->saveSampleState(sampleFile, s);
-        configManager->savePitchOffset(userPitch);
-        configManager->saveMasterVolume(masterVol);
-        configManager->saveMidiSettings(midiNote, midiCh, midiDev);
-        padSnap.saveToProperties(configManager->getPropertiesFile());
-        configManager->flush();
-    });
 }
 
 void MainComponent::captureSampleCardToPadSettings(int padIdx)
@@ -3643,36 +3318,87 @@ void MainComponent::captureSampleCardToPadSettings(int padIdx)
 
 void MainComponent::saveCurrentSession()
 {
-    // Always save MIDI settings (in-memory only — flush at end)
-    configManager->saveMidiSettings(
-        sampleCard.getMidiNote(),
-        sampleCard.getMidiChannel(),
-        currentMidiDeviceName
-    );
+    // No-op — runtime state is only written to disk when the user saves a kit explicitly.
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
+}
 
-    configManager->savePitchOffset(sampleCard.getPitchOffset());
-    configManager->saveVolume(sampleCard.getVolume());
-    configManager->saveLoopEnabled(sampleCard.isLoopEnabled());
-    // NOTE: saveAudioSettings() intentionally NOT called here — audio device settings
-    // never change during normal session events. They are saved only in audioDeviceChanged().
-
-    if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
+bool MainComponent::hasAnySamplesLoaded() const
+{
+    // Check the active pad first.
     {
-        auto* sample = pad().samples[pad().selectedSampleIndex];
-        configManager->saveLastSample(sample->file);
-        configManager->saveStartPoint(sample->startPointSeconds);
-        configManager->saveEndPoint(sample->endPointSeconds);
-        // saveCurrentSampleState() does the per-sample write AND the single flush.
-        saveCurrentSampleState();
+        juce::ScopedLock lock(pad().sampleLock);
+        if (!pad().samples.isEmpty())
+            return true;
     }
-    else
+
+    // Check all other pads' in-memory settings for a saved file path.
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
     {
-        // No sample loaded — flush global keys on background thread.
-        backgroundThreads.addJob([this]() {
-            if (configManager != nullptr)
-                configManager->flush();
+        if (i == padManager.selectedPadIndex) continue;
+        if (padManager.padSettings[i].sampleFilePath.isNotEmpty())
+            return true;
+    }
+
+    return false;
+}
+
+void MainComponent::requestQuit()
+{
+    if (!hasAnySamplesLoaded())
+    {
+        // Nothing loaded — close immediately.
+        juce::JUCEApplication::getInstance()->systemRequestedQuit();
+        return;
+    }
+
+    // Samples are loaded — ask whether to save a kit first.
+    juce::AlertWindow::showAsync(
+        juce::MessageBoxOptions()
+            .withIconType(juce::AlertWindow::QuestionIcon)
+            .withTitle("Save Kit?")
+            .withMessage("You have samples loaded. Save a kit before closing?")
+            .withButton("Save Kit")
+            .withButton("Close Without Saving")
+            .withButton("Cancel"),
+        [this](int result)
+        {
+            if (result == 1)
+            {
+                // "Save Kit" — open file chooser, then quit after save.
+                const juce::String savedFolder = configManager->getLastKitFolder();
+                const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
+                                                ? juce::File(savedFolder)
+                                                : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+                kitFileChooser = std::make_unique<juce::FileChooser>(
+                    "Save Kit As",
+                    startDir,
+                    "*.jai");
+
+                kitFileChooser->launchAsync(
+                    juce::FileBrowserComponent::saveMode |
+                    juce::FileBrowserComponent::canSelectFiles |
+                    juce::FileBrowserComponent::warnAboutOverwriting,
+                    [this](const juce::FileChooser& fc)
+                    {
+                        const auto result = fc.getResult();
+                        if (result != juce::File{})
+                        {
+                            auto chosen = result.withFileExtension("jai");
+                            configManager->saveLastKitFolder(chosen.getParentDirectory().getFullPathName());
+                            saveKitToFile(chosen);  // also updates kitNameLabel
+                        }
+                        // Quit whether save succeeded or user dismissed.
+                        juce::JUCEApplication::getInstance()->systemRequestedQuit();
+                    });
+            }
+            else if (result == 2)
+            {
+                // "Close Without Saving"
+                juce::JUCEApplication::getInstance()->systemRequestedQuit();
+            }
+            // result == 0 is "Cancel" — do nothing.
         });
-    }
+
 }
 
 bool MainComponent::isValidMidiDevice(const juce::String& deviceName)
