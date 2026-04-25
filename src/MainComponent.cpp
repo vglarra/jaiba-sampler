@@ -102,6 +102,13 @@ MainComponent::MainComponent()
         {
             // Empty pad — no audio cached yet.
             sampleCard.setEmptyState (true);
+            // Reset folder navigation so Prev/Next won't navigate a stale folder list.
+            currentFolder = juce::File{};
+            {
+                juce::ScopedWriteLock wlock (folderLock);
+                folderAudioFiles.clear();
+            }
+            currentFileIndex = -1;
         }
         else
         {
@@ -132,7 +139,15 @@ MainComponent::MainComponent()
             sampleCard.restoreZoomAndScroll (settings.zoomLevel,
                                              settings.zoomScrollPosition);
 
+            // Reset folder navigation state to this pad's folder.
+            // folderAudioFiles is cleared so the lazy-scan in loadNext/PrevSample
+            // will re-populate it from the correct folder on the first Prev/Next press.
             currentFolder = juce::File (settings.sampleFilePath).getParentDirectory();
+            {
+                juce::ScopedWriteLock wlock (folderLock);
+                folderAudioFiles.clear();
+            }
+            currentFileIndex = -1;
         }
 
         // Update the pad grid label.
@@ -3434,6 +3449,9 @@ void MainComponent::requestQuit()
                         {
                             auto chosen = result.withFileExtension("jai");
                             configManager->saveLastKitFolder(chosen.getParentDirectory().getFullPathName());
+                            // Capture the latest in-memory SampleCard state before saving —
+                            // same as the menu "Save Bank Kit" path does (Bug 3 fix).
+                            captureSampleCardToPadSettings(padManager.selectedPadIndex);
                             saveKitToFile(chosen);  // also updates kitNameLabel
                         }
                         // Quit whether save succeeded or user dismissed.
