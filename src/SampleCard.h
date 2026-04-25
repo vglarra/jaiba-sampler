@@ -1210,6 +1210,14 @@ public:
         eqTabButton.onClick = [this] { setActiveTab(2); };
         addAndMakeVisible(eqTabButton);
 
+        setupTab(recTabButton, false);
+        recTabButton.onClick = [this] { setActiveTab(3); };
+        addAndMakeVisible(recTabButton);
+
+        recContent = std::make_unique<juce::Component>();
+        recContent->setVisible(false);
+        addAndMakeVisible(*recContent);
+
         eqPlaceholderLabel.setText("Coming soon", juce::dontSendNotification);
         eqPlaceholderLabel.setJustificationType(juce::Justification::centred);
         eqPlaceholderLabel.setFont(juce::Font(16.0f, juce::Font::italic));
@@ -1695,9 +1703,11 @@ public:
             applyTabStyle(controlsTabButton, activeTab == 0);
             applyTabStyle(adsrTabButton,     activeTab == 1);
             applyTabStyle(eqTabButton,       activeTab == 2);
+            applyTabStyle(recTabButton,      activeTab == 3);
             controlsTabButton.setBounds(tabBar.removeFromLeft(80).reduced(1, 2));
             adsrTabButton.setBounds    (tabBar.removeFromLeft(80).reduced(1, 2));
             eqTabButton.setBounds      (tabBar.removeFromLeft(80).reduced(1, 2));
+            recTabButton.setBounds     (tabBar.removeFromLeft(60).reduced(1, 2));
             // ADSR and EQ on/off buttons share the same right-aligned slot (44px).
             // Only one is ever visible at a time — updateTabVisibility() enforces this.
             auto rightToggleSlot = tabBar.withLeft(tabBar.getRight() - 44);
@@ -1737,6 +1747,8 @@ public:
             layoutAdsrTabContent(tabContentArea);
         else if (activeTab == 2)
             layoutEqTabContent(tabContentArea);
+        else if (activeTab == 3 && recContent != nullptr)
+            recContent->setBounds(tabContentArea);
 
         if (activeTab == 0)
         {
@@ -2613,6 +2625,10 @@ public:
         virtual void eqFilterModesChanged(int mode1, int mode2, int mode3) = 0;
         // Called when Norm toggle or target dB changes.
         virtual void normChanged(bool enabled, float targetDb) = 0;
+        // Rec tab — called when the user hits Record, Stop, or Playback in the Rec tab.
+        virtual void beginRecording(double bpm, int quantNoteValue, bool metronomeOn) = 0;
+        virtual void endRecording() = 0;
+        virtual void playbackQuantisedEvents() = 0;
     };
     
     void addListener(Listener* listener)
@@ -4304,11 +4320,13 @@ void adjustPitchUp()
     double waveformZoomLevel = 1.0;
 
     // ===== TAB BAR =====
-    int activeTab = 0;  // 0=Controls, 1=ADSR, 2=EQ
+    int activeTab = 0;  // 0=Controls, 1=ADSR, 2=EQ, 3=Rec
     juce::TextButton controlsTabButton { "Controls" };
     juce::TextButton adsrTabButton     { "ADSR" };
     juce::TextButton eqTabButton       { "EQ" };
+    juce::TextButton recTabButton      { "Rec" };
     juce::Label      eqPlaceholderLabel;
+    std::unique_ptr<juce::Component> recContent;
 
     // ===== ADSR ENVELOPE CONTROLS =====
     bool   adsrEnabled       = false;
@@ -4600,7 +4618,7 @@ void adjustPitchUp()
 
     void setActiveTab(int tab)
     {
-        activeTab = juce::jlimit(0, 2, tab);
+        activeTab = juce::jlimit(0, 3, tab);
         resized();
         repaint();  // Force full redraw — clears ghost outlines left by hidden tab components
         listeners.call([this](Listener& l) { l.activeTabChanged(activeTab); });
@@ -4610,9 +4628,17 @@ public:
     // Quiet restore from session — no listener fired.
     void setActiveTabQuiet(int tab)
     {
-        activeTab = juce::jlimit(0, 2, tab);
+        activeTab = juce::jlimit(0, 3, tab);
         resized();
         repaint();  // Force full redraw — clears ghost outlines left by hidden tab components
+    }
+
+    // Show or hide the Rec tab. Hiding it while active switches back to Controls.
+    void setRecTabVisible(bool visible)
+    {
+        recTabButton.setVisible(visible);
+        if (!visible && activeTab == 3)
+            setActiveTab(0);
     }
 
     // Restore saved zoom level and scroll position after a sample load.
@@ -4728,6 +4754,10 @@ private:
             if (showEq)  eqDisplay->startAnimation();
             else         eqDisplay->stopAnimation();
         }
+
+        // Rec tab content
+        if (recContent != nullptr)
+            recContent->setVisible(activeTab == 3);
     }
 
     void layoutAdsrTabContent(juce::Rectangle<int>& area)

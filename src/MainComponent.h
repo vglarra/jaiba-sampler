@@ -250,6 +250,9 @@ private:
                          float f3, float g3, float q3) override;
     void eqFilterModesChanged(int mode1, int mode2, int mode3) override;
     void normChanged(bool enabled, float targetDb) override;
+    void beginRecording(double /*bpm*/, int /*quantNoteValue*/, bool /*metronomeOn*/) override {}
+    void endRecording() override {}
+    void playbackQuantisedEvents() override {}
 
     //==============================================================================
     // MIDI Learn handling
