@@ -202,6 +202,10 @@ private:
     //==============================================================================
     // New UI functionality
     void showSettingsMenu();
+    void showKitMenu();
+    void saveKitToFile (const juce::File& file);
+    void loadKitFromFile (const juce::File& file);
+    TrimSettingsSnapshot padSettingsToSnapshot (const PadSettings& ps) const;
     void scanCurrentFolderForAudioFiles();
     void navigateToFile(int index);
     void loadNextSample();
@@ -312,6 +316,7 @@ private:
 
     // UI Components
     juce::TextButton menuButton{ "Menu" };
+    juce::TextButton kitButton { "Kit"  };
     juce::TextButton resetButton{ "Reset" };
     juce::TextButton testToneButton{ "Test tone" };
     juce::Slider masterVolumeKnob;
@@ -323,6 +328,7 @@ private:
     juce::Label midiDeviceInfoLabel;
     juce::Label cpuUsageLabel;
     std::unique_ptr<juce::FileChooser> fileChooser;
+    std::unique_ptr<juce::FileChooser> kitFileChooser;  // kept alive during async kit dialogs
     AudioPreviewComponent* activePreviewComp = nullptr;  // non-owning; JUCE owns via fileChooser
     
     //==============================================================================

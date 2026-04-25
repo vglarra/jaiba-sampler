@@ -150,6 +150,88 @@ struct PadSettings
     }
 
     //==========================================================================
+    // XML serialization — used by .jai kit files.
+    // Each pad is stored as an XmlElement with flat attributes (no "padN_" prefix).
+
+    void saveToXml (juce::XmlElement& el) const
+    {
+        el.setAttribute ("samplePath",  sampleFilePath);
+        el.setAttribute ("pitchCents",  pitchCents);
+        el.setAttribute ("basePitch",   basePitchOffset);
+        el.setAttribute ("tuningHz",    baseTuningHz);
+        el.setAttribute ("pitchStep",   pitchStepCents);
+        el.setAttribute ("noteName",    detectedNoteName);
+        el.setAttribute ("noteHz",      detectedFreqHz);
+        el.setAttribute ("loop",        loopEnabled    ? 1 : 0);
+        el.setAttribute ("oneShot",     oneShotEnabled ? 1 : 0);
+        el.setAttribute ("reverse",     reverseEnabled ? 1 : 0);
+        el.setAttribute ("bounce",      bounceEnabled  ? 1 : 0);
+        el.setAttribute ("vol",         (double)volumeLevel);
+        el.setAttribute ("normEn",      normEnabled  ? 1 : 0);
+        el.setAttribute ("normTarget",  (double)normTargetDb);
+        el.setAttribute ("adsrEn",      adsrEnabled  ? 1 : 0);
+        el.setAttribute ("adsrAtk",     (double)adsrAttackMs);
+        el.setAttribute ("adsrDcy",     (double)adsrDecayMs);
+        el.setAttribute ("adsrSus",     (double)adsrSustain);
+        el.setAttribute ("adsrRel",     (double)adsrReleaseMs);
+        el.setAttribute ("eqEn",        eqEnabled ? 1 : 0);
+        el.setAttribute ("eq1f",        (double)eq1Freq);  el.setAttribute ("eq1g", (double)eq1Gain); el.setAttribute ("eq1q", (double)eq1Q); el.setAttribute ("eq1m", eq1Mode);
+        el.setAttribute ("eq2f",        (double)eq2Freq);  el.setAttribute ("eq2g", (double)eq2Gain); el.setAttribute ("eq2q", (double)eq2Q); el.setAttribute ("eq2m", eq2Mode);
+        el.setAttribute ("eq3f",        (double)eq3Freq);  el.setAttribute ("eq3g", (double)eq3Gain); el.setAttribute ("eq3q", (double)eq3Q); el.setAttribute ("eq3m", eq3Mode);
+        el.setAttribute ("startSec",    startPointSeconds);
+        el.setAttribute ("endSec",      endPointSeconds);
+        el.setAttribute ("transEn",     transientDetectionEnabled ? 1 : 0);
+        el.setAttribute ("transThresh", (double)transientThreshold);
+        el.setAttribute ("gridSnap",    gridSnapEnabled ? 1 : 0);
+        el.setAttribute ("gridResIdx",  gridResolutionIndex);
+        el.setAttribute ("midiNote",    midiNote);
+        el.setAttribute ("midiCh",      midiChannel);
+        el.setAttribute ("midiDev",     midiDevice);
+        el.setAttribute ("zoom",        zoomLevel);
+        el.setAttribute ("zoomScroll",  (double)zoomScrollPosition);
+        el.setAttribute ("tab",         activeTab);
+    }
+
+    void loadFromXml (const juce::XmlElement& el)
+    {
+        sampleFilePath   = el.getStringAttribute ("samplePath",  "");
+        pitchCents       = el.getIntAttribute    ("pitchCents",  0);
+        basePitchOffset  = el.getIntAttribute    ("basePitch",   0);
+        baseTuningHz     = el.getDoubleAttribute ("tuningHz",    440.0);
+        pitchStepCents   = el.getIntAttribute    ("pitchStep",   100);
+        detectedNoteName = el.getStringAttribute ("noteName",    "");
+        detectedFreqHz   = el.getDoubleAttribute ("noteHz",      0.0);
+        loopEnabled      = el.getIntAttribute    ("loop",        0) != 0;
+        oneShotEnabled   = el.getIntAttribute    ("oneShot",     0) != 0;
+        reverseEnabled   = el.getIntAttribute    ("reverse",     0) != 0;
+        bounceEnabled    = el.getIntAttribute    ("bounce",      0) != 0;
+        volumeLevel      = (float)el.getDoubleAttribute ("vol",        1.0);
+        normEnabled      = el.getIntAttribute    ("normEn",      0) != 0;
+        normTargetDb     = (float)el.getDoubleAttribute ("normTarget", -6.0);
+        adsrEnabled      = el.getIntAttribute    ("adsrEn",      0) != 0;
+        adsrAttackMs     = (float)el.getDoubleAttribute ("adsrAtk",    0.0);
+        adsrDecayMs      = (float)el.getDoubleAttribute ("adsrDcy",    0.0);
+        adsrSustain      = (float)el.getDoubleAttribute ("adsrSus",    1.0);
+        adsrReleaseMs    = (float)el.getDoubleAttribute ("adsrRel",    0.0);
+        eqEnabled        = el.getIntAttribute    ("eqEn",        0) != 0;
+        eq1Freq  = (float)el.getDoubleAttribute ("eq1f", 100.0);  eq1Gain = (float)el.getDoubleAttribute ("eq1g", 0.0); eq1Q = (float)el.getDoubleAttribute ("eq1q", 1.0); eq1Mode = el.getIntAttribute ("eq1m", 2);
+        eq2Freq  = (float)el.getDoubleAttribute ("eq2f", 500.0);  eq2Gain = (float)el.getDoubleAttribute ("eq2g", 0.0); eq2Q = (float)el.getDoubleAttribute ("eq2q", 1.0); eq2Mode = el.getIntAttribute ("eq2m", 2);
+        eq3Freq  = (float)el.getDoubleAttribute ("eq3f", 8000.0); eq3Gain = (float)el.getDoubleAttribute ("eq3g", 0.0); eq3Q = (float)el.getDoubleAttribute ("eq3q", 1.0); eq3Mode = el.getIntAttribute ("eq3m", 2);
+        startPointSeconds = el.getDoubleAttribute ("startSec",   0.0);
+        endPointSeconds   = el.getDoubleAttribute ("endSec",    -1.0);
+        transientDetectionEnabled = el.getIntAttribute    ("transEn",      1) != 0;
+        transientThreshold        = (float)el.getDoubleAttribute ("transThresh", 4.0);
+        gridSnapEnabled     = el.getIntAttribute ("gridSnap",   0) != 0;
+        gridResolutionIndex = el.getIntAttribute ("gridResIdx", 5);
+        midiNote    = el.getIntAttribute    ("midiNote", 60);
+        midiChannel = el.getIntAttribute    ("midiCh",   1);
+        midiDevice  = el.getStringAttribute ("midiDev",  "");
+        zoomLevel          =        el.getDoubleAttribute ("zoom",       1.0);
+        zoomScrollPosition = (float)el.getDoubleAttribute ("zoomScroll", 0.0);
+        activeTab = el.getIntAttribute ("tab", 0);
+    }
+
+    //==========================================================================
     // Persistence — pad-indexed property keys ("pad0_xxx", "pad1_xxx", …)
 
     void saveToProperties(juce::PropertiesFile* props) const

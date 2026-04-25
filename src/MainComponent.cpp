@@ -154,6 +154,12 @@ MainComponent::MainComponent()
     addAndMakeVisible(menuButton);
     menuButton.addListener(this);
 
+    // Kit button — save / load bank kits (.jai files)
+    kitButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF2A4A6A));
+    kitButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+    addAndMakeVisible(kitButton);
+    kitButton.onClick = [this] { showKitMenu(); };
+
     // Reset / Panic button — dark red, signals STOP/DANGER
     resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF8B0000));
     resetButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
@@ -498,6 +504,7 @@ void MainComponent::paint(juce::Graphics& g)
     // Draw dark outline around top-level buttons
     g.setColour(juce::Colour(0xFF0A0A0A));
     g.drawRect(menuButton.getBounds(), 1);
+    g.drawRect(kitButton.getBounds(), 1);
     g.drawRect(resetButton.getBounds(), 1);
     g.drawRect(baseTuningLabel.getBounds(), 1);
     g.drawRect(testToneButton.getBounds(), 1);
@@ -533,6 +540,8 @@ void MainComponent::resized()
         auto topBar = strip.removeFromTop (kTopBarH).reduced (kHMargin, 0);
 
         menuButton.setBounds (topBar.removeFromLeft (60).withSizeKeepingCentre (56, 30));
+        topBar.removeFromLeft (4);
+        kitButton.setBounds  (topBar.removeFromLeft (48).withSizeKeepingCentre (44, 30));
 
         // Right side: Reset+Hz+MasterVol+knob+val%+MIDI+TestTone = 358 px
         constexpr int kRightW = 52+6+70+6+62+4+28+4+32+4+22+6+62; // 358
@@ -1455,6 +1464,196 @@ void MainComponent::updateSamplerSounds()
 
     }
 
+}
+
+//==============================================================================
+// Kit save / load (.jai bank kit files)
+
+void MainComponent::showKitMenu()
+{
+    juce::PopupMenu menu;
+
+    menu.addSectionHeader ("Bank Kit");
+    menu.addItem (1, "Save Bank Kit...");
+    menu.addItem (2, "Load Bank Kit...");
+    menu.addSeparator();
+    menu.addItem (3, "Save Global Map  (coming soon)", false);
+    menu.addItem (4, "Load Global Map  (coming soon)", false);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&kitButton),
+        [this] (int result)
+        {
+            if (result == 1)
+            {
+                // --- Save Bank Kit ---
+                // Capture current pad before opening dialog.
+                captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+                kitFileChooser = std::make_unique<juce::FileChooser> (
+                    "Save Bank Kit",
+                    juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                    "*.jai");
+
+                kitFileChooser->launchAsync (
+                    juce::FileBrowserComponent::saveMode |
+                    juce::FileBrowserComponent::canSelectFiles,
+                    [this] (const juce::FileChooser& fc)
+                    {
+                        auto chosen = fc.getResult();
+                        if (chosen == juce::File{}) return;  // user cancelled
+
+                        // Ensure .jai extension
+                        if (chosen.getFileExtension().toLowerCase() != ".jai")
+                            chosen = chosen.withFileExtension ("jai");
+
+                        saveKitToFile (chosen);
+                    });
+            }
+            else if (result == 2)
+            {
+                // --- Load Bank Kit ---
+                kitFileChooser = std::make_unique<juce::FileChooser> (
+                    "Load Bank Kit",
+                    juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                    "*.jai");
+
+                kitFileChooser->launchAsync (
+                    juce::FileBrowserComponent::openMode |
+                    juce::FileBrowserComponent::canSelectFiles,
+                    [this] (const juce::FileChooser& fc)
+                    {
+                        auto chosen = fc.getResult();
+                        if (chosen == juce::File{} || !chosen.existsAsFile()) return;
+                        loadKitFromFile (chosen);
+                    });
+            }
+        });
+}
+
+void MainComponent::saveKitToFile (const juce::File& file)
+{
+    auto root = std::make_unique<juce::XmlElement> ("JaivaKit");
+    root->setAttribute ("version",     1);
+    root->setAttribute ("appVersion",  "1.0.0");
+    root->setAttribute ("savedDate",   juce::Time::getCurrentTime().toString (true, true));
+
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        auto* padEl = root->createNewChildElement ("Pad");
+        padEl->setAttribute ("index", i);
+        padManager.padSettings[i].saveToXml (*padEl);
+    }
+
+    if (root->writeTo (file))
+        sampleCard.showTrimToast ("Kit saved: " + file.getFileName(), false);
+    else
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::MessageBoxIconType::WarningIcon,
+            "Save Failed",
+            "Could not write to:\n" + file.getFullPathName(),
+            "OK", nullptr);
+}
+
+void MainComponent::loadKitFromFile (const juce::File& file)
+{
+    auto xml = juce::XmlDocument::parse (file);
+    if (xml == nullptr || xml->getTagName() != "JaivaKit")
+    {
+        juce::AlertWindow::showMessageBoxAsync (
+            juce::MessageBoxIconType::WarningIcon,
+            "Load Failed",
+            "Not a valid .jai kit file:\n" + file.getFullPathName(),
+            "OK", nullptr);
+        return;
+    }
+
+    // Parse all pad settings from XML
+    for (auto* padEl : xml->getChildIterator())
+    {
+        if (padEl->getTagName() != "Pad") continue;
+        const int idx = padEl->getIntAttribute ("index", -1);
+        if (idx < 0 || idx >= PadManager::kMaxPads) continue;
+        padManager.padSettings[idx].padIndex = idx;
+        padManager.padSettings[idx].loadFromXml (*padEl);
+    }
+
+    // Update grid name labels for all pads
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        const auto& ps = padManager.padSettings[i];
+        padGrid.setPadSampleName (i, ps.sampleFilePath.isEmpty()
+                                       ? juce::String{}
+                                       : juce::File (ps.sampleFilePath).getFileName());
+    }
+
+    // Load the currently selected pad into the UI (with all settings restored)
+    const int curPad = padManager.selectedPadIndex;
+    const auto& curPs = padManager.padSettings[curPad];
+    if (!curPs.sampleFilePath.isEmpty())
+    {
+        juce::File f (curPs.sampleFilePath);
+        if (f.existsAsFile())
+        {
+            sampleCard.restoreZoomAndScroll (1.0, 0.0f);
+            loadSampleFileAsync (f, true, true, false, padSettingsToSnapshot (curPs));
+        }
+        else
+        {
+            sampleCard.setEmptyState (true);
+        }
+    }
+    else
+    {
+        sampleCard.setEmptyState (true);
+    }
+
+    // Preload audio for all other pads in the background
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        if (i == curPad) continue;
+        const auto& ps = padManager.padSettings[i];
+        if (!ps.sampleFilePath.isEmpty())
+        {
+            juce::File f (ps.sampleFilePath);
+            if (f.existsAsFile())
+                preloadPadEngineAsync (i, f, ps);
+        }
+    }
+
+    sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
+}
+
+MainComponent::TrimSettingsSnapshot MainComponent::padSettingsToSnapshot (const PadSettings& ps) const
+{
+    TrimSettingsSnapshot snap;
+    snap.valid                    = true;
+    snap.pitchCents               = ps.pitchCents;
+    snap.basePitchOffset          = ps.basePitchOffset;
+    snap.baseTuningHz             = ps.baseTuningHz;
+    snap.pitchStepCents           = ps.pitchStepCents;
+    snap.detectedNoteName         = ps.detectedNoteName;
+    snap.detectedFreqHz           = ps.detectedFreqHz;
+    snap.loopEnabled              = ps.loopEnabled;
+    snap.oneShotEnabled           = ps.oneShotEnabled;
+    snap.reverseEnabled           = ps.reverseEnabled;
+    snap.bounceEnabled            = ps.bounceEnabled;
+    snap.volumeLevel              = ps.volumeLevel;
+    snap.normEnabled              = ps.normEnabled;
+    snap.normTargetDb             = ps.normTargetDb;
+    snap.adsrEnabled              = ps.adsrEnabled;
+    snap.adsrAttackMs             = ps.adsrAttackMs;
+    snap.adsrDecayMs              = ps.adsrDecayMs;
+    snap.adsrSustain              = ps.adsrSustain;
+    snap.adsrReleaseMs            = ps.adsrReleaseMs;
+    snap.eqEnabled                = ps.eqEnabled;
+    snap.eq1Freq  = ps.eq1Freq;  snap.eq1Gain = ps.eq1Gain; snap.eq1Q = ps.eq1Q; snap.eq1Mode = ps.eq1Mode;
+    snap.eq2Freq  = ps.eq2Freq;  snap.eq2Gain = ps.eq2Gain; snap.eq2Q = ps.eq2Q; snap.eq2Mode = ps.eq2Mode;
+    snap.eq3Freq  = ps.eq3Freq;  snap.eq3Gain = ps.eq3Gain; snap.eq3Q = ps.eq3Q; snap.eq3Mode = ps.eq3Mode;
+    snap.transientDetectionEnabled = ps.transientDetectionEnabled;
+    snap.transientThreshold        = ps.transientThreshold;
+    snap.gridSnapEnabled           = ps.gridSnapEnabled;
+    snap.gridResolutionIndex       = ps.gridResolutionIndex;
+    return snap;
 }
 
 //==============================================================================
