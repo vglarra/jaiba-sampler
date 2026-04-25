@@ -98,8 +98,8 @@ public:
 
     void mouseUp (const juce::MouseEvent& e) override
     {
-        // Restore fuchsia after button release, with 80ms minimum visibility.
-        triggerEnd (80);
+        // Restore immediately on mouse release — fuchsia lasts exactly the click duration.
+        triggerEnd (0);
         if (cachedPath.contains (e.position) && onReleased)
             onReleased (padIndex);
     }
@@ -428,6 +428,20 @@ public:
         if (onPadSelected) onPadSelected (idx);
     }
 
+    // Start fuchsia with no auto-timer — must be paired with triggerEnd().
+    // Used for mouse-down and MIDI note-on.
+    void triggerStart (int idx)
+    {
+        if (auto* p = padAt (idx)) p->triggerStart();
+    }
+
+    // Restore from fuchsia. minHoldMs=0 restores immediately (mouse/MIDI use case).
+    void triggerEnd (int idx, int minHoldMs = 0)
+    {
+        if (auto* p = padAt (idx)) p->triggerEnd (minHoldMs);
+    }
+
+    // Legacy: fixed 150ms flash for code paths with no paired end event.
     void triggerFlash (int idx)
     {
         if (auto* p = padAt (idx)) p->triggerFlash();
@@ -460,8 +474,8 @@ private:
         if (selectedIndex != idx)
             selectPad (idx);
 
-        // Always flash regardless of prior selection state
-        triggerFlash (idx);
+        // Light up fuchsia on press — triggerEnd() fires on mouseUp.
+        triggerStart (idx);
 
         if (onPadTriggered) onPadTriggered (idx);
     }

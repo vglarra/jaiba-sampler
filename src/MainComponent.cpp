@@ -1060,16 +1060,20 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
     // This is the ONLY operation that affects audio latency in this path.
     midiCollector.addMessageToQueue(message);
 
-    // Flash the pad mapped to this MIDI note in the grid.
-    // ONLY triggerFlash() is called — never selectPad() or onPadSelected.
-    // TrianglePadGrid::triggerFlash() is a visual-only operation.
-    if (message.isNoteOn())
+    // Light up the pad for the duration of the MIDI note.
+    // triggerStart on noteOn, triggerEnd on noteOff — no timer involved.
     {
         const int flashPad = padManager.findPadForMidiNote(
             message.getNoteNumber(), message.getChannel());
         if (flashPad >= 0)
-            juce::MessageManager::callAsync([this, flashPad]()
-                { padGrid.triggerFlash(flashPad); }); // flash ONLY — no selectPad
+        {
+            if (message.isNoteOn())
+                juce::MessageManager::callAsync([this, flashPad]()
+                    { padGrid.triggerStart(flashPad); });
+            else if (message.isNoteOff())
+                juce::MessageManager::callAsync([this, flashPad]()
+                    { padGrid.triggerEnd(flashPad); });
+        }
     }
 
     // One-shot tail detection: note-off ignored by audio engine while 1Shot is ON.
