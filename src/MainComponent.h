@@ -251,23 +251,9 @@ private:
     void eqFilterModesChanged(int mode1, int mode2, int mode3) override;
     void normChanged(bool enabled, float targetDb) override;
     void beginRecording(double bpm, double quantInBeats,
-                        bool metronomeOn, int targetPadIndex) override
-    {
-        DBG("[REC] beginRecording bpm=" + juce::String(bpm, 1)
-            + " quant=" + juce::String(quantInBeats, 4)
-            + " metro=" + juce::String((int)metronomeOn)
-            + " target=" + juce::String(targetPadIndex));
-        sampleCard.setRecordingActive(true, targetPadIndex);
-    }
-    void endRecording() override
-    {
-        DBG("[REC] endRecording");
-        sampleCard.setRecordingActive(false);
-    }
-    void playbackQuantisedEvents() override
-    {
-        DBG("[REC] playbackQuantisedEvents");
-    }
+                        bool metronomeOn, int targetPadIndex) override;
+    void endRecording() override;
+    void playbackQuantisedEvents() override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -608,6 +594,49 @@ private:
     void saveCurrentSession();
     bool isValidMidiDevice(const juce::String& deviceName);
     void midiDeviceChanged(const juce::String& newDevice);
+
+    //==============================================================================
+    // Recording engine
+
+    struct RecordedEvent { int padIndex = 0; double beatTime = 0.0; };
+
+    // Cross-thread atomics
+    std::atomic<bool>   recIsActive    { false };   // msg → audio
+    std::atomic<bool>   recMetronomeOn { false };   // msg → audio
+    std::atomic<double> recSongBeatPos { 0.0   };   // audio → msg (beat timestamps)
+    std::atomic<double> recBpmAtomic   { 120.0 };   // msg → audio (for beat advance)
+
+    // Message-thread-only parameters (written before recIsActive becomes true)
+    int    recTargetPad    = 15;
+    double recQuantInBeats = 0.0625;
+
+    // Audio-thread-only metronome state (no sync needed)
+    int    recLastBeat       = -1;
+    int    recMetroBeepLeft  = 0;
+    double recMetroBeepPhase = 0.0;
+
+    // Message-thread-only event storage
+    std::vector<RecordedEvent> recEvents;
+    std::vector<RecordedEvent> recQuantised;
+
+    // Pattern playback (message thread)
+    bool        recPatternPlaying = false;
+    juce::int64 recPatternStartMs = 0;
+    int         recPatternIdx     = 0;
+
+    class PatternPlayTimer : public juce::Timer
+    {
+    public:
+        PatternPlayTimer(MainComponent& o) : owner(o) {}
+        void timerCallback() override { owner.tickPatternPlayback(); }
+    private:
+        MainComponent& owner;
+    };
+    PatternPlayTimer patternPlayTimer { *this };
+
+    void quantiseRecordedEvents();
+    void renderRecordingToTargetPad();
+    void tickPatternPlayback();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
