@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -598,9 +598,6 @@ private:
                 wait(100);
                 if (!threadShouldExit())
                 {
-                    printf("[HEARTBEAT] %lld\n",
-                           (long long)juce::Time::getMillisecondCounter());
-                    fflush(stdout);
                 }
             }
         }
@@ -655,11 +652,9 @@ private:
                 if (midiInput != nullptr)
                 {
                     midiInput->start();
-                    printf("MIDI input started: %s\n", deviceName.toRawUTF8());
                 }
                 else
                 {
-                    printf("ERROR: Failed to open MIDI device: %s\n", deviceName.toRawUTF8());
                 }
                 break;
             }

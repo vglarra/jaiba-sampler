@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -1417,8 +1417,6 @@ public:
         eqResetButton.onClick = [this]
         {
             const juce::int64 t0 = juce::Time::getMillisecondCounter();
-            printf("[RESET-TIMING] Reset button clicked\n");
-            fflush(stdout);
 
             // FIX 5: Visual update is instant — update bands/modes before any audio work.
             eqBands[0] = { 100.0f,  0.0f, 1.0f };
@@ -1436,21 +1434,17 @@ public:
             filterModeButton.setButtonText("Bell");
 
             const juce::int64 tVis = juce::Time::getMillisecondCounter();
-            printf("[RESET-TIMING] visual update: %lldms\n", (long long)(tVis - t0));
 
             // Update mode tracking in MainComponent (deferred save via filterModeSaveTimer — no disk I/O).
             listeners.call([](Listener& l) { l.eqFilterModesChanged(2, 2, 2); });
 
             const juce::int64 tModes = juce::Time::getMillisecondCounter();
-            printf("[RESET-TIMING] eqFilterModesChanged fired: %lldms\n", (long long)(tModes - t0));
 
             // FIX 1+2: Write pre-computed default coefficients directly — no calculation, no sync save.
             // MainComponent::onEqReset does: eqCoeffDB.writeFromUI(defaultFlatCoeffs) + defer save.
             if (onEqReset) onEqReset();
 
             const juce::int64 tDone = juce::Time::getMillisecondCounter();
-            printf("[RESET-TIMING] total reset handler time: %lldms\n", (long long)(tDone - t0));
-            fflush(stdout);
 
             // Brief white flash to confirm reset was applied.
             eqResetButton.setColour(juce::TextButton::buttonColourId,  juce::Colours::white);
@@ -1587,8 +1581,6 @@ public:
     {
         if (transientDetectionEnabled && currentAudioFile.existsAsFile())
         {
-            printf("[NAV-TRANSIENT] Deferred transient detection starting: %s\n",
-                   currentAudioFile.getFileName().toRawUTF8());
             detectTransients(currentAudioFile);
         }
     }
@@ -1738,12 +1730,6 @@ public:
         {
             diagPrinted = true;
             const int wvH = juce::jmax(80, getHeight() - 200) + SCROLLBAR_HEIGHT;
-            printf("[LAYOUT] SamplerPad total height:  %dpx\n", getHeight());
-            printf("[LAYOUT] Waveform area:            %dpx  (y=%d)\n", wvH, 10 + 24 + 5);
-            printf("[LAYOUT] Tab bar area:             24px  (y=%d)\n", 10 + 24 + 5 + wvH + 5);
-            printf("[LAYOUT] Tab content area:         %dpx  (y=%d)\n", tabContentArea.getHeight(), tabContentArea.getY());
-            printf("[LAYOUT] Footer area:              %dpx  (y=%d)\n", kFooterH, footerY);
-            printf("[LAYOUT] EQ display height:        %dpx\n", tabContentArea.getHeight());
         }
 
         // ===== TAB CONTENT (routed by active tab; all use tabContentArea) =====
@@ -2207,8 +2193,6 @@ public:
         {
             pitchOffset = cents;
             updatePitchDisplay(pitchOffset);
-
-            printf("Pitch offset set to: %+d cents\n", pitchOffset);
         }
     }
 
@@ -2226,10 +2210,6 @@ public:
             if (notify)
                 listeners.call([this](Listener& l) { l.midiNoteChanged(currentMidiNote); });
 
-            printf("MIDI note set to: %d (%s)%s\n",
-                   currentMidiNote,
-                   juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true).toRawUTF8(),
-                   notify ? "" : " [silent]");
         }
     }
 
@@ -2243,9 +2223,6 @@ public:
             if (notify)
                 listeners.call([this](Listener& l) { l.midiChannelChanged(currentMidiChannel); });
 
-            printf("MIDI channel set to: %s%s\n",
-                   currentMidiChannel == 0 ? "All Channels" : juce::String(currentMidiChannel).toRawUTF8(),
-                   notify ? "" : " [silent]");
         }
     }
     
@@ -2283,8 +2260,7 @@ public:
         setBasePitchOffset (s.basePitchOffset);
         setBaseTuningHz    (s.baseTuningHz);
         setPitchStepCents  (s.pitchStepCents);
-        if (s.detectedNoteName.isNotEmpty())
-            setDetectedNoteName(s.detectedNoteName, s.detectedFreqHz);
+        setDetectedNoteName(s.detectedNoteName, s.detectedFreqHz);
 
         // MIDI routing — silent: engine already has the correct MIDI note from preloading.
         // Firing the listener would call updateSamplerSounds() + allNotesOff() unnecessarily.
@@ -2400,8 +2376,6 @@ public:
         {
             double adjustedDuration = originalDuration / pitchFactor;
             durationLabel.setText(juce::String(adjustedDuration, 2) + " s", juce::dontSendNotification);
-            printf("Pitch: %+d cents, Factor: %.3f, Original: %.2f, Adjusted: %.2f\n",
-                cents, pitchFactor, originalDuration, adjustedDuration);
         }
 
         // Top info label
@@ -2482,7 +2456,6 @@ public:
         // firing here, which would clobber the PropertiesFile in-memory store with defaults
         // before getSampleState() reads the previously saved values.
         setAdsrParams(false, 0.0f, 0.0f, 1.0f, 0.0f, /*notifyListeners=*/false);
-        printf("[ADSR-DBG] setWaveform() silent reset — ADSR defaults applied, no save triggered\n");
         // Reset EQ filter modes silently — same pattern as ADSR; real values restored by load lambda.
         setEqFilterModes(2, 2, 2, /*notifyListeners=*/false);
         // Reset normalize silently — real values restored by load lambda.
@@ -2574,15 +2547,9 @@ public:
                         autoSelectGridResolution(sampleDur);
                 }
 
-                printf("Waveform set for: %s (sample rate: %.1f kHz, length: %lld samples)\n",
-                    audioFile.getFileName().toRawUTF8(),
-                    originalSampleRate / 1000.0,
-                    originalLengthInSamples);
             }
             else
             {
-                printf("ERROR: Could not create reader for file: %s\n",
-                    audioFile.getFileName().toRawUTF8());
                 
                 if (waveformComponent != nullptr)
                     waveformComponent->setFile(juce::File());
@@ -2696,9 +2663,6 @@ public:
                 listeners.call([this](Listener& l) { l.learningModeChanged(false); });
             }
             
-            printf("MIDI note learned: %d (%s)\n", 
-                   currentMidiNote, 
-                   juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true).toRawUTF8());
         }
     }
 
@@ -2855,8 +2819,6 @@ public:
                 // Hide playhead — new sample hasn't started playing yet
                 playheadNormalized = -1.0f;
                 prevPlayheadX      = -1;
-                printf("[LOADING] setLoading(false) called for '%s'\n",
-                       newFile.getFileName().toRawUTF8());
 
                 if (currentAudioFile != newFile)
                 {
@@ -2969,8 +2931,7 @@ public:
                     // so simply divide totalLength by renderWidth to get samples per pixel
                     samplesPerPixel = totalLength / renderWidth;
 
-                    printf("EXPANDED: pitch=%d, expansion=%.2fx, renderWidth=%d, samplesPerPixel=%.4f, totalSamples=%lld\n",
-                        pitchOffset, expansionFactor, renderWidth, samplesPerPixel, peakTotalSamples);
+
                 }
                 else if (pitchOffset > 0) // Pitch UP - COMPRESSED view
                 {
@@ -3454,8 +3415,6 @@ public:
                 peakTotalSamples = numSamples;
                 peakSampleRate   = sampleRate;
                 peaksReady.store(true);
-                printf("[LOAD-TIMING] setAudioPeaks() — %d ch  %lld samples  %.1f Hz  peaks ready\n",
-                       numCh, numSamples, sampleRate);
             }
 
             // Called by SampleCard's updatePlayhead() before setPlayheadPosition().
@@ -3789,9 +3748,6 @@ public:
             // Notify listeners
             listeners.call([this](Listener& l) { l.midiNoteChanged(currentMidiNote); });
             
-            printf("MIDI note changed to: %d (%s)\n", 
-                   currentMidiNote, 
-                   juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true).toRawUTF8());
         }
     }
     
@@ -3824,8 +3780,6 @@ public:
             // Notify listeners
             listeners.call([this](Listener& l) { l.midiChannelChanged(currentMidiChannel); });
             
-            printf("MIDI channel changed to: %s\n", 
-                   currentMidiChannel == 0 ? "All Channels" : juce::String(currentMidiChannel).toRawUTF8());
         }
     }
     
@@ -3974,11 +3928,6 @@ void adjustPitchUp()
         }
 
         const int transientCount = (int)transientPositionsSeconds.size();
-        printf("[TRANSIENT] Startup/load complete — %d transients detected in '%s' (%.2fs, thresh=%.1fx)\n",
-               transientCount,
-               audioFile.getFileName().toRawUTF8(),
-               duration,
-               threshold);
 
         transientCountLabel.setText("T: " + juce::String(transientCount), juce::dontSendNotification);
 
@@ -4017,7 +3966,6 @@ void adjustPitchUp()
             notifyEndPointChanged();
             if (waveformComponent != nullptr)
                 waveformComponent->flashEndMarker();
-            printf("[TRANSIENT] End snap prev → %.3fs\n", best);
         }
         else
         {
@@ -4052,7 +4000,6 @@ void adjustPitchUp()
             notifyEndPointChanged();
             if (waveformComponent != nullptr)
                 waveformComponent->flashEndMarker();
-            printf("[TRANSIENT] End snap next → %.3fs\n", best);
         }
         else
         {
@@ -4084,7 +4031,6 @@ void adjustPitchUp()
             notifyStartPointChanged();
             if (waveformComponent != nullptr)
                 waveformComponent->flashStartMarker();
-            printf("[TRANSIENT] Start snap prev → %.3fs\n", best);
         }
         else
         {
@@ -4120,7 +4066,6 @@ void adjustPitchUp()
             notifyStartPointChanged();
             if (waveformComponent != nullptr)
                 waveformComponent->flashStartMarker();
-            printf("[TRANSIENT] Start snap next → %.3fs\n", best);
         }
         else
         {
@@ -5363,7 +5308,6 @@ private:
             tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
 
             bottomInfoLabel.setText("No pitch detected", juce::dontSendNotification);
-            printf("[TUNE] No pitch detected\n");
 
             listeners.call([this](Listener& l) { l.detectedNoteChanged("", 0.0); });
             return;
@@ -5400,8 +5344,6 @@ private:
         tuneButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A5A1A));
         tuneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF00FF88));
 
-        printf("[TUNE] Detected: %s = %.1f Hz  (MIDI %d) → correction %+d st\n",
-               detectedNoteName.toRawUTF8(), freqHz, nearestMidi, correction);
 
         // Notify listeners for persistence
         listeners.call([this](Listener& l) { l.detectedNoteChanged(detectedNoteName, detectedFreqHz); });
