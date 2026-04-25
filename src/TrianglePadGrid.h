@@ -134,72 +134,185 @@ public:
             g.fillEllipse (cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
         }
 
-                if (currentState != State::Empty && sampleName.isNotEmpty())
-                {
-                    auto dn = sampleName.upToLastOccurrenceOf (".", false, false);
-                    if (dn.isEmpty()) dn = sampleName;
-                    // Increased from 12 to 18 characters before truncation
-                    if (dn.length() > 18) dn = dn.substring (0, 15) + "...";
-                    g.saveState();
-                    g.reduceClipRegion (cachedPath);
-                    g.setColour (juce::Colours::white);
-                    g.setFont (juce::Font (9.0f));
-                    auto b = getLocalBounds().toFloat();
+                // Draw pad number on the narrow base (opposite side from filename)
+                                {
+                                    auto b = getLocalBounds().toFloat();
+                    
+                                    // Fixed proportion from your sketch: narrow / wide = 13.555 / 44.694
+                                    constexpr float narrowToWideRatio = 13.555f / 44.694f;  // ≈ 0.3033
+                                    float narrowW = b.getWidth() * narrowToWideRatio;
+                                    float narrowX = (b.getWidth() - narrowW) * 0.5f;
             
-                    // Calculate the visible left edge of the trapezoid
-                    float visibleLeftEdge = 0.0f;
-                    float visibleRightEdge = b.getWidth();
+                                    // Check if this is an edge pad
+                                    bool isLeftEdge = (padIndex == 0 || padIndex == 8);
+                                    bool isRightEdge = (padIndex == 7 || padIndex == 15);
             
-                    // Fixed proportion from your sketch: narrow / wide = 13.555 / 44.694
-                    constexpr float narrowToWideRatio = 13.555f / 44.694f;  // ≈ 0.3033
-                    float narrowW = b.getWidth() * narrowToWideRatio;
-                    float narrowX = (b.getWidth() - narrowW) * 0.5f;
+                                    g.saveState();
+                                    g.reduceClipRegion (cachedPath);
+                    
+                                    // Draw pad number in yellow on narrow side
+                                    g.setColour (juce::Colour (0xFFFFDD44));
+                                    g.setFont (juce::Font (12.0f, juce::Font::bold));
+                    
+                                                                        // Calculate number position on narrow base
+                                    int numY, numWidth = 30;
+                                                                        // 1-character margin offset (approx 9px for 12pt bold font)
+                                    constexpr int charMargin = 9;
+                                    // Pad groups for margin direction
+                                    // LEFT margin  (shift num LEFT by 9px):  0, 1, 3, 5, 10, 12, 14
+                                    // RIGHT margin (shift num RIGHT by 9px): 2, 4, 6, 9, 11, 13, 15
+                                    bool marginLeft  = (padIndex == 0 || padIndex == 1 || padIndex == 3 || padIndex == 5 ||
+                                                        padIndex == 10 || padIndex == 12 || padIndex == 14);
+                                    bool marginRight = (padIndex == 2 || padIndex == 4 || padIndex == 6 || padIndex == 9 ||
+                                                        padIndex == 11 || padIndex == 13 || padIndex == 15);
+                    
+                                    if (direction == Direction::Down)
+                                    {
+                                        // Top row (Down trapezoids): narrow base at BOTTOM
+                                        numY = (int)(b.getBottom() - 16);
+                        
+                                        if (isLeftEdge)
+                                        {
+                                            // Pad 0: half trapezoid, narrow on right side
+                                            int drawX = (int)(narrowX + narrowW - numWidth/2);
+                                            if (marginRight) drawX += charMargin;
+                                            else if (marginLeft) drawX -= charMargin;
+                                            g.drawText (juce::String (padIndex),
+                                                        drawX,
+                                                        numY, numWidth, 14,
+                                                        juce::Justification::centred, true);
+                                        }
+                                        else if (isRightEdge)
+                                        {
+                                            // Pad 7: half trapezoid, narrow on left side
+                                            int drawX = (int)(narrowX - numWidth/2);
+                                            if (marginRight) drawX += charMargin;
+                                            else if (marginLeft) drawX -= charMargin;
+                                            g.drawText (juce::String (padIndex),
+                                                        drawX,
+                                                        numY, numWidth, 14,
+                                                        juce::Justification::centred, true);
+                                        }
+                                        else
+                                        {
+                                            // Regular trapezoid: narrow side at bottom left
+                                            int drawX = (int)(narrowX - numWidth/2);
+                                            if (marginRight) drawX += charMargin;
+                                            else if (marginLeft) drawX -= charMargin;
+                                            g.drawText (juce::String (padIndex),
+                                                        drawX,
+                                                        numY, numWidth, 14,
+                                                        juce::Justification::centred, true);
+                                        }
+                                    }
+                                    else // Up direction
+                                    {
+                                        // Bottom row (Up trapezoids): narrow base at TOP
+                                        numY = 2;
+                        
+                                        if (isLeftEdge)
+                                        {
+                                            // Pad 8: half trapezoid, narrow on left side
+                                            int drawX = (int)(narrowX - numWidth/2);
+                                            if (marginRight) drawX += charMargin;
+                                            else if (marginLeft) drawX -= charMargin;
+                                            g.drawText (juce::String (padIndex),
+                                                        drawX,
+                                                        numY, numWidth, 14,
+                                                        juce::Justification::centred, true);
+                                        }
+                                        else if (isRightEdge)
+                                        {
+                                            // Pad 15: half trapezoid, narrow on right side
+                                            int drawX = (int)(narrowX + narrowW - numWidth/2);
+                                            if (marginRight) drawX += charMargin;
+                                            else if (marginLeft) drawX -= charMargin;
+                                            g.drawText (juce::String (padIndex),
+                                                        drawX,
+                                                        numY, numWidth, 14,
+                                                        juce::Justification::centred, true);
+                                        }
+                                        else
+                                        {
+                                            // Regular trapezoid: narrow side at top right
+                                            int drawX = (int)(narrowX + narrowW - numWidth/2);
+                                            if (marginRight) drawX += charMargin;
+                                            else if (marginLeft) drawX -= charMargin;
+                                            g.drawText (juce::String (padIndex),
+                                                        drawX,
+                                                        numY, numWidth, 14,
+                                                        juce::Justification::centred, true);
+                                        }
+                                    }
+                                    g.restoreState();
+                                }
+                
+                                if (currentState != State::Empty && sampleName.isNotEmpty())
+                                {
+                                    auto dn = sampleName.upToLastOccurrenceOf (".", false, false);
+                                    if (dn.isEmpty()) dn = sampleName;
+                                    // Increased from 12 to 18 characters before truncation
+                                    if (dn.length() > 18) dn = dn.substring (0, 15) + "...";
+                                    g.saveState();
+                                    g.reduceClipRegion (cachedPath);
+                                    g.setColour (juce::Colours::white);
+                                    g.setFont (juce::Font (9.0f));
+                                    auto b = getLocalBounds().toFloat();
             
-                    // Check if this is an edge pad
-                    bool isLeftEdge = (padIndex == 0 || padIndex == 8);
-                    bool isRightEdge = (padIndex == 7 || padIndex == 15);
+                                    // Calculate the visible left edge of the trapezoid
+                                    float visibleLeftEdge = 0.0f;
+                                    float visibleRightEdge = b.getWidth();
             
-                    if (isLeftEdge)
-                    {
-                        // Left edge pad: visible area starts at 0 (trapezoid starts at component edge)
-                        visibleLeftEdge = 0.0f;
-                        // For left edge pads, the narrow side is at 0, not narrowX
-                    }
-                    else if (isRightEdge)
-                    {
-                        // Right edge pad: visible area ends at narrowX + narrowW
-                        visibleRightEdge = narrowX + narrowW;
-                    }
-                    // For interior pads, visible area is full width (0 to width)
+                                    // Fixed proportion from your sketch: narrow / wide = 13.555 / 44.694
+                                    constexpr float narrowToWideRatio = 13.555f / 44.694f;  // ≈ 0.3033
+                                    float narrowW = b.getWidth() * narrowToWideRatio;
+                                    float narrowX = (b.getWidth() - narrowW) * 0.5f;
             
-                    // Calculate text bounds based on visible area
-                    // Add 2 character margin (18px) to all pads for better visual spacing
-                    // Left edge pads: 56px + 18px = 74px
-                    // Other pads: 4px + 18px = 22px
-                    float marginFromVisibleEdge = isLeftEdge ? 74.0f : 22.0f;
-                    float textX = visibleLeftEdge + marginFromVisibleEdge;
-                    float textWidth = visibleRightEdge - visibleLeftEdge - (marginFromVisibleEdge * 2.0f);
+                                    // Check if this is an edge pad
+                                    bool isLeftEdge = (padIndex == 0 || padIndex == 8);
+                                    bool isRightEdge = (padIndex == 7 || padIndex == 15);
             
-                    // Ensure text width is positive
-                    textWidth = juce::jmax(1.0f, textWidth);
+                                    if (isLeftEdge)
+                                    {
+                                        // Left edge pad: visible area starts at 0 (trapezoid starts at component edge)
+                                        visibleLeftEdge = 0.0f;
+                                        // For left edge pads, the narrow side is at 0, not narrowX
+                                    }
+                                    else if (isRightEdge)
+                                    {
+                                        // Right edge pad: visible area ends at narrowX + narrowW
+                                        visibleRightEdge = narrowX + narrowW;
+                                    }
+                                    // For interior pads, visible area is full width (0 to width)
             
-                    // Position text based on trapezoid direction
-                    if (direction == Direction::Down)
-                    {
-                        // Down-pointing trapezoid: wider base at TOP, text at top
-                        g.drawText (dn, (int)textX, (int)b.getY() + 2,
-                                    (int)textWidth, 14,
-                                    juce::Justification::topLeft, true);
-                    }
-                    else
-                    {
-                        // Up-pointing trapezoid: wider base at BOTTOM, text at bottom
-                        g.drawText (dn, (int)textX, (int)b.getBottom() - 16,
-                                    (int)textWidth, 14,
-                                    juce::Justification::bottomLeft, true);
-                    }
-                    g.restoreState();
-                }
+                                    // Calculate text bounds based on visible area
+                                    // Add 2 character margin (18px) to all pads for better visual spacing
+                                    // Left edge pads: 56px + 18px = 74px
+                                    // Other pads: 4px + 18px = 22px
+                                    float marginFromVisibleEdge = isLeftEdge ? 74.0f : 22.0f;
+                                    float textX = visibleLeftEdge + marginFromVisibleEdge;
+                                    float textWidth = visibleRightEdge - visibleLeftEdge - (marginFromVisibleEdge * 2.0f);
+            
+                                    // Ensure text width is positive
+                                    textWidth = juce::jmax(1.0f, textWidth);
+            
+                                    // Position text based on trapezoid direction
+                                    if (direction == Direction::Down)
+                                    {
+                                        // Down-pointing trapezoid: wider base at TOP, text at top
+                                        g.drawText (dn, (int)textX, (int)b.getY() + 2,
+                                                    (int)textWidth, 14,
+                                                    juce::Justification::topLeft, true);
+                                    }
+                                    else
+                                    {
+                                        // Up-pointing trapezoid: wider base at BOTTOM, text at bottom
+                                        g.drawText (dn, (int)textX, (int)b.getBottom() - 16,
+                                                    (int)textWidth, 14,
+                                                    juce::Justification::bottomLeft, true);
+                                    }
+                                    g.restoreState();
+                                }
     }
 
     bool hitTest (int x, int y) override
