@@ -202,6 +202,13 @@ public:
                 ownBuffer.applyGain(0, numSamples, g);
         }
 
+        // Pad gain knob (EQ tab) — amplification/attenuation applied after volume
+        {
+            float pg = padGain.load();
+            if (pg != 1.0f)
+                ownBuffer.applyGain(0, numSamples, pg);
+        }
+
         // ── Parametric EQ — single-pass cascade, lock-free double-buffer coeffs ──
         if (eqActive.load())
         {
@@ -650,6 +657,7 @@ public:
     // Per-pad volume / normalize (applied in renderNextBlock before master vol)
     std::atomic<float> volumeGain { 1.0f };
     std::atomic<float> normGain   { 1.0f };
+    std::atomic<float> padGain    { 1.0f };  // EQ-tab gain knob (0–2, default 1)
     std::atomic<bool>  loopEnabled { false };
 
     // Playback mode params — stored so updateSamplerSounds() can read them.

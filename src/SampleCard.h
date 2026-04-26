@@ -1466,6 +1466,32 @@ public:
         addAndMakeVisible(eqResetButton);
         eqResetButton.setVisible(false);
 
+        // ===== PAD GAIN KNOB (EQ tab) =====
+        eqGainKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        eqGainKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        eqGainKnob.setRange(0.0, 2.0, 0.01);
+        eqGainKnob.setValue(1.0, juce::dontSendNotification);
+        eqGainKnob.setLookAndFeel(&compactKnobLaf);
+        eqGainKnob.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour(0xFF00C060));
+        eqGainKnob.setColour(juce::Slider::thumbColourId,               juce::Colour(0xFF111111));
+        eqGainKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
+        eqGainKnob.setTooltip("Pad gain — 0.0 = silent, 1.0 = unity (+0 dB), 2.0 = +6 dB");
+        eqGainKnob.onValueChange = [this]
+        {
+            currentEqGain = (float)eqGainKnob.getValue();
+            if (waveformComponent != nullptr) waveformComponent->setDisplayGain(currentEqGain);
+            listeners.call([this](Listener& l) { l.padGainChanged(currentEqGain); });
+        };
+        addAndMakeVisible(eqGainKnob);
+        eqGainKnob.setVisible(false);
+
+        eqGainLabel.setText("Gain", juce::dontSendNotification);
+        eqGainLabel.setFont(juce::Font(11.0f));
+        eqGainLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
+        eqGainLabel.setJustificationType(juce::Justification::centred);
+        addAndMakeVisible(eqGainLabel);
+        eqGainLabel.setVisible(false);
+
         // ===== NORMALIZE CONTROLS =====
         // Three mutually-exclusive target dB buttons (default: -6 active)
         auto setupNormTargetBtn = [](juce::TextButton& btn)
@@ -1527,6 +1553,7 @@ public:
         adsrDcyKnob.setLookAndFeel(nullptr);
         adsrSusKnob.setLookAndFeel(nullptr);
         adsrRelKnob.setLookAndFeel(nullptr);
+        eqGainKnob.setLookAndFeel(nullptr);
     }
 
     void resetViewport()
@@ -2304,6 +2331,7 @@ public:
                      s.eq3Freq, s.eq3Gain, s.eq3Q,
                      /*notifyListeners=*/false);
         setEqFilterModes (s.eq1Mode, s.eq2Mode, s.eq3Mode, /*notifyListeners=*/false);
+        setEqGain (s.padGain, /*notify=*/false);
 
         // Transient detection — runDetection=false prevents blocking disk I/O during pad switch;
         // detection runs later when the waveform is actually displayed for this pad.
@@ -2625,6 +2653,8 @@ public:
         virtual void eqFilterModesChanged(int mode1, int mode2, int mode3) = 0;
         // Called when Norm toggle or target dB changes.
         virtual void normChanged(bool enabled, float targetDb) = 0;
+        // Called when the EQ tab gain knob changes (0.0 = silent, 1.0 = unity, 2.0 = +6dB)
+        virtual void padGainChanged(float gain) = 0;
         // Rec tab — called when the user hits Record, Stop, or Playback in the Rec tab.
         // quantInBeats: 0.25=1/4, 0.125=1/8, 0.0625=1/16, 0.03125=1/32,
         //               1.0/6.0=1/8 triplet, 1.0/12.0=1/16 triplet
@@ -2635,6 +2665,8 @@ public:
         virtual void playbackQuantisedEvents() = 0;
         // Standalone metronome toggle — independent of recording.
         virtual void metronomeStandaloneChanged(bool on, double bpm) = 0;
+        // Metronome volume — 0.0 (silent) to 1.0 (full).
+        virtual void metronomeVolumeChanged(float vol) = 0;
         // Pattern persistence — save/load/clear the current quantised pattern on the target pad.
         virtual void savePattern() = 0;
         virtual void loadPattern() = 0;
@@ -2998,6 +3030,10 @@ public:
                         float leftMin, leftMax, rightMin, rightMax;
                         getPeaksForPixel(x, samplesPerPixel, leftMin, leftMax, rightMin, rightMax);
 
+                        // Apply display gain — peaks > 1.0 will be clamped by jlimit (shows clipping)
+                        leftMax  *= displayGain; leftMin  *= displayGain;
+                        rightMax *= displayGain; rightMin *= displayGain;
+
                         float xPos = waveformBounds.getX() + x;
 
                         // Left channel
@@ -3063,6 +3099,9 @@ public:
 
                         float minVal, maxVal, dummyR1, dummyR2;
                         getPeaksForPixel(x, samplesPerPixel, minVal, maxVal, dummyR1, dummyR2);
+
+                        // Apply display gain
+                        maxVal *= displayGain; minVal *= displayGain;
 
                         float xPos      = waveformBounds.getX() + x;
                         float centerY   = renderTop + renderHeight * 0.5f;
@@ -3448,6 +3487,9 @@ public:
 
             void setScrollOffset(int scrollX) { viewScrollX = scrollX; }
 
+            // Visual gain scaling — multiplies peak values before Y mapping so clipping shows as flat lines.
+            void setDisplayGain(float gain) { displayGain = gain; repaint(); }
+
             // Set pre-computed peak data (computed on background thread before callAsync).
             // After this call paint() has everything it needs — zero disk I/O on message thread.
             void setAudioPeaks(std::unique_ptr<WaveformPeakBin[]> peaks,
@@ -3729,6 +3771,7 @@ public:
 
             double zoomLevel   = 1.0;  // Current zoom level for indicator display
             int    viewScrollX = 0;    // Viewport scroll offset — updated via setScrollOffset()
+            float  displayGain = 1.0f; // Visual gain scaling (set by EQ tab gain knob)
 
             // Playhead — written from SampleCard's 60fps timer, read only in paint()
             float playheadNormalized  = -1.0f;  // -1 = hidden
@@ -4444,6 +4487,22 @@ void adjustPitchUp()
             };
             addAndMakeVisible(metronomeButton);
 
+            // ----- Metronome volume -----
+            metronomeVolumeSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+            metronomeVolumeSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+            metronomeVolumeSlider.setRange(0.0, 1.0, 0.01);
+            metronomeVolumeSlider.setValue(0.5, juce::dontSendNotification);
+            metronomeVolumeSlider.setColour(juce::Slider::backgroundColourId, juce::Colour(0xFF3A3A3A));
+            metronomeVolumeSlider.setColour(juce::Slider::trackColourId,      juce::Colour(0xFF00CF7F));
+            metronomeVolumeSlider.setColour(juce::Slider::thumbColourId,      juce::Colour(0xFFCECECE));
+            metronomeVolumeSlider.setTooltip("Metronome volume");
+            metronomeVolumeSlider.onValueChange = [this]
+            {
+                const float vol = (float)metronomeVolumeSlider.getValue();
+                owner.listeners.call([vol](Listener& l) { l.metronomeVolumeChanged(vol); });
+            };
+            addAndMakeVisible(metronomeVolumeSlider);
+
             // ----- Drop Pad -----
             dropPadButton.setButtonText("Drop Pad");
             dropPadButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A2A1A));
@@ -4491,8 +4550,14 @@ void adjustPitchUp()
             {
                 stopButton.setEnabled(false);
                 recordButton.setEnabled(true);
+                // Also turn off the metronome.
+                metronomeButton.setToggleState(false, juce::dontSendNotification);
+                owner.listeners.call([](Listener& l)
+                {
+                    l.endRecording();
+                    l.metronomeStandaloneChanged(false, 120.0);
+                });
                 setStatus("Stopped");
-                owner.listeners.call([](Listener& l) { l.endRecording(); });
             };
             addAndMakeVisible(stopButton);
 
@@ -4585,9 +4650,11 @@ void adjustPitchUp()
 
             quantLabel.setBounds(row2.removeFromLeft(42));
             quantCombo.setBounds(row2.removeFromLeft(110).withSizeKeepingCentre(108, kRowH));
-            row2.removeFromLeft(8);
-            metronomeButton.setBounds(row2.removeFromLeft(62).withSizeKeepingCentre(60, kRowH));
-            row2.removeFromLeft(8);
+            row2.removeFromLeft(6);
+            metronomeButton.setBounds(row2.removeFromLeft(54).withSizeKeepingCentre(52, kRowH));
+            row2.removeFromLeft(4);
+            metronomeVolumeSlider.setBounds(row2.removeFromLeft(64).withSizeKeepingCentre(62, kRowH));
+            row2.removeFromLeft(6);
             dropPadButton.setBounds(row2.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
 
             // ---- Row 3: Overdub | Record | Stop | Play | Save | Load | Clear | Status ----
@@ -4621,6 +4688,7 @@ void adjustPitchUp()
         juce::Label      quantLabel;
         juce::ComboBox   quantCombo;
         juce::TextButton metronomeButton;
+        juce::Slider     metronomeVolumeSlider;
         juce::TextButton dropPadButton;
         juce::TextButton overdubButton;
         juce::TextButton recordButton;
@@ -4832,6 +4900,11 @@ void adjustPitchUp()
     juce::TextButton          eqResetButton   { "Reset" };
     int                       eqFilterModes[3] = { 2, 2, 2 };  // per-band mode, saved per-sample
     std::unique_ptr<EQDisplay> eqDisplay;
+
+    // ===== PAD GAIN KNOB (EQ tab) =====
+    float        currentEqGain = 1.0f;
+    juce::Slider eqGainKnob;
+    juce::Label  eqGainLabel;
 
     // ===== NORMALIZE CONTROLS =====
     bool  normEnabled       = false;
@@ -5182,6 +5255,8 @@ private:
         eqEnableButton.setVisible(showEq);    // only visible on the EQ tab
         filterModeButton.setVisible(showEq);  // same rule as EQ enable button
         eqResetButton.setVisible(showEq);     // same rule
+        eqGainKnob.setVisible(showEq);
+        eqGainLabel.setVisible(showEq);
         normTargetMinus12Button.setVisible(showEq);
         normTargetMinus6Button.setVisible(showEq);
         normTargetZeroButton.setVisible(showEq);
@@ -5223,8 +5298,15 @@ private:
 
     void layoutEqTabContent(juce::Rectangle<int>& area)
     {
-        // EQ toggle button now lives in the tab bar row — no row needed here.
-        // EQDisplay fills the full available content area.
+        // Left column: 44px for the pad gain knob + label below it.
+        auto gainCol = area.removeFromLeft(44);
+        area.removeFromLeft(2);  // 2px gap before EQDisplay
+
+        const int labelH = 14;
+        eqGainLabel.setBounds(gainCol.removeFromBottom(labelH).reduced(1, 0));
+        eqGainKnob.setBounds(gainCol.reduced(4));
+
+        // EQDisplay fills the remaining area.
         if (eqDisplay != nullptr)
             eqDisplay->setBounds(area.reduced(2, 0));
         else
@@ -5332,6 +5414,17 @@ public:
     }
 
     // ===== EQ public API =====
+    float getEqGain() const { return currentEqGain; }
+
+    void setEqGain(float gain, bool notify = true)
+    {
+        currentEqGain = juce::jlimit(0.0f, 2.0f, gain);
+        eqGainKnob.setValue((double)currentEqGain, juce::dontSendNotification);
+        if (waveformComponent != nullptr) waveformComponent->setDisplayGain(currentEqGain);
+        if (notify)
+            listeners.call([this](Listener& l) { l.padGainChanged(currentEqGain); });
+    }
+
     bool  isEqEnabled()           const { return eqEnabled; }
     // Returns true while the user is actively dragging a control point in the EQ display.
     // Used by MainComponent::eqParamsChanged() to skip resetEqState() and defer disk saves.

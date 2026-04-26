@@ -100,12 +100,13 @@ MainComponent::MainComponent()
         // ── Step 3b: Push EQ state to the new engine's audio pipeline ─────────────
         // updateUIFromSettings uses notifyListeners=false for EQ — the UI is updated
         // but eqParamsChanged listener is NOT fired, so the engine's eqCoeffDB is stale.
-        // We must push the coefficients and filter modes manually here.
+        // We must push the coefficients, filter modes, and pad gain manually here.
         {
             engine.eqActive.store(settings.eqEnabled);
             engine.eqFilterModes[0] = settings.eq1Mode;
             engine.eqFilterModes[1] = settings.eq2Mode;
             engine.eqFilterModes[2] = settings.eq3Mode;
+            engine.padGain.store(juce::jlimit(0.0f, 2.0f, settings.padGain));
 
             const double sr = engine.getSampleRate() > 0.0 ? engine.getSampleRate() : 44100.0;
             PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
@@ -550,7 +551,8 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
             {
                 const double phaseInc = juce::MathConstants<double>::twoPi * 1000.0 / sr;
                 const int n  = juce::jmin (recMetroBeepLeft, bufferToFill.numSamples);
-                const float mv = padManager.getMasterVolume();
+                const float mv  = padManager.getMasterVolume();
+                const float vol = metronomeVolume.load (std::memory_order_relaxed);
 
                 for (int ch = 0; ch < bufferToFill.buffer->getNumChannels(); ++ch)
                 {
@@ -560,7 +562,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                         const float t   = (float)(i + 0.5f) / (float)n;
                         const float env = std::sin (t * juce::MathConstants<float>::pi);
                         data[i] += (float)(std::sin (recMetroBeepPhase + (double)i * phaseInc)
-                                           * 0.25 * env * mv);
+                                           * vol * env * mv);
                     }
                 }
                 recMetroBeepPhase += phaseInc * n;
@@ -1882,6 +1884,7 @@ MainComponent::TrimSettingsSnapshot MainComponent::padSettingsToSnapshot (const 
     snap.eq1Freq  = ps.eq1Freq;  snap.eq1Gain = ps.eq1Gain; snap.eq1Q = ps.eq1Q; snap.eq1Mode = ps.eq1Mode;
     snap.eq2Freq  = ps.eq2Freq;  snap.eq2Gain = ps.eq2Gain; snap.eq2Q = ps.eq2Q; snap.eq2Mode = ps.eq2Mode;
     snap.eq3Freq  = ps.eq3Freq;  snap.eq3Gain = ps.eq3Gain; snap.eq3Q = ps.eq3Q; snap.eq3Mode = ps.eq3Mode;
+    snap.padGain                   = ps.padGain;
     snap.transientDetectionEnabled = ps.transientDetectionEnabled;
     snap.transientThreshold        = ps.transientThreshold;
     snap.gridSnapEnabled           = ps.gridSnapEnabled;
@@ -2245,6 +2248,12 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             }
         };
 
+        auto applyPadGain = [&](float gain)
+        {
+            sampleCard.setEqGain(gain, /*notify=*/false);
+            pad().padGain.store(juce::jlimit(0.0f, 2.0f, gain));
+        };
+
         if (trimSnapshot.valid)
         {
             // ── TRIM LOAD / KIT LOAD: restore all settings from snapshot ──────────
@@ -2293,6 +2302,9 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             // Normalize (recomputed on trimmed audio — peak may differ from original)
             applyNormState(trimSnapshot.normEnabled, trimSnapshot.normTargetDb);
 
+            // Pad gain
+            applyPadGain(trimSnapshot.padGain);
+
         }
         else if (configManager != nullptr)
         {
@@ -2314,6 +2326,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                              state.eq2Freq, state.eq2Gain, state.eq2Q, state.eq2Mode,
                              state.eq3Freq, state.eq3Gain, state.eq3Q, state.eq3Mode);
                 applyNormState(state.normEnabled, state.normTargetDb);
+                applyPadGain(1.0f);  // ConfigurationManager SampleState has no padGain — default to unity
             }
             else
             {
@@ -2323,6 +2336,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
                 sampleCard.setBasePitchOffset(0);
                 applyEqState(false, 100.0f,0.0f,1.0f,2, 500.0f,0.0f,1.0f,2, 8000.0f,0.0f,1.0f,2);
                 applyNormState(false, -6.0f);
+                applyPadGain(1.0f);
             }
         }
 
@@ -2866,6 +2880,13 @@ void MainComponent::normChanged(bool enabled, float targetDb)
     }
 }
 
+void MainComponent::padGainChanged(float gain)
+{
+    const float g = juce::jlimit(0.0f, 2.0f, gain);
+    pad().padGain.store(g);
+    captureSampleCardToPadSettings(padManager.selectedPadIndex);
+}
+
 void MainComponent::oneShotEnabledChanged(bool enabled)
 {
     // Propagate to all live sounds atomically — no rebuild needed.
@@ -3073,6 +3094,7 @@ void MainComponent::performTrimAsync()
     snap.eq2Q    = sampleCard.getEqBandQ(1);    snap.eq2Mode = sampleCard.getEqFilterMode(1);
     snap.eq3Freq = sampleCard.getEqBandFreq(2); snap.eq3Gain = sampleCard.getEqBandGain(2);
     snap.eq3Q    = sampleCard.getEqBandQ(2);    snap.eq3Mode = sampleCard.getEqFilterMode(2);
+    snap.padGain = sampleCard.getEqGain();
     snap.transientDetectionEnabled = sampleCard.isTransientDetectionEnabled();
     snap.transientThreshold        = (float)sampleCard.getTransientThreshold();
     snap.gridSnapEnabled           = sampleCard.isGridSnapEnabled();
@@ -3434,6 +3456,11 @@ void MainComponent::metronomeStandaloneChanged (bool on, double bpm)
             recLastBeat = -1;
         }
     }
+}
+
+void MainComponent::metronomeVolumeChanged (float vol)
+{
+    metronomeVolume.store (juce::jlimit (0.0f, 1.0f, vol), std::memory_order_relaxed);
 }
 
 void MainComponent::playbackQuantisedEvents()
@@ -4075,6 +4102,7 @@ void MainComponent::captureSampleCardToPadSettings(int padIdx)
     ps.adsrReleaseMs = sampleCard.getAdsrReleaseMs();
 
     // EQ
+    ps.padGain   = sampleCard.getEqGain();
     ps.eqEnabled = sampleCard.isEqEnabled();
     ps.eq1Freq   = sampleCard.getEqBandFreq(0); ps.eq1Gain = sampleCard.getEqBandGain(0);
     ps.eq1Q      = sampleCard.getEqBandQ(0);    ps.eq1Mode = engine.eqFilterModes[0];

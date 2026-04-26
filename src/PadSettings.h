@@ -76,6 +76,9 @@ struct PadSettings
     float eq2Freq = 500.0f,  eq2Gain = 0.0f, eq2Q = 1.0f;  int eq2Mode = 2;
     float eq3Freq = 8000.0f, eq3Gain = 0.0f, eq3Q = 1.0f;  int eq3Mode = 2;
 
+    // Pad gain — independent amplification/attenuation applied in EQ tab (0.0–2.0, default 1.0)
+    float padGain = 1.0f;
+
     //==========================================================================
     // Start / end markers
     double startPointSeconds = 0.0;
@@ -219,6 +222,7 @@ struct PadSettings
         el.setAttribute ("eq1f",        (double)eq1Freq);  el.setAttribute ("eq1g", (double)eq1Gain); el.setAttribute ("eq1q", (double)eq1Q); el.setAttribute ("eq1m", eq1Mode);
         el.setAttribute ("eq2f",        (double)eq2Freq);  el.setAttribute ("eq2g", (double)eq2Gain); el.setAttribute ("eq2q", (double)eq2Q); el.setAttribute ("eq2m", eq2Mode);
         el.setAttribute ("eq3f",        (double)eq3Freq);  el.setAttribute ("eq3g", (double)eq3Gain); el.setAttribute ("eq3q", (double)eq3Q); el.setAttribute ("eq3m", eq3Mode);
+        el.setAttribute ("padGain",     (double)padGain);
         el.setAttribute ("startSec",    startPointSeconds);
         el.setAttribute ("endSec",      endPointSeconds);
         el.setAttribute ("transEn",     transientDetectionEnabled ? 1 : 0);
@@ -275,6 +279,7 @@ struct PadSettings
         eq1Freq  = (float)el.getDoubleAttribute ("eq1f", 100.0);  eq1Gain = (float)el.getDoubleAttribute ("eq1g", 0.0); eq1Q = (float)el.getDoubleAttribute ("eq1q", 1.0); eq1Mode = el.getIntAttribute ("eq1m", 2);
         eq2Freq  = (float)el.getDoubleAttribute ("eq2f", 500.0);  eq2Gain = (float)el.getDoubleAttribute ("eq2g", 0.0); eq2Q = (float)el.getDoubleAttribute ("eq2q", 1.0); eq2Mode = el.getIntAttribute ("eq2m", 2);
         eq3Freq  = (float)el.getDoubleAttribute ("eq3f", 8000.0); eq3Gain = (float)el.getDoubleAttribute ("eq3g", 0.0); eq3Q = (float)el.getDoubleAttribute ("eq3q", 1.0); eq3Mode = el.getIntAttribute ("eq3m", 2);
+        padGain  = (float)el.getDoubleAttribute ("padGain", 1.0);
         startPointSeconds = el.getDoubleAttribute ("startSec",   0.0);
         endPointSeconds   = el.getDoubleAttribute ("endSec",    -1.0);
         transientDetectionEnabled = el.getIntAttribute    ("transEn",      1) != 0;
@@ -354,6 +359,7 @@ struct PadSettings
         props->setValue(p + "eq3g",          (double)eq3Gain);
         props->setValue(p + "eq3q",          (double)eq3Q);
         props->setValue(p + "eq3m",          eq3Mode);
+        props->setValue(p + "padGain",       (double)padGain);
 
         props->setValue(p + "startSec",      startPointSeconds);
         props->setValue(p + "endSec",        endPointSeconds);
@@ -420,6 +426,7 @@ struct PadSettings
         eq3Gain   = (float)props->getDoubleValue(p + "eq3g",    0.0);
         eq3Q      = (float)props->getDoubleValue(p + "eq3q",    1.0);
         eq3Mode   =        props->getIntValue   (p + "eq3m",     2);
+        padGain   = (float)props->getDoubleValue(p + "padGain", 1.0);
 
         startPointSeconds = props->getDoubleValue(p + "startSec", 0.0);
         endPointSeconds   = props->getDoubleValue(p + "endSec",  -1.0);

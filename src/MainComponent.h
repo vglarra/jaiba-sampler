@@ -128,6 +128,7 @@ private:
         float eq1Freq = 100.0f, eq1Gain = 0.0f, eq1Q = 1.0f; int eq1Mode = 2;
         float eq2Freq = 500.0f, eq2Gain = 0.0f, eq2Q = 1.0f; int eq2Mode = 2;
         float eq3Freq = 8000.0f,eq3Gain = 0.0f, eq3Q = 1.0f; int eq3Mode = 2;
+        float padGain = 1.0f;
 
         // Transient
         bool  transientDetectionEnabled = true;
@@ -250,11 +251,13 @@ private:
                          float f3, float g3, float q3) override;
     void eqFilterModesChanged(int mode1, int mode2, int mode3) override;
     void normChanged(bool enabled, float targetDb) override;
+    void padGainChanged(float gain) override;
     void beginRecording(double bpm, double quantInBeats,
                         bool metronomeOn, int targetPadIndex, bool overdub) override;
     void endRecording() override;
     void playbackQuantisedEvents() override;
     void metronomeStandaloneChanged (bool on, double bpm) override;
+    void metronomeVolumeChanged     (float vol) override;
     void savePattern() override;
     void loadPattern() override;
     void clearPattern() override;
@@ -610,6 +613,7 @@ private:
     std::atomic<bool>    recWaitForBeat      { false };  // WAV open but waiting for beat 0
     std::atomic<bool>    recMetronomeOn      { false };  // beep wanted (rec or standalone)
     std::atomic<bool>    metronomeStandalone { false };  // standalone metro (no recording)
+    std::atomic<float>   metronomeVolume     { 0.5f  };  // 0–1, independent beep gain
     std::atomic<double>  recSongBeatPos      { 0.0   };  // shared beat clock
     std::atomic<double>  recBpmAtomic        { 120.0 };  // BPM for beat clock + metro
     std::atomic<int64_t> recBeatSampleOffset { 0 };      // WAV samples before beat 0
