@@ -67,15 +67,17 @@ private:
             fflush(stdout);
 
             setVisible(true);
+            printf("DEBUG: setVisible completed\n");
+            fflush(stdout);
 
-            // Start maximized so the layout fills the screen on a micro-computer.
-            setFullScreen(true);
             printf("DEBUG: MainWindow constructor completed\n");
             fflush(stdout);
         }
         
         void closeButtonPressed() override
         {
+            printf("DEBUG: closeButtonPressed()\n");
+            fflush(stdout);
             if (auto* mc = dynamic_cast<MainComponent*>(getContentComponent()))
                 mc->requestQuit();
             else

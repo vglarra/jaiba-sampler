@@ -254,9 +254,11 @@ private:
                         bool metronomeOn, int targetPadIndex, bool overdub) override;
     void endRecording() override;
     void playbackQuantisedEvents() override;
+    void metronomeStandaloneChanged (bool on, double bpm) override;
     void savePattern() override;
     void loadPattern() override;
     void clearPattern() override;
+    void dropTargetPad(int padIndex) override;
 
     //==============================================================================
     // MIDI Learn handling
@@ -604,12 +606,15 @@ private:
     struct RecordedEvent { int padIndex = 0; double beatTime = 0.0; };
 
     // Cross-thread atomics
-    std::atomic<bool>   recIsActive    { false };   // msg → audio
-    std::atomic<bool>   recMetronomeOn { false };   // msg → audio
-    std::atomic<double> recSongBeatPos { 0.0   };   // audio → msg (beat timestamps)
-    std::atomic<double> recBpmAtomic   { 120.0 };   // msg → audio (for beat advance)
+    std::atomic<bool>    recIsActive         { false };  // armed: events + WAV active
+    std::atomic<bool>    recWaitForBeat      { false };  // WAV open but waiting for beat 0
+    std::atomic<bool>    recMetronomeOn      { false };  // beep wanted (rec or standalone)
+    std::atomic<bool>    metronomeStandalone { false };  // standalone metro (no recording)
+    std::atomic<double>  recSongBeatPos      { 0.0   };  // shared beat clock
+    std::atomic<double>  recBpmAtomic        { 120.0 };  // BPM for beat clock + metro
+    std::atomic<int64_t> recBeatSampleOffset { 0 };      // WAV samples before beat 0
 
-    // Message-thread-only parameters (written before recIsActive becomes true)
+    // Message-thread-only parameters (written before arming)
     int    recTargetPad    = 15;
     double recQuantInBeats = 0.0625;
     bool   overdubMode     = false;  // true = merge new events with existing recQuantised
@@ -638,9 +643,18 @@ private:
     };
     PatternPlayTimer patternPlayTimer { *this };
 
+    // Live output capture — taps master mix into WAV while user plays live.
+    // Audio thread writes to this writer; message thread owns lifetime.
+    juce::TimeSliceThread              wavWriterThread { "WAV Writer" };
+    std::atomic<juce::AudioFormatWriter::ThreadedWriter*> liveRenderWriter { nullptr };
+    std::atomic<bool> liveRenderActive { false };
+    juce::File        liveRenderOutputFile;
+    TrimSettingsSnapshot liveTargetSnap;   // settings to apply to target pad after render
+    int               liveRenderTargetPad { -1 };
+
     void quantiseRecordedEvents();
-    void renderRecordingToTargetPad();
-    void tickPatternPlayback();
+    void finalizeLiveRender();   // called by endRecording(); closes WAV + optionally quantizes
+    void tickPatternPlayback();  // only used by "Play Pattern" preview button
     void saveCurrentPattern();   // shows input dialog, saves to padManager.getSettings(recTargetPad)
     void loadPatternFromPad();   // shows popup menu, loads into recQuantised
 

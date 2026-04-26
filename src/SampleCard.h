@@ -2633,10 +2633,13 @@ public:
                                     bool metronomeOn, int targetPadIndex, bool overdub) = 0;
         virtual void endRecording() = 0;
         virtual void playbackQuantisedEvents() = 0;
+        // Standalone metronome toggle — independent of recording.
+        virtual void metronomeStandaloneChanged(bool on, double bpm) = 0;
         // Pattern persistence — save/load/clear the current quantised pattern on the target pad.
         virtual void savePattern() = 0;
         virtual void loadPattern() = 0;
         virtual void clearPattern() = 0;
+        virtual void dropTargetPad(int padIndex) = 0;
     };
     
     void addListener(Listener* listener)
@@ -4352,8 +4355,46 @@ void adjustPitchUp()
     public:
         explicit RecControlPanel(SampleCard& o) : owner(o)
         {
+            // ----- Tap Tempo -----
+            tapButton.setButtonText("Tap");
+            tapButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A3A00));
+            tapButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            tapButton.onClick = [this] { handleTap(); };
+            addAndMakeVisible(tapButton);
+
+            tapBpmLabel.setText("--- BPM", juce::dontSendNotification);
+            tapBpmLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF888888));
+            tapBpmLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+            tapBpmLabel.setJustificationType(juce::Justification::centred);
+            addAndMakeVisible(tapBpmLabel);
+
+            tapLockButton.setButtonText("Lock");
+            tapLockButton.setClickingTogglesState(true);
+            tapLockButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+            tapLockButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFB87800));
+            tapLockButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+            tapLockButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+            tapLockButton.setEnabled(false);  // enabled once we have a BPM reading
+            addAndMakeVisible(tapLockButton);
+
+            tapClearButton.setButtonText("Clr");
+            tapClearButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A1A00));
+            tapClearButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            tapClearButton.setEnabled(false);
+            tapClearButton.onClick = [this]
+            {
+                tap.clear();
+                tapLockButton.setToggleState(false, juce::dontSendNotification);
+                tapLockButton.setEnabled(false);
+                tapClearButton.setEnabled(false);
+                tapBpmLabel.setText("--- BPM", juce::dontSendNotification);
+                tapBpmLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF888888));
+                tapButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A3A00));
+            };
+            addAndMakeVisible(tapClearButton);
+
             // ----- Target pad -----
-            targetPadLabel.setText("Target: 15", juce::dontSendNotification);
+            targetPadLabel.setText("Target: 16", juce::dontSendNotification);
             targetPadLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
             targetPadLabel.setFont(juce::Font(11.0f));
             targetPadLabel.setJustificationType(juce::Justification::centredLeft);
@@ -4367,25 +4408,6 @@ void adjustPitchUp()
             targetPadPlusButton.onClick = [this] { adjustTargetPad(+1); };
             addAndMakeVisible(targetPadPlusButton);
 
-            // ----- BPM -----
-            bpmLabel.setText("BPM", juce::dontSendNotification);
-            bpmLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
-            bpmLabel.setFont(juce::Font(11.0f));
-            bpmLabel.setJustificationType(juce::Justification::centredRight);
-            addAndMakeVisible(bpmLabel);
-
-            bpmSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-            bpmSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 38, 18);
-            bpmSlider.setRange(60.0, 180.0, 1.0);
-            bpmSlider.setValue(120.0, juce::dontSendNotification);
-            bpmSlider.setColour(juce::Slider::backgroundColourId,   juce::Colour(0xFF3A3A3A));
-            bpmSlider.setColour(juce::Slider::trackColourId,        juce::Colour(0xFF5A5A5A));
-            bpmSlider.setColour(juce::Slider::thumbColourId,        juce::Colour(0xFFCECECE));
-            bpmSlider.setColour(juce::Slider::textBoxTextColourId,  juce::Colour(0xFFCECECE));
-            bpmSlider.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colour(0xFF2A2A2A));
-            bpmSlider.setColour(juce::Slider::textBoxOutlineColourId, juce::Colour(0xFF0A0A0A));
-            addAndMakeVisible(bpmSlider);
-
             // ----- Quantize -----
             quantLabel.setText("Quant", juce::dontSendNotification);
             quantLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
@@ -4393,13 +4415,14 @@ void adjustPitchUp()
             quantLabel.setJustificationType(juce::Justification::centredRight);
             addAndMakeVisible(quantLabel);
 
-            quantCombo.addItem("1/4",        1);
-            quantCombo.addItem("1/8",        2);
-            quantCombo.addItem("1/16",       3);
-            quantCombo.addItem("1/32",       4);
-            quantCombo.addItem("1/8 triplet", 5);
+            quantCombo.addItem("None (raw)",    7);
+            quantCombo.addItem("1/4",          1);
+            quantCombo.addItem("1/8",          2);
+            quantCombo.addItem("1/16",         3);
+            quantCombo.addItem("1/32",         4);
+            quantCombo.addItem("1/8 triplet",  5);
             quantCombo.addItem("1/16 triplet", 6);
-            quantCombo.setSelectedId(3, juce::dontSendNotification);  // default 1/16
+            quantCombo.setSelectedId(7, juce::dontSendNotification);  // default: no quantize
             quantCombo.setColour(juce::ComboBox::backgroundColourId,  juce::Colour(0xFF3A3A3A));
             quantCombo.setColour(juce::ComboBox::textColourId,        juce::Colour(0xFFCECECE));
             quantCombo.setColour(juce::ComboBox::outlineColourId,     juce::Colour(0xFF0A0A0A));
@@ -4413,15 +4436,30 @@ void adjustPitchUp()
             metronomeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFF00CF7F));
             metronomeButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
             metronomeButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+            // Fire metronome listener immediately on every toggle, not just at record time.
+            metronomeButton.onClick = [this]
+            {
+                const bool on  = metronomeButton.getToggleState();
+                owner.listeners.call([on, b = currentBpm](Listener& l) { l.metronomeStandaloneChanged(on, b); });
+            };
             addAndMakeVisible(metronomeButton);
 
-            // ----- Overdub toggle -----
+            // ----- Drop Pad -----
+            dropPadButton.setButtonText("Drop Pad");
+            dropPadButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A2A1A));
+            dropPadButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+            dropPadButton.onClick = [this]
+            {
+                const int t = currentTargetPad;
+                owner.listeners.call([t](Listener& l) { l.dropTargetPad(t); });
+            };
+            addAndMakeVisible(dropPadButton);
+
+            // ----- Overdub toggle (unwired — feature disabled for latency focus) -----
             overdubButton.setButtonText("Overdub");
-            overdubButton.setClickingTogglesState(true);
-            overdubButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
-            overdubButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFCC7700));
-            overdubButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
-            overdubButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+            overdubButton.setClickingTogglesState(false);  // cannot be toggled
+            overdubButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF3A3A3A));
+            overdubButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF555555));
             addAndMakeVisible(overdubButton);
 
             // ----- Record -----
@@ -4430,14 +4468,14 @@ void adjustPitchUp()
             recordButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
             recordButton.onClick = [this]
             {
-                const double bpm        = bpmSlider.getValue();
+                const double bpm        = currentBpm;
                 const double quantBeats = quantIdToBeats(quantCombo.getSelectedId());
                 const bool   metro      = metronomeButton.getToggleState();
                 const int    target     = currentTargetPad;
                 const bool   overdub    = overdubButton.getToggleState();
                 recordButton.setEnabled(false);
                 stopButton.setEnabled(true);
-                setStatus("Recording... (target pad " + juce::String(target) + ")");
+                setStatus("Recording... (target pad " + juce::String(target + 1) + ")");
                 owner.listeners.call([bpm, quantBeats, metro, target, overdub](Listener& l) {
                     l.beginRecording(bpm, quantBeats, metro, target, overdub);
                 });
@@ -4462,41 +4500,28 @@ void adjustPitchUp()
             playButton.setButtonText("Play Pattern");
             playButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A5A1A));
             playButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-            playButton.onClick = [this]
-            {
-                setStatus("Playing pattern");
-                owner.listeners.call([](Listener& l) { l.playbackQuantisedEvents(); });
-            };
+            // onClick intentionally unset — feature unwired for latency focus
             addAndMakeVisible(playButton);
 
             // ----- Save Pattern -----
             savePatternButton.setButtonText("Save");
             savePatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A4A2A));
             savePatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-            savePatternButton.onClick = [this]
-            {
-                owner.listeners.call([](Listener& l) { l.savePattern(); });
-            };
+            // onClick intentionally unset — feature unwired for latency focus
             addAndMakeVisible(savePatternButton);
 
             // ----- Load Pattern -----
             loadPatternButton.setButtonText("Load");
             loadPatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A2A4A));
             loadPatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-            loadPatternButton.onClick = [this]
-            {
-                owner.listeners.call([](Listener& l) { l.loadPattern(); });
-            };
+            // onClick intentionally unset — feature unwired for latency focus
             addAndMakeVisible(loadPatternButton);
 
             // ----- Clear Pattern -----
             clearPatternButton.setButtonText("Clear");
             clearPatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A2A1A));
             clearPatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-            clearPatternButton.onClick = [this]
-            {
-                owner.listeners.call([](Listener& l) { l.clearPattern(); });
-            };
+            // onClick intentionally unset — feature unwired for latency focus
             addAndMakeVisible(clearPatternButton);
 
             // ----- Status -----
@@ -4513,7 +4538,7 @@ void adjustPitchUp()
             recordButton.setEnabled(!recording);
             stopButton.setEnabled(recording);
             if (recording)
-                setStatus("Recording... (target pad " + juce::String(targetPadIndex) + ")");
+                setStatus("Recording... (target pad " + juce::String(targetPadIndex + 1) + ")");
             else
                 setStatus("Stopped");
         }
@@ -4524,30 +4549,35 @@ void adjustPitchUp()
             statusLabel.setText(msg, juce::dontSendNotification);
         }
 
-        int  getTargetPad() const  { return currentTargetPad; }
-        double getBpm()    const   { return bpmSlider.getValue(); }
+        int    getTargetPad()  const { return currentTargetPad; }
+        double getBpm()        const { return currentBpm; }
         double getQuantBeats() const { return quantIdToBeats(quantCombo.getSelectedId()); }
-        bool  isMetronomeOn() const { return metronomeButton.getToggleState(); }
+        bool   isMetronomeOn() const { return metronomeButton.getToggleState(); }
 
         void resized() override
         {
-            // Four rows of 20px with 4px gaps — matches Controls tab row height.
+            // Three rows of 20px with 4px gaps — matches Controls tab row height.
             constexpr int kRowH = 20;
             constexpr int kGap  = 4;
             auto area = getLocalBounds().reduced(2, 2);
 
-            // ---- Row 1: Target pad selector | BPM slider ----
+            // ---- Row 1: Target pad selector | Tap | BPM display | Clr | Lock ----
             auto row1 = area.removeFromTop(kRowH);
             area.removeFromTop(kGap);
 
-            // Target pad: [label 72px] [-20px] [+20px]
-            targetPadLabel.setBounds(row1.removeFromLeft(86));
+            // Left: [Target: N label 72px] [-18px] [+18px]
+            targetPadLabel      .setBounds(row1.removeFromLeft(72));
             targetPadMinusButton.setBounds(row1.removeFromLeft(20).withSizeKeepingCentre(18, kRowH));
             targetPadPlusButton .setBounds(row1.removeFromLeft(20).withSizeKeepingCentre(18, kRowH));
-            row1.removeFromLeft(8); // gap
-            // BPM: [label 32px] [slider fills rest]
-            bpmLabel.setBounds(row1.removeFromLeft(32));
-            bpmSlider.setBounds(row1);
+            row1.removeFromLeft(6);
+            // Right: [Lock 42px] [Clr 34px] — removed from right so BPM label fills the middle
+            tapLockButton  .setBounds(row1.removeFromRight(42).withSizeKeepingCentre(40, kRowH));
+            tapClearButton .setBounds(row1.removeFromRight(36).withSizeKeepingCentre(34, kRowH));
+            row1.removeFromRight(4);
+            // [Tap 56px] [BPM display fills remaining]
+            tapButton   .setBounds(row1.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
+            row1.removeFromLeft(4);
+            tapBpmLabel .setBounds(row1);
 
             // ---- Row 2: Quant combo | Metronome ----
             auto row2 = area.removeFromTop(kRowH);
@@ -4557,43 +4587,41 @@ void adjustPitchUp()
             quantCombo.setBounds(row2.removeFromLeft(110).withSizeKeepingCentre(108, kRowH));
             row2.removeFromLeft(8);
             metronomeButton.setBounds(row2.removeFromLeft(62).withSizeKeepingCentre(60, kRowH));
+            row2.removeFromLeft(8);
+            dropPadButton.setBounds(row2.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
 
-            // ---- Row 3: Overdub | Record | Stop | Play Pattern | Status ----
+            // ---- Row 3: Overdub | Record | Stop | Play | Save | Load | Clear | Status ----
             auto row3 = area.removeFromTop(kRowH);
-            area.removeFromTop(kGap);
 
-            overdubButton.setBounds(row3.removeFromLeft(66).withSizeKeepingCentre(64, kRowH));
+            overdubButton    .setBounds(row3.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
+            row3.removeFromLeft(3);
+            recordButton     .setBounds(row3.removeFromLeft(52).withSizeKeepingCentre(50, kRowH));
+            row3.removeFromLeft(3);
+            stopButton       .setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
+            row3.removeFromLeft(3);
+            playButton       .setBounds(row3.removeFromLeft(50).withSizeKeepingCentre(48, kRowH));
             row3.removeFromLeft(4);
-            recordButton.setBounds(row3.removeFromLeft(58).withSizeKeepingCentre(56, kRowH));
+            savePatternButton .setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
+            row3.removeFromLeft(3);
+            loadPatternButton .setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
+            row3.removeFromLeft(3);
+            clearPatternButton.setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
             row3.removeFromLeft(4);
-            stopButton  .setBounds(row3.removeFromLeft(46).withSizeKeepingCentre(44, kRowH));
-            row3.removeFromLeft(4);
-            playButton  .setBounds(row3.removeFromLeft(84).withSizeKeepingCentre(82, kRowH));
-            row3.removeFromLeft(6);
-            statusLabel .setBounds(row3);
-
-            // ---- Row 4: Save | Load | Clear pattern ----
-            auto row4 = area.removeFromTop(kRowH);
-
-            savePatternButton .setBounds(row4.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
-            row4.removeFromLeft(4);
-            loadPatternButton .setBounds(row4.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
-            row4.removeFromLeft(4);
-            clearPatternButton.setBounds(row4.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
+            statusLabel      .setBounds(row3);
         }
 
     private:
         SampleCard& owner;
-        int currentTargetPad = 15;
+        int    currentTargetPad = 15;
+        double currentBpm       = 120.0;
 
         juce::Label      targetPadLabel;
         juce::TextButton targetPadMinusButton;
         juce::TextButton targetPadPlusButton;
-        juce::Label      bpmLabel;
-        juce::Slider     bpmSlider;
         juce::Label      quantLabel;
         juce::ComboBox   quantCombo;
         juce::TextButton metronomeButton;
+        juce::TextButton dropPadButton;
         juce::TextButton overdubButton;
         juce::TextButton recordButton;
         juce::TextButton stopButton;
@@ -4606,7 +4634,7 @@ void adjustPitchUp()
         void adjustTargetPad(int delta)
         {
             currentTargetPad = juce::jlimit(0, 15, currentTargetPad + delta);
-            targetPadLabel.setText("Target: " + juce::String(currentTargetPad),
+            targetPadLabel.setText("Target: " + juce::String(currentTargetPad + 1),
                                    juce::dontSendNotification);
         }
 
@@ -4620,7 +4648,8 @@ void adjustPitchUp()
                 case 4: return 0.03125;
                 case 5: return 1.0 / 6.0;
                 case 6: return 1.0 / 12.0;
-                default: return 0.0625;
+                case 7: return 0.0;   // None — no quantization
+                default: return 0.0;
             }
         }
 
@@ -4630,6 +4659,86 @@ void adjustPitchUp()
             btn.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A4A4A));
             btn.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
         }
+
+        // ===== Tap Tempo state =====
+        struct TapState
+        {
+            static constexpr int          kMaxTaps   = 8;
+            static constexpr juce::int64  kTimeoutMs = 2000;
+
+            juce::int64 times[kMaxTaps] = {};
+            int         count           = 0;
+
+            void addTap (juce::int64 nowMs)
+            {
+                // Reset sequence if gap since last tap exceeds timeout.
+                if (count > 0 && nowMs - times[0] > kTimeoutMs)
+                    count = 0;
+                // Shift ring buffer and insert newest at front.
+                for (int i = kMaxTaps - 1; i > 0; --i)
+                    times[i] = times[i - 1];
+                times[0] = nowMs;
+                count = juce::jmin (count + 1, kMaxTaps);
+            }
+
+            // Returns average BPM from collected taps, or -1 if < 2 taps.
+            double getBpm() const
+            {
+                if (count < 2) return -1.0;
+                double sumMs = 0.0;
+                for (int i = 0; i < count - 1; ++i)
+                    sumMs += (double)(times[i] - times[i + 1]);
+                const double avgMs = sumMs / (count - 1);
+                return 60000.0 / avgMs;
+            }
+
+            void clear() { count = 0; }
+        };
+
+        TapState tap;
+
+        // Tap button flashes orange on each tap.
+        void flashTapButton()
+        {
+            tapButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFFB87800));
+            juce::Timer::callAfterDelay (120, [sp = juce::Component::SafePointer<RecControlPanel>(this)]
+            {
+                if (sp != nullptr)
+                    sp->tapButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF4A3A00));
+            });
+        }
+
+        void handleTap()
+        {
+            if (tapLockButton.getToggleState())
+                return;  // BPM is locked — ignore further taps
+
+            tap.addTap (juce::Time::currentTimeMillis());
+            flashTapButton();
+
+            const double bpm = tap.getBpm();
+            if (bpm > 0.0)
+            {
+                currentBpm = juce::jlimit (60.0, 180.0, bpm);
+
+                tapBpmLabel.setText (juce::String (currentBpm, 1) + " BPM", juce::dontSendNotification);
+                tapBpmLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFFFE000));
+
+                tapLockButton.setEnabled (true);
+                tapClearButton.setEnabled (true);
+
+                // Notify metronome of new BPM in real time.
+                const bool on = metronomeButton.getToggleState();
+                owner.listeners.call ([on, bpm = currentBpm](Listener& l)
+                    { l.metronomeStandaloneChanged (on, bpm); });
+            }
+        }
+
+        // Tap tempo UI members (declared after TapState so member init order is safe).
+        juce::TextButton tapButton;
+        juce::Label      tapBpmLabel;
+        juce::TextButton tapLockButton;
+        juce::TextButton tapClearButton;
     };
 
     // ===== TAB BAR =====

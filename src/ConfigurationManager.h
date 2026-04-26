@@ -266,6 +266,18 @@ public:
         flush();
     }
 
+    // Full audio device state (includes input device + active channel bitmasks).
+    void saveAudioDeviceStateXml(const juce::String& xmlText)
+    {
+        propertiesFile->setValue("audioDeviceStateXml", xmlText);
+        flush();
+    }
+
+    juce::String getAudioDeviceStateXml() const
+    {
+        return propertiesFile->getValue("audioDeviceStateXml", "");
+    }
+
     int getMidiNote()
     {
         return propertiesFile->getIntValue("midiNote", 60);

@@ -177,7 +177,7 @@ public:
                                             int drawX = (int)(narrowX + narrowW - numWidth/2);
                                             if (marginRight) drawX += charMargin;
                                             else if (marginLeft) drawX -= charMargin;
-                                            g.drawText (juce::String (padIndex),
+                                            g.drawText (juce::String (padIndex + 1),
                                                         drawX,
                                                         numY, numWidth, 14,
                                                         juce::Justification::centred, true);
@@ -188,7 +188,7 @@ public:
                                             int drawX = (int)(narrowX - numWidth/2);
                                             if (marginRight) drawX += charMargin;
                                             else if (marginLeft) drawX -= charMargin;
-                                            g.drawText (juce::String (padIndex),
+                                            g.drawText (juce::String (padIndex + 1),
                                                         drawX,
                                                         numY, numWidth, 14,
                                                         juce::Justification::centred, true);
@@ -199,7 +199,7 @@ public:
                                             int drawX = (int)(narrowX - numWidth/2);
                                             if (marginRight) drawX += charMargin;
                                             else if (marginLeft) drawX -= charMargin;
-                                            g.drawText (juce::String (padIndex),
+                                            g.drawText (juce::String (padIndex + 1),
                                                         drawX,
                                                         numY, numWidth, 14,
                                                         juce::Justification::centred, true);
@@ -216,7 +216,7 @@ public:
                                             int drawX = (int)(narrowX - numWidth/2);
                                             if (marginRight) drawX += charMargin;
                                             else if (marginLeft) drawX -= charMargin;
-                                            g.drawText (juce::String (padIndex),
+                                            g.drawText (juce::String (padIndex + 1),
                                                         drawX,
                                                         numY, numWidth, 14,
                                                         juce::Justification::centred, true);
@@ -227,7 +227,7 @@ public:
                                             int drawX = (int)(narrowX + narrowW - numWidth/2);
                                             if (marginRight) drawX += charMargin;
                                             else if (marginLeft) drawX -= charMargin;
-                                            g.drawText (juce::String (padIndex),
+                                            g.drawText (juce::String (padIndex + 1),
                                                         drawX,
                                                         numY, numWidth, 14,
                                                         juce::Justification::centred, true);
@@ -238,7 +238,7 @@ public:
                                             int drawX = (int)(narrowX + narrowW - numWidth/2);
                                             if (marginRight) drawX += charMargin;
                                             else if (marginLeft) drawX -= charMargin;
-                                            g.drawText (juce::String (padIndex),
+                                            g.drawText (juce::String (padIndex + 1),
                                                         drawX,
                                                         numY, numWidth, 14,
                                                         juce::Justification::centred, true);

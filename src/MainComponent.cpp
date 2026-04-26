@@ -51,12 +51,21 @@ MainComponent::MainComponent()
         engine.getSynthesiser().noteOn (1, note, 1.0f);
 
         // Record this trigger if the recording engine is active and this isn't the target pad
-        if (recIsActive.load (std::memory_order_relaxed) && padIndex != recTargetPad)
+        printf ("[REC] Pad clicked: pad=%d  recActive=%d  targetPad=%d\n",
+                padIndex + 1, (int)recIsActive.load (std::memory_order_relaxed), recTargetPad + 1);
+        fflush (stdout);
+        if (recIsActive.load (std::memory_order_acquire) && padIndex != recTargetPad)
         {
             const double beatNow = recSongBeatPos.load (std::memory_order_relaxed);
             recEvents.push_back ({ padIndex, beatNow });
-            DBG ("[REC] Event captured: pad=" + juce::String (padIndex)
-                 + "  beat=" + juce::String (beatNow, 3));
+            printf ("[REC] Event captured: pad=%d  beat=%.3f\n", padIndex + 1, beatNow);
+            fflush (stdout);
+        }
+        else
+        {
+            printf ("[REC] Pad clicked but not recorded: pad=%d  recActive=%d  targetPad=%d\n",
+                    padIndex + 1, (int)recIsActive.load(), recTargetPad + 1);
+            fflush (stdout);
         }
 
         // Schedule note off after 500ms
@@ -405,6 +414,10 @@ MainComponent::~MainComponent()
 //==============================================================================
 void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
+    printf ("[AUDIO] prepareToPlay called  SR=%.0f  blockSize=%d\n",
+            sampleRate, samplesPerBlockExpected);
+    fflush (stdout);
+
     midiCollector.reset(sampleRate);
 
     // Delegate all audio engine initialization (FFT, EQ, voices) to PadManager.
@@ -418,6 +431,12 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
         return pad().getSpectrumSnapshot(dest, numBins);
     });
 
+    const double bufMs = (double)samplesPerBlockExpected / sampleRate * 1000.0;
+    auto* device = deviceManager.getCurrentAudioDevice();
+    const char* driverType = device ? device->getTypeName().toRawUTF8() : "none";
+    printf ("[LATENCY-REPORT] Buffer: %d samples = %.2f ms  SR: %.0f Hz  Driver: %s\n",
+            samplesPerBlockExpected, bufMs, sampleRate, driverType);
+    fflush (stdout);
 }
 
 void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill)
@@ -425,13 +444,9 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     // muteOutput is set true by the message thread during sample-change to guarantee a
     // silent, zeroed buffer while the sampler is being rebuilt.  Checked atomically so
     // the audio thread sees it within one block (~6 ms) with no locks required.
-    if (pad().muteOutput.load())
-    {
-        bufferToFill.clearActiveBufferRegion();
-        return;
-    }
-
     bufferToFill.clearActiveBufferRegion();
+    if (pad().muteOutput.load())
+        return;
 
     // ── Block budget monitor ─────────────────────────────────────────────────────
     // Measure total time spent in this callback. Anything over half the buffer duration
@@ -461,31 +476,76 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     // PadManager also applies master volume after mixing all pads.
     padManager.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
 
-    // ── Recording engine: beat-position advance + metronome beep ────────────
+    // ── Live output capture — tap master mix into WAV while pattern plays ─────
+    if (liveRenderActive.load (std::memory_order_acquire))
+    {
+        if (auto* w = liveRenderWriter.load (std::memory_order_relaxed))
+            w->write (bufferToFill.buffer->getArrayOfReadPointers(),
+                      bufferToFill.numSamples);
+    }
+
+    // ── Beat clock + metronome beep ──────────────────────────────────────────
+    // The clock runs whenever recording is active, waiting for a beat, or
+    // the standalone metronome is on.  This lets Metro work independently.
     {
         const double sr = pad().getSampleRate();
         if (sr > 0.0)
         {
-            if (recIsActive.load (std::memory_order_relaxed))
+            const bool clockOn = recIsActive.load     (std::memory_order_relaxed)
+                              || recWaitForBeat.load  (std::memory_order_relaxed)
+                              || metronomeStandalone.load (std::memory_order_relaxed);
+
+            if (clockOn)
             {
                 const double bps   = recBpmAtomic.load (std::memory_order_relaxed) / 60.0;
                 const double delta = (double)bufferToFill.numSamples / sr * bps;
-                const double beat  = recSongBeatPos.load (std::memory_order_relaxed) + delta;
-                recSongBeatPos.store (beat, std::memory_order_relaxed);
+                const double oldBeat = recSongBeatPos.load (std::memory_order_relaxed);
+                const double newBeat = oldBeat + delta;
 
+                // ── Quantized record arm: fire at next beat boundary ──────────
+                if (recWaitForBeat.load (std::memory_order_relaxed))
+                {
+                    // Count WAV pre-roll samples while waiting
+                    recBeatSampleOffset.fetch_add (bufferToFill.numSamples,
+                                                   std::memory_order_relaxed);
+
+                    if ((int)std::floor (newBeat) > (int)std::floor (oldBeat))
+                    {
+                        // Beat crossed — arm recording from this exact block
+                        recWaitForBeat.store (false, std::memory_order_relaxed);
+                        recIsActive.store    (true,  std::memory_order_release);
+                        recSongBeatPos.store (0.0,   std::memory_order_relaxed);
+                        recLastBeat = -1;  // trigger beep immediately at beat 0
+                        juce::MessageManager::callAsync ([this]()
+                        {
+                            sampleCard.setRecordingActive (true, recTargetPad);
+                        });
+                    }
+                    else
+                    {
+                        recSongBeatPos.store (newBeat, std::memory_order_relaxed);
+                    }
+                }
+                else
+                {
+                    recSongBeatPos.store (newBeat, std::memory_order_relaxed);
+                }
+
+                // ── Metronome beep trigger ────────────────────────────────────
                 if (recMetronomeOn.load (std::memory_order_relaxed))
                 {
-                    const int beatInt = (int)std::floor (beat);
+                    const double beat   = recSongBeatPos.load (std::memory_order_relaxed);
+                    const int beatInt   = (int)std::floor (beat);
                     if (beatInt > recLastBeat)
                     {
-                        recLastBeat      = beatInt;
-                        recMetroBeepLeft = (int)(sr * 0.020);  // 20ms sine burst
+                        recLastBeat       = beatInt;
+                        recMetroBeepLeft  = (int)(sr * 0.020);  // 20ms burst
                         recMetroBeepPhase = 0.0;
                     }
                 }
             }
 
-            // Mix metronome beep — finishes even after recIsActive clears
+            // Mix metronome beep (finishes even after clock stops)
             if (recMetroBeepLeft > 0)
             {
                 const double phaseInc = juce::MathConstants<double>::twoPi * 1000.0 / sr;
@@ -500,7 +560,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                         const float t   = (float)(i + 0.5f) / (float)n;
                         const float env = std::sin (t * juce::MathConstants<float>::pi);
                         data[i] += (float)(std::sin (recMetroBeepPhase + (double)i * phaseInc)
-                                           * 0.15 * env * mv);
+                                           * 0.25 * env * mv);
                     }
                 }
                 recMetroBeepPhase += phaseInc * n;
@@ -985,22 +1045,17 @@ void MainComponent::saveAudioSettings()
 {
     if (configManager == nullptr)
         return;
-    
-    auto* currentDevice = deviceManager.getCurrentAudioDevice();
-    if (currentDevice != nullptr)
+
+    // Persist the FULL device manager state (output + input device, active channel
+    // bitmasks, buffer size, sample rate).  createStateXml() captures everything
+    // the AudioDeviceSelectorComponent can configure, so no information is lost.
+    auto xml = deviceManager.createStateXml();
+    if (xml != nullptr)
     {
-        juce::AudioDeviceManager::AudioDeviceSetup setup;
-        deviceManager.getAudioDeviceSetup(setup);
-        
-        // Save audio settings: buffer size, sample rate, and device name
-        // Device type is not needed as we can restore by device name
-        configManager->saveAudioSettings(
-            setup.bufferSize,
-            setup.sampleRate,
-            juce::String(), // Empty device type - not needed
-            currentDevice->getName()
-        );
-        
+        const juce::String xmlText = xml->toString();
+        configManager->saveAudioDeviceStateXml (xmlText);
+        printf ("[AUDIO] Full device state saved (%d bytes)\n", xmlText.length());
+        fflush (stdout);
     }
 }
 
@@ -1008,44 +1063,43 @@ void MainComponent::loadAudioSettings()
 {
     if (configManager == nullptr)
         return;
-    
-    int savedBufferSize = configManager->getAudioBufferSize();
-    double savedSampleRate = configManager->getAudioSampleRate();
-    juce::String savedDeviceType = configManager->getAudioDeviceType();
-    juce::String savedOutputDevice = configManager->getAudioOutputDevice();
-    
-    
-    // Note: We don't try to restore device type as there's no direct API for it
-    // The audio device will be whatever the system default or user selects
-    
-    // Get current setup and modify it
-    juce::AudioDeviceManager::AudioDeviceSetup setup;
-    deviceManager.getAudioDeviceSetup(setup);
-    
-    bool setupChanged = false;
-    
-    // Apply saved buffer size if different
-    if (savedBufferSize > 0 && setup.bufferSize != savedBufferSize)
+
+    const juce::String xmlText = configManager->getAudioDeviceStateXml();
+    if (xmlText.isNotEmpty())
     {
-        setup.bufferSize = savedBufferSize;
-        setupChanged = true;
-    }
-    
-    // Apply saved sample rate if different
-    if (savedSampleRate > 0 && setup.sampleRate != savedSampleRate)
-    {
-        setup.sampleRate = savedSampleRate;
-        setupChanged = true;
-    }
-    
-    // Apply the setup if changed
-    if (setupChanged)
-    {
-        juce::String error = deviceManager.setAudioDeviceSetup(setup, true);
-        if (error.isNotEmpty())
+        // Parse the stored XML and hand it back to the device manager.
+        // preferredSetupOptions = nullptr means: use exactly what's in the XML.
+        auto xml = juce::XmlDocument::parse (xmlText);
+        if (xml != nullptr)
         {
+            // setAudioChannels has already been called (with 0 in / 2 out) before
+            // loadAudioSettings() is invoked.  Passing the saved XML to initialise()
+            // reopens the device with the saved configuration — input device, active
+            // channels, buffer size, sample rate — overriding the defaults.
+            juce::String error = deviceManager.initialise (0, 2, xml.get(), true);
+            if (error.isNotEmpty())
+            {
+                printf ("[AUDIO] loadAudioSettings: initialise error: %s\n", error.toRawUTF8());
+                fflush (stdout);
+            }
+            else
+            {
+                juce::AudioDeviceManager::AudioDeviceSetup setup;
+                deviceManager.getAudioDeviceSetup (setup);
+                printf ("[AUDIO] Device state restored — output: %s  input: %s  buf: %d  SR: %.0f\n",
+                        setup.outputDeviceName.toRawUTF8(),
+                        setup.inputDeviceName.toRawUTF8(),
+                        setup.bufferSize,
+                        setup.sampleRate);
+                fflush (stdout);
+            }
+            return;
         }
     }
+
+    // Fallback: no saved XML yet — use whatever setAudioChannels opened as default.
+    printf ("[AUDIO] No saved audio device state — using system default\n");
+    fflush (stdout);
 }
 
 //==============================================================================
@@ -1188,13 +1242,26 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
     // Light up the pad for the duration of the MIDI note.
     // triggerStart on noteOn, triggerEnd on noteOff — no timer involved.
     {
-        const int flashPad = padManager.findPadForMidiNote(
+                const int flashPad = padManager.findPadForMidiNote(
             message.getNoteNumber(), message.getChannel());
         if (flashPad >= 0)
         {
             if (message.isNoteOn())
+            {
                 juce::MessageManager::callAsync([this, flashPad]()
                     { padGrid.triggerStart(flashPad); });
+
+                // Capture MIDI note-on events for quantized recording only.
+                // Skipped when recQuantInBeats == 0 ("None") — raw recording needs no events,
+                // and the push_back (plus any reallocation) must not run on the MIDI callback thread.
+                if (recIsActive.load(std::memory_order_acquire)
+                    && flashPad != recTargetPad
+                    && recQuantInBeats > 0.0)
+                {
+                    const double beatNow = recSongBeatPos.load(std::memory_order_acquire);
+                    recEvents.push_back({ flashPad, beatNow });
+                }
+            }
             else if (message.isNoteOff())
                 juce::MessageManager::callAsync([this, flashPad]()
                     { padGrid.triggerEnd(flashPad); });
@@ -2913,13 +2980,14 @@ void MainComponent::performPanicReset()
         resetButton.repaint();
     });
 
-    // 0. Stop any active recording or pattern playback
-    if (recIsActive.load (std::memory_order_relaxed))
-    {
-        recIsActive.store (false, std::memory_order_relaxed);
-        recMetronomeOn.store (false, std::memory_order_relaxed);
-        sampleCard.setRecordingActive (false);
-    }
+    // 0. Stop any active recording, waiting state, standalone metro, pattern playback
+    recIsActive.store        (false, std::memory_order_relaxed);
+    recWaitForBeat.store     (false, std::memory_order_relaxed);
+    recMetronomeOn.store     (false, std::memory_order_relaxed);
+    metronomeStandalone.store(false, std::memory_order_relaxed);
+    recSongBeatPos.store     (0.0,   std::memory_order_relaxed);
+    recLastBeat = -1;
+    sampleCard.setRecordingActive (false);
     patternPlayTimer.stopTimer();
     recPatternPlaying = false;
 
@@ -3222,72 +3290,161 @@ void MainComponent::performTrimAsync()
 void MainComponent::beginRecording (double bpm, double quantInBeats,
                                     bool metronomeOn, int targetPadIndex, bool overdub)
 {
-    DBG ("[REC] beginRecording  bpm=" + juce::String (bpm, 1)
-         + "  quant=" + juce::String (quantInBeats, 4)
-         + "  metro=" + juce::String ((int)metronomeOn)
-         + "  target=" + juce::String (targetPadIndex)
-         + "  overdub=" + juce::String ((int)overdub));
+    printf ("[REC] beginRecording  bpm=%.1f  quant=%.4f  metro=%d  target=Pad%d\n",
+            bpm, quantInBeats, (int)metronomeOn, targetPadIndex + 1);
 
-    // Stop any running pattern playback
+    // Stop any running pattern playback / previous capture
     patternPlayTimer.stopTimer();
     recPatternPlaying = false;
+    if (liveRenderActive.load (std::memory_order_relaxed))
+    {
+        liveRenderActive.store (false, std::memory_order_seq_cst);
+        auto* old = liveRenderWriter.exchange (nullptr, std::memory_order_seq_cst);
+        backgroundThreads.addJob ([old]() { delete old; });
+    }
 
-    // Store message-thread-only params before activating the audio-thread flag
+    // Store message-thread params before arming audio thread
     recTargetPad    = targetPadIndex;
     recQuantInBeats = quantInBeats;
     overdubMode     = overdub;
     recBpmAtomic.store (bpm, std::memory_order_relaxed);
 
-    // Seed recEvents with existing quantised pattern when overdubbing.
-    // quantiseRecordedEvents() will sort+snap+dedup the merged set when recording stops.
     if (overdub && !recQuantised.empty())
-    {
-        recEvents = recQuantised;   // copy existing events as seed
-        DBG ("[REC] Overdub: seeding " + juce::String ((int)recEvents.size()) + " existing events");
-    }
+        recEvents = recQuantised;
     else
-    {
         recEvents.clear();
-    }
 
     recSongBeatPos.store (0.0, std::memory_order_relaxed);
-
-    // Audio-thread state — safe to write here because recIsActive is still false
     recLastBeat       = -1;
     recMetroBeepLeft  = 0;
     recMetroBeepPhase = 0.0;
 
-    // Arm metronome and recording (audio thread reads these)
-    recMetronomeOn.store (metronomeOn, std::memory_order_relaxed);
-    recIsActive.store (true, std::memory_order_release);   // release: makes above stores visible
+    // ── Save snapshot of target pad settings ──────────────────────────────────
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+    liveTargetSnap = padSettingsToSnapshot (padManager.getSettings (targetPadIndex));
+    liveTargetSnap.startPointSeconds = 0.0;
+    liveTargetSnap.endPointSeconds   = -1.0;
+    liveRenderTargetPad = targetPadIndex;
 
-    sampleCard.setRecordingActive (true, targetPadIndex);
+    // ── Choose output file path ───────────────────────────────────────────────
+    {
+        juce::File outDir;
+        if (currentKitFile.getFullPathName().isNotEmpty())
+            outDir = currentKitFile.getParentDirectory();
+        else
+        {
+            for (int i = 0; i < PadManager::kMaxPads; ++i)
+            {
+                const auto& ps = padManager.getSettings (i);
+                if (ps.sampleFilePath.isNotEmpty())
+                {
+                    outDir = juce::File (ps.sampleFilePath).getParentDirectory();
+                    break;
+                }
+            }
+        }
+        if (outDir == juce::File{} || !outDir.isDirectory())
+            outDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+
+        for (int suffix = 1; suffix < 1000; ++suffix)
+        {
+            liveRenderOutputFile = outDir.getChildFile (
+                juce::String::formatted ("recording-%03d.wav", suffix));
+            if (!liveRenderOutputFile.existsAsFile()) break;
+        }
+    }
+
+    // ── Open WAV writer — audio thread will stream into it ───────────────────
+    const double outSR = juce::jmax (44100.0, pad().getSampleRate());
+    juce::WavAudioFormat wavFmt;
+    auto* outStream = liveRenderOutputFile.createOutputStream().release();
+    if (outStream == nullptr)
+    {
+        printf ("[REC] Could not open output file: %s\n",
+                liveRenderOutputFile.getFullPathName().toRawUTF8());
+        return;
+    }
+    auto* rawWriter = wavFmt.createWriterFor (outStream, outSR, 2u, 24, {}, 0);
+    if (rawWriter == nullptr) { delete outStream; return; }
+
+    if (!wavWriterThread.isThreadRunning())
+        wavWriterThread.startThread (juce::Thread::Priority::background);
+
+    auto* threadedWriter = new juce::AudioFormatWriter::ThreadedWriter (
+        rawWriter, wavWriterThread, 65536);
+
+    liveRenderWriter.store (threadedWriter, std::memory_order_release);
+    liveRenderActive.store (true,           std::memory_order_release);
+
+    printf ("[REC] Capture started — output: %s  SR=%.0f\n",
+            liveRenderOutputFile.getFileName().toRawUTF8(), outSR);
+
+    // Arm metronome
+    recMetronomeOn.store (metronomeOn, std::memory_order_relaxed);
+    recBeatSampleOffset.store (0, std::memory_order_relaxed);
+
+    // If metronome is already running, wait for the next beat boundary before arming
+    // event recording.  The WAV capture is already open so the pre-roll is captured
+    // and later skipped via liveTargetSnap.startPointSeconds.
+    if (metronomeOn && (metronomeStandalone.load (std::memory_order_relaxed)
+                        || recSongBeatPos.load (std::memory_order_relaxed) > 0.0))
+    {
+        printf ("[REC] Metro running — waiting for next beat to arm recording\n");
+        recWaitForBeat.store (true, std::memory_order_seq_cst);
+        sampleCard.setRecStatus ("Waiting for beat...");
+    }
+    else
+    {
+        recIsActive.store (true, std::memory_order_seq_cst);
+        sampleCard.setRecordingActive (true, targetPadIndex);
+    }
 }
 
 void MainComponent::endRecording()
 {
-    DBG ("[REC] endRecording  — " + juce::String ((int)recEvents.size()) + " raw events");
+    printf ("[REC] endRecording — %d raw events captured\n", (int)recEvents.size());
 
-    recIsActive.store (false, std::memory_order_relaxed);
-    recMetronomeOn.store (false, std::memory_order_relaxed);
+    recIsActive.store    (false, std::memory_order_relaxed);
+    recWaitForBeat.store (false, std::memory_order_relaxed);
+
+    // Keep standalone metronome running after recording stops.
+    if (!metronomeStandalone.load (std::memory_order_relaxed))
+        recMetronomeOn.store (false, std::memory_order_relaxed);
 
     sampleCard.setRecordingActive (false);
-
     quantiseRecordedEvents();
 
-    if (!recQuantised.empty())
-        renderRecordingToTargetPad();
-    else
-        DBG ("[REC] No events recorded — nothing to render");
+    // Stop capture and finalize — audio quantization applied if events were recorded
+    finalizeLiveRender();
+}
+
+void MainComponent::metronomeStandaloneChanged (bool on, double bpm)
+{
+    printf ("[METRO] Standalone metronome: %s  BPM=%.1f\n", on ? "ON" : "OFF", bpm);
+    metronomeStandalone.store (on, std::memory_order_relaxed);
+    recBpmAtomic.store (bpm, std::memory_order_relaxed);
+    recMetronomeOn.store (on, std::memory_order_relaxed);
+
+    if (!on)
+    {
+        // Stop the beat clock only if not actively recording
+        if (!recIsActive.load (std::memory_order_relaxed))
+        {
+            recSongBeatPos.store (0.0, std::memory_order_relaxed);
+            recLastBeat = -1;
+        }
+    }
 }
 
 void MainComponent::playbackQuantisedEvents()
 {
-    DBG ("[REC] playbackQuantisedEvents  — " + juce::String ((int)recQuantised.size()) + " events");
+    printf ("[REC] playbackQuantisedEvents — %d events\n", (int)recQuantised.size());
+    fflush (stdout);
 
     if (recQuantised.empty())
     {
-        DBG ("[REC] Pattern is empty — nothing to play");
+        printf ("[REC] Pattern is empty — nothing to play\n");
+        fflush (stdout);
         return;
     }
 
@@ -3301,6 +3458,7 @@ void MainComponent::quantiseRecordedEvents()
 {
     recQuantised.clear();
     if (recEvents.empty()) return;
+    if (recQuantInBeats <= 0.0) return;  // "None" — skip quantization entirely
 
     std::sort (recEvents.begin(), recEvents.end(),
                [](const RecordedEvent& a, const RecordedEvent& b) { return a.beatTime < b.beatTime; });
@@ -3321,240 +3479,180 @@ void MainComponent::quantiseRecordedEvents()
     std::sort (recQuantised.begin(), recQuantised.end(),
                [](const RecordedEvent& a, const RecordedEvent& b) { return a.beatTime < b.beatTime; });
 
-    DBG ("[REC] Quantised " + juce::String ((int)recEvents.size()) + " raw events -> "
-         + juce::String ((int)recQuantised.size()) + " unique events");
+    printf ("[REC] Quantised %d raw events -> %d unique events\n",
+            (int)recEvents.size(), (int)recQuantised.size());
     for (const auto& ev : recQuantised)
-        DBG ("[REC]   pad=" + juce::String (ev.padIndex) + "  beat=" + juce::String (ev.beatTime, 3));
+        printf ("[REC]   pad=%d  beat=%.3f\n", ev.padIndex + 1, ev.beatTime);
+    fflush (stdout);
 }
 
-void MainComponent::renderRecordingToTargetPad()
+
+void MainComponent::finalizeLiveRender()
 {
-    DBG ("[REC] renderRecordingToTargetPad — " + juce::String ((int)recQuantised.size()) + " events");
+    // Tell audio thread to stop writing immediately
+    liveRenderActive.store (false, std::memory_order_seq_cst);
+    auto* writerToClose = liveRenderWriter.exchange (nullptr, std::memory_order_seq_cst);
 
-    // Flush current pad state so target pad's PadSettings is up to date
-    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+    // Capture quantization data by value so the background job can use them safely
+    const juce::File rawFile      = liveRenderOutputFile;
+    const int        targetPad    = liveRenderTargetPad;
+    auto             targetSnap   = liveTargetSnap;
+    const double     bpm          = recBpmAtomic.load (std::memory_order_relaxed);
+    const double     quantInBeats = recQuantInBeats;
 
-    // Capture snapshot of target pad's settings (preserves MIDI note, volume, ADSR, etc.)
-    TrimSettingsSnapshot targetSnap = padSettingsToSnapshot (padManager.getSettings (recTargetPad));
-    targetSnap.startPointSeconds = 0.0;
-    targetSnap.endPointSeconds   = -1.0;  // full length of the rendered file
-
-    // ── Collect per-event render data under sample locks ─────────────────────
-    struct RenderEvent
+    // Pre-roll offset: WAV samples captured before beat 0 (non-zero when quantized
+    // start was used).  Set as startPointSeconds so the pad skips the silence.
+    const int64_t prerollSamples = recBeatSampleOffset.load (std::memory_order_relaxed);
+    const double  outSR          = juce::jmax (44100.0, pad().getSampleRate());
+    if (prerollSamples > 0)
     {
-        int    outStartSample;
-        std::shared_ptr<juce::AudioBuffer<float>> audio;
-        int    srcStart, srcEnd;
-        int    numChannels;
-        double pitchRatio;   // includes pitch shift + src/out SR resampling
-    };
-
-    // Determine output sample rate from any loaded pad engine
-    double outSR = 44100.0;
-    for (int i = 0; i < PadManager::kMaxPads; ++i)
-    {
-        if (!padManager.hasEngine (i)) continue;
-        const double sr = padManager.getEngine (i).getSampleRate();
-        if (sr > 0.0) { outSR = sr; break; }
+        targetSnap.startPointSeconds = (double)prerollSamples / outSR;
+        printf ("[REC] Pre-roll: %lld samples = %.3f s — skipping via startPoint\n",
+                (long long)prerollSamples, targetSnap.startPointSeconds);
     }
-    constexpr int outCh = 2;  // always render stereo
 
-    std::vector<RenderEvent> renderEvents;
-    renderEvents.reserve (recQuantised.size());
-
-    for (const auto& ev : recQuantised)
+    // Build 1:1 quantized positions from the raw events (no dedup — audio quantization
+    // needs each raw event to map directly to its snapped counterpart).
+    // When quantInBeats == 0.0 ("None"), skip this entirely and load the raw file.
+    auto rawEvents   = std::make_shared<std::vector<RecordedEvent>> (recEvents);
+    auto quantEvents = std::make_shared<std::vector<RecordedEvent>>();
+    if (quantInBeats > 0.0)
     {
-        if (!padManager.hasEngine (ev.padIndex)) continue;
-        auto& eng = padManager.getEngine (ev.padIndex);
+        quantEvents->reserve (rawEvents->size());
+        for (const auto& ev : *rawEvents)
+            quantEvents->push_back ({ ev.padIndex,
+                                      std::round (ev.beatTime / quantInBeats) * quantInBeats });
+    }
 
-        std::shared_ptr<juce::AudioBuffer<float>> audioPtr;
-        int srcStart = 0, srcEnd = 0, numCh = 1;
-        double pitchRatio = 1.0;
-
+    // Wait 80ms so the audio thread can finish any in-flight write() call,
+    // then close the writer and (optionally) quantize on a background thread.
+    juce::Timer::callAfterDelay (80, [this, writerToClose, rawFile, targetPad,
+                                      targetSnap, bpm, quantInBeats,
+                                      rawEvents, quantEvents]()
+    {
+        backgroundThreads.addJob ([this, writerToClose, rawFile, targetPad,
+                                   targetSnap, bpm, quantInBeats,
+                                   rawEvents, quantEvents]()
         {
-            juce::ScopedLock sl (eng.sampleLock);
-            if (eng.samples.isEmpty()) continue;
-            auto* s = eng.samples[0];
-            if (!s || !s->isValid()) continue;
+            // 1. Flush + close the raw WAV capture
+            delete writerToClose;
 
-            const double srcSR  = s->sampleRate;
-            const int    srcLen = s->audioData->getNumSamples();
-
-            const double startSec = s->startPointSeconds;
-            const double endSec   = (s->endPointSeconds < 0.0)
-                                    ? (double)srcLen / srcSR
-                                    : s->endPointSeconds;
-
-            srcStart = juce::jlimit (0, srcLen - 1, (int)(startSec * srcSR));
-            srcEnd   = juce::jlimit (srcStart + 1, srcLen, (int)(endSec * srcSR));
-            numCh    = s->numChannels;
-
-            // Pitch ratio: user cents + base correction + src/out sample rate
-            const auto& ps     = padManager.getSettings (ev.padIndex);
-            const int totalCents = ps.pitchCents + ps.basePitchOffset * 100;
-            pitchRatio = std::pow (2.0, totalCents / 1200.0)
-                         * (ps.baseTuningHz / 440.0)
-                         * (srcSR / outSR);
-
-            audioPtr = s->audioData;  // shared_ptr ref-counted — safe after lock release
-        }
-
-        const double eventSec  = ev.beatTime / (recBpmAtomic.load() / 60.0);
-        const int    outStart  = juce::jlimit (0, INT_MAX, (int)(eventSec * outSR));
-
-        renderEvents.push_back ({ outStart, audioPtr, srcStart, srcEnd, numCh, pitchRatio });
-    }
-
-    if (renderEvents.empty())
-    {
-        DBG ("[REC] No audio data found for any recorded pad — aborting render");
-        return;
-    }
-
-    // ── Determine total output length ──────────────────────────────────────
-    int totalOutSamples = 0;
-    for (const auto& re : renderEvents)
-    {
-        const int srcRegionLen = re.srcEnd - re.srcStart;
-        const int outLen       = re.outStartSample + (int)(srcRegionLen / re.pitchRatio) + 1;
-        totalOutSamples = juce::jmax (totalOutSamples, outLen);
-    }
-    // Add 4-beat tail for release / reverb
-    totalOutSamples += (int)(4.0 / (recBpmAtomic.load() / 60.0) * outSR);
-    totalOutSamples = juce::jmax (totalOutSamples, 1);
-
-    // ── Choose output file path ────────────────────────────────────────────
-    juce::File outDir;
-    if (currentKitFile.getFullPathName().isNotEmpty())
-        outDir = currentKitFile.getParentDirectory();
-    else
-    {
-        const auto& ps = padManager.getSettings (recTargetPad);
-        if (ps.sampleFilePath.isNotEmpty())
-            outDir = juce::File (ps.sampleFilePath).getParentDirectory();
-    }
-    if (outDir == juce::File{} || !outDir.isDirectory())
-        outDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
-
-    juce::File outFile;
-    for (int suffix = 1; suffix < 1000; ++suffix)
-    {
-        outFile = outDir.getChildFile (juce::String::formatted ("recording-%03d.wav", suffix));
-        if (!outFile.existsAsFile()) break;
-    }
-
-    const int    capTargetPad    = recTargetPad;
-    const int    capTotalSamples = totalOutSamples;
-    const double capOutSR        = outSR;
-    const int    capOutCh        = outCh;
-
-    // ── Render on background thread ────────────────────────────────────────
-    backgroundThreads.addJob ([this, renderEvents, outFile, capTargetPad,
-                                capTotalSamples, capOutSR, capOutCh, targetSnap]() mutable
-    {
-        juce::AudioBuffer<float> outBuf (capOutCh, capTotalSamples);
-        outBuf.clear();
-
-        for (const auto& re : renderEvents)
-        {
-            const auto& src    = *re.audio;
-            const double ratio = juce::jmax (0.0001, re.pitchRatio);
-            int    outPos      = re.outStartSample;
-            double srcPos      = (double)re.srcStart;
-            const int srcNumCh = juce::jmin (re.numChannels, capOutCh);
-
-            while (outPos < capTotalSamples)
+            if (!rawFile.existsAsFile() || rawFile.getSize() < 200)
             {
-                const int si = (int)srcPos;
-                if (si >= re.srcEnd - 1) break;
-
-                const float frac = (float)(srcPos - si);
-                const int   si2  = juce::jmin (si + 1, src.getNumSamples() - 1);
-
-                for (int ch = 0; ch < srcNumCh; ++ch)
+                juce::MessageManager::callAsync ([this]()
                 {
-                    const int srcCh = juce::jmin (ch, src.getNumChannels() - 1);
-                    const float s0  = src.getSample (srcCh, si);
-                    const float s1  = src.getSample (srcCh, si2);
-                    outBuf.addSample (ch, outPos, s0 + frac * (s1 - s0));
-                }
-                // Mono source → duplicate to second output channel
-                if (re.numChannels == 1 && capOutCh > 1)
-                {
-                    const float s0 = src.getSample (0, si);
-                    const float s1 = src.getSample (0, si2);
-                    outBuf.addSample (1, outPos, s0 + frac * (s1 - s0));
-                }
-
-                srcPos += ratio;
-                ++outPos;
+                    sampleCard.showTrimToast ("Record failed — no audio captured", false);
+                });
+                return;
             }
-        }
 
-        // Normalise to -0.5 dBFS peak
-        float peak = 0.0f;
-        for (int ch = 0; ch < outBuf.getNumChannels(); ++ch)
-            for (int i = 0; i < outBuf.getNumSamples(); ++i)
-                peak = juce::jmax (peak, std::abs (outBuf.getSample (ch, i)));
+            // 2. Apply audio quantization if we have events to work with
+            juce::File finalFile = rawFile;
 
-        if (peak > 0.001f)
-        {
-            const float gain = 0.944f / peak;  // -0.5 dBFS
-            outBuf.applyGain (gain);
-            DBG ("[REC] Normalised by " + juce::String (gain, 3) + "x (peak=" + juce::String (peak, 3) + ")");
-        }
+            const bool hasEvents = !rawEvents->empty();
+            const bool needsShift = [&]() -> bool {
+                if (!hasEvents || quantEvents->empty()) return false;
+                if (quantInBeats <= 0.0) return false;  // "None" — always use raw
+                const double bps = bpm / 60.0;
+                for (size_t i = 0; i < rawEvents->size(); ++i)
+                {
+                    const double diff = std::abs ((*quantEvents)[i].beatTime
+                                                  - (*rawEvents)[i].beatTime);
+                    if (diff * bps > 0.0015)  // > ~66 samples @ 44.1kHz
+                        return true;
+                }
+                return false;
+            }();
 
-        // Write WAV
-        juce::WavAudioFormat wavFmt;
-        auto outStream = std::unique_ptr<juce::FileOutputStream> (outFile.createOutputStream());
-        if (outStream == nullptr)
-        {
-            DBG ("[REC] Could not create output stream: " + outFile.getFullPathName());
-            return;
-        }
-        auto* writer = wavFmt.createWriterFor (outStream.get(), capOutSR,
-                                               (unsigned int)capOutCh, 24, {}, 0);
-        if (writer == nullptr)
-        {
-            DBG ("[REC] Could not create WAV writer");
-            return;
-        }
-        outStream.release();  // writer owns stream
+            if (needsShift)
+            {
+                printf ("[REC] Applying audio quantization — %d events  bpm=%.1f  grid=%.4f\n",
+                        (int)rawEvents->size(), bpm, quantInBeats);
 
-        constexpr int kBlock = 4096;
-        for (int pos = 0; pos < capTotalSamples; )
-        {
-            const int n = juce::jmin (kBlock, capTotalSamples - pos);
-            juce::AudioBuffer<float> blk (capOutCh, n);
-            for (int ch = 0; ch < capOutCh; ++ch)
-                blk.copyFrom (ch, 0, outBuf, ch, pos, n);
-            writer->writeFromAudioSampleBuffer (blk, 0, n);
-            pos += n;
-        }
-        delete writer;
+                // Read raw WAV into a buffer
+                std::unique_ptr<juce::AudioFormatReader> reader (
+                    formatManager.createReaderFor (rawFile));
 
-        if (!outFile.existsAsFile() || outFile.getSize() == 0)
-        {
-            DBG ("[REC] Render failed — file not written or empty");
-            return;
-        }
-        DBG ("[REC] Render complete: " + outFile.getFileName()
-             + "  (" + juce::String (outFile.getSize() / 1024) + " KB)");
+                if (reader != nullptr)
+                {
+                    const int   totalSamples = (int)reader->lengthInSamples;
+                    const int   numCh        = (int)reader->numChannels;
+                    const double sr          = reader->sampleRate;
+                    const double bps         = bpm / 60.0;
+                    const int    kFade       = juce::jmin (512, (int)(0.008 * sr));
 
-        // Load the rendered file into the target pad on the message thread
-        juce::MessageManager::callAsync ([this, outFile, capTargetPad, targetSnap]() mutable
-        {
-            DBG ("[REC] Loading rendered file -> pad " + juce::String (capTargetPad));
+                    juce::AudioBuffer<float> raw (numCh, totalSamples);
+                    reader->read (&raw, 0, totalSamples, 0, true, true);
+                    reader.reset();
 
-            captureSampleCardToPadSettings (padManager.selectedPadIndex);
-            saveOutgoingSampleState();
-            padManager.selectPad (capTargetPad);
+                    juce::AudioBuffer<float> output (numCh, totalSamples);
+                    output.clear();
 
-            sampleCard.restoreZoomAndScroll (1.0, 0.0f);
-            loadSampleFileAsync (outFile, /*autoPlay=*/true, /*resetZoom=*/true,
-                                 /*deferTransients=*/false, targetSnap);
+                    const int n = (int)juce::jmin (rawEvents->size(), quantEvents->size());
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const int rawStart  = (int)((*rawEvents)[i].beatTime  / bps * sr);
+                        const int quantStart = (int)((*quantEvents)[i].beatTime / bps * sr);
+                        const int rawEnd    = (i < n - 1)
+                            ? (int)((*rawEvents)[i + 1].beatTime / bps * sr)
+                            : totalSamples;
+                        const int sliceLen  = juce::jmax (0, rawEnd - rawStart);
 
-            padGrid.setPadSampleName (capTargetPad, outFile.getFileName());
+                        for (int s = 0; s < sliceLen; ++s)
+                        {
+                            const int inPos  = rawStart  + s;
+                            const int outPos = quantStart + s;
+                            if (inPos < 0 || inPos >= totalSamples) continue;
+                            if (outPos < 0 || outPos >= totalSamples) continue;
+                            const float fade = (s < kFade) ? (float)s / (float)kFade : 1.0f;
+                            for (int ch = 0; ch < numCh; ++ch)
+                                output.getWritePointer (ch)[outPos] =
+                                    raw.getReadPointer (ch)[inPos] * fade;
+                        }
+                    }
+
+                    // Write quantized WAV alongside the raw one
+                    juce::File qFile = rawFile.getSiblingFile (
+                        rawFile.getFileNameWithoutExtension() + "-q.wav");
+
+                    juce::WavAudioFormat wavFmt;
+                    auto* oStream = qFile.createOutputStream().release();
+                    auto* writer  = (oStream != nullptr)
+                        ? wavFmt.createWriterFor (oStream, sr, (unsigned int)numCh, 24, {}, 0)
+                        : nullptr;
+
+                    if (writer != nullptr)
+                    {
+                        std::unique_ptr<juce::AudioFormatWriter> wr (writer);
+                        wr->writeFromAudioSampleBuffer (output, 0, totalSamples);
+                        wr.reset();
+                        finalFile = qFile;
+                        printf ("[REC] Quantized WAV: %s\n",
+                                qFile.getFileName().toRawUTF8());
+                    }
+                    else if (oStream != nullptr)
+                    {
+                        delete oStream;
+                        printf ("[REC] Could not create quantized WAV writer\n");
+                    }
+                }
+            }
+
+            // 3. Load result to target pad on message thread
+            juce::MessageManager::callAsync ([this, finalFile, targetPad,
+                                              targetSnap]()
+            {
+                captureSampleCardToPadSettings (padManager.selectedPadIndex);
+                saveOutgoingSampleState();
+                padManager.selectPad (targetPad);
+
+                sampleCard.restoreZoomAndScroll (1.0, 0.0f);
+                loadSampleFileAsync (finalFile, /*autoPlay=*/true, /*resetZoom=*/true,
+                                     /*deferTransients=*/false, targetSnap);
+
+                padGrid.setPadSampleName (targetPad, finalFile.getFileName());
+                sampleCard.showTrimToast ("Recorded -> " + finalFile.getFileName(), false);
+            });
         });
     });
 }
@@ -3586,7 +3684,8 @@ void MainComponent::tickPatternPlayback()
                 if (padManager.hasEngine (padIdx))
                     padManager.getEngine (padIdx).getSynthesiser().noteOff (1, note, 0.0f, true);
             });
-            DBG ("[REC] Pattern: pad=" + juce::String (padIdx) + "  beat=" + juce::String (evBeat, 3));
+            printf ("[REC] Pattern: pad=%d  beat=%.3f\n", padIdx + 1, evBeat);
+            fflush (stdout);
         }
         ++recPatternIdx;
     }
@@ -3595,7 +3694,7 @@ void MainComponent::tickPatternPlayback()
     {
         patternPlayTimer.stopTimer();
         recPatternPlaying = false;
-        DBG ("[REC] Pattern playback complete");
+        printf ("[REC] Pattern playback complete\n");
     }
 }
 
@@ -3617,7 +3716,75 @@ void MainComponent::clearPattern()
     recEvents.clear();
     recQuantised.clear();
     sampleCard.setRecStatus ("Pattern cleared");
-    DBG ("[REC] Pattern cleared");
+    printf ("[REC] Pattern cleared\n");
+    fflush (stdout);
+}
+
+void MainComponent::dropTargetPad(int padIndex)
+{
+    // Stop any active recording first
+    if (recIsActive.load (std::memory_order_relaxed))
+    {
+        recIsActive.store    (false, std::memory_order_relaxed);
+        recMetronomeOn.store (false, std::memory_order_relaxed);
+        sampleCard.setRecordingActive (false);
+    }
+
+    const int padIdx   = padIndex;
+    auto&     settings = padManager.getSettings (padIdx);
+
+    if (settings.sampleFilePath.isEmpty())
+    {
+        sampleCard.showTrimToast ("Pad " + juce::String (padIdx + 1) + " is already empty", false);
+        return;
+    }
+
+    // Flush current pad state before any changes
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+    // Stop and clear the target engine
+    auto& engine = padManager.getEngine (padIdx);
+    engine.muteOutput.store (true);
+    engine.clearActiveSoundFlags();
+    engine.forceStopAllVoices();
+    engine.clearSoundsAndVoices();
+    engine.allNotesOff (0, false);
+    {
+        juce::ScopedLock lock (engine.sampleLock);
+        engine.samples.clear();
+        engine.selectedSampleIndex = 0;
+    }
+    engine.clearPeakCache();
+    engine.muteOutput.store (false);
+
+    // Reset ALL pad settings to factory defaults so a subsequent sample load
+    // doesn't inherit stale start/end/pitch/ADSR/EQ from the old pad.
+    const int savedMidiNote    = settings.midiNote;
+    const int savedMidiChannel = settings.midiChannel;
+    settings.resetToDefaults();
+    settings.midiNote    = savedMidiNote;    // preserve MIDI routing
+    settings.midiChannel = savedMidiChannel;
+
+    // Update the pad grid label
+    padGrid.setPadSampleName (padIdx, {});
+
+    // If the target pad is currently selected, reset the SampleCard UI to defaults too
+    if (padIdx == padManager.selectedPadIndex)
+    {
+        sampleCard.updateUIFromSettings (settings);  // reset pitch/loop/ADSR/EQ to defaults
+        sampleCard.setEmptyState (true);
+        currentFolder = juce::File{};
+        {
+            juce::ScopedWriteLock wlock (folderLock);
+            folderAudioFiles.clear();
+        }
+        currentFileIndex = -1;
+    }
+
+    sampleCard.showTrimToast ("Pad " + juce::String (padIdx + 1) + " cleared", false);
+    printf ("[DROP] Pad %d cleared — all settings reset to defaults (MIDI note %d preserved)\n",
+            padIdx + 1, savedMidiNote);
+    fflush (stdout);
 }
 
 //==============================================================================
@@ -3665,7 +3832,8 @@ void MainComponent::saveCurrentPattern()
 
                 sampleCard.setRecStatus ("Saved: " + name
                     + " (" + juce::String ((int)events.size()) + " events)");
-                DBG ("[REC] Pattern saved: '" + name + "'  target pad=" + juce::String (targetPad));
+                printf ("[REC] Pattern saved: '%s'  target pad=%d\n", name.toRawUTF8(), targetPad + 1);
+                fflush (stdout);
             }
             delete dialog;
         }), true);
@@ -3701,7 +3869,8 @@ void MainComponent::loadPatternFromPad()
 
                 sampleCard.setRecStatus ("Loaded: " + name
                     + " (" + juce::String ((int)recQuantised.size()) + " events)");
-                DBG ("[REC] Pattern loaded: '" + name + "'");
+                printf ("[REC] Pattern loaded: '%s'\n", name.toRawUTF8());
+                fflush (stdout);
             }
         });
 }
@@ -3969,6 +4138,8 @@ bool MainComponent::hasAnySamplesLoaded() const
 
 void MainComponent::requestQuit()
 {
+    printf ("DEBUG: requestQuit() — samplesLoaded=%d\n", (int)hasAnySamplesLoaded());
+    fflush (stdout);
     if (!hasAnySamplesLoaded())
     {
         // Nothing loaded — close immediately.
