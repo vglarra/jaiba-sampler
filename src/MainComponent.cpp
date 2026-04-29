@@ -47,33 +47,31 @@ MainComponent::MainComponent()
                 note = engine.samples[0]->rootNote;
         }
 
-        // Trigger note on — full velocity
+        // Trigger note on — full velocity.
+        // Note off is sent by onPadReleased (mouseUp), not on a timer.
         engine.getSynthesiser().noteOn (1, note, 1.0f);
 
         // Record this trigger if the recording engine is active and this isn't the target pad
-        printf ("[REC] Pad clicked: pad=%d  recActive=%d  targetPad=%d\n",
-                padIndex + 1, (int)recIsActive.load (std::memory_order_relaxed), recTargetPad + 1);
-        fflush (stdout);
         if (recIsActive.load (std::memory_order_acquire) && padIndex != recTargetPad)
         {
             const double beatNow = recSongBeatPos.load (std::memory_order_relaxed);
             recEvents.push_back ({ padIndex, beatNow });
-            printf ("[REC] Event captured: pad=%d  beat=%.3f\n", padIndex + 1, beatNow);
-            fflush (stdout);
         }
-        else
+    };
+
+    padGrid.onPadReleased = [this] (int padIndex)
+    {
+        if (!padManager.hasEngine (padIndex)) return;
+        auto& engine = padManager.getEngine (padIndex);
+
+        int note = padManager.getSettings (padIndex).midiNote;
         {
-            printf ("[REC] Pad clicked but not recorded: pad=%d  recActive=%d  targetPad=%d\n",
-                    padIndex + 1, (int)recIsActive.load(), recTargetPad + 1);
-            fflush (stdout);
+            juce::ScopedLock sl (engine.sampleLock);
+            if (!engine.samples.isEmpty())
+                note = engine.samples[0]->rootNote;
         }
 
-        // Schedule note off after 500ms
-        juce::Timer::callAfterDelay (500, [this, padIndex, note]()
-        {
-            if (!padManager.hasEngine (padIndex)) return;
-            padManager.getEngine (padIndex).getSynthesiser().noteOff (1, note, 0.0f, true);
-        });
+        engine.getSynthesiser().noteOff (1, note, 0.0f, true);
     };
 
     padGrid.onPadSelected = [this] (int padIndex)
@@ -96,6 +94,18 @@ MainComponent::MainComponent()
         // ── Step 3: Restore all UI controls from saved PadSettings — instant ──
         sampleCard.updateUIFromSettings (settings);
         baseTuningLabel.setHz (settings.baseTuningHz);
+
+        // ── Step 3b-MNFreeze: sync the incoming pad's MNFreeze atomics. ──────────────
+        // We do NOT kill any active freeze on the outgoing pad — its loop keeps running
+        // independently (that is the whole point of MNFreeze: set it and navigate freely).
+        // The per-pad padMnFreeze[] arrays mean every pad tracks its own state regardless
+        // of which pad is currently selected in the UI.
+        {
+            auto& mf = padMnFreeze[padManager.selectedPadIndex];
+            mf.enabled.store(settings.mnFreezeEnabled, std::memory_order_relaxed);
+            mf.note   .store(settings.midiNote,        std::memory_order_relaxed);
+            mf.ch     .store(settings.midiChannel,     std::memory_order_relaxed);
+        }
 
         // ── Step 3b: Push EQ state to the new engine's audio pipeline ─────────────
         // updateUIFromSettings uses notifyListeners=false for EQ — the UI is updated
@@ -1232,6 +1242,42 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
         return;
     }
 
+    // MNFreeze intercept: check ALL pads — any pad with MNFreeze enabled and a matching
+    // MIDI note/channel will toggle its freeze loop, regardless of which pad is selected.
+    // Runs on the MIDI callback thread using relaxed atomics only — no blocking I/O.
+    if (message.isNoteOn())
+    {
+        const int note    = message.getNoteNumber();
+        const int channel = message.getChannel();
+
+        for (int padIdx = 0; padIdx < 16; ++padIdx)
+        {
+            auto& mf = padMnFreeze[padIdx];
+            if (!mf.enabled.load(std::memory_order_relaxed)) continue;
+            if (!padManager.hasEngine(padIdx))                continue;
+
+            const int padNote = mf.note.load(std::memory_order_relaxed);
+            const int padCh   = mf.ch  .load(std::memory_order_relaxed);
+
+            if (note == padNote && (padCh == 0 || channel == padCh))
+            {
+                // Toggle this pad's freeze state atomically.
+                const bool wasActive = mf.isActive.load(std::memory_order_relaxed);
+                mf.isActive.store(!wasActive, std::memory_order_relaxed);
+                const bool nowActive  = !wasActive;
+                const float velocity  = message.getFloatVelocity();
+
+                juce::MessageManager::callAsync([this, padIdx, nowActive, velocity]
+                {
+                    activateMnFreezeForPad(padIdx, nowActive, velocity);
+                });
+
+                // Note consumed by MNFreeze — do not pass to the sampler.
+                return;
+            }
+        }
+    }
+
     // Channel filter: drop messages on wrong channel (0 = any).
     const int selectedChannel = sampleCard.getMidiChannel();
     if (selectedChannel != 0 && message.getChannel() != selectedChannel)
@@ -1658,6 +1704,8 @@ void MainComponent::showKitMenu()
 {
     juce::PopupMenu menu;
 
+    menu.addItem (5, "New Kit");
+    menu.addSeparator();
     menu.addSectionHeader ("Bank Kit");
     menu.addItem (1, "Save Bank Kit...");
     menu.addItem (2, "Load Bank Kit...");
@@ -1668,7 +1716,11 @@ void MainComponent::showKitMenu()
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&kitButton),
         [this] (int result)
         {
-            if (result == 1)
+            if (result == 5)
+            {
+                newKitAction();
+            }
+            else if (result == 1)
             {
                 // --- Save Bank Kit ---
                 // Capture current pad before opening dialog.
@@ -1744,6 +1796,7 @@ void MainComponent::saveKitToFile (const juce::File& file)
     if (root->writeTo (file))
     {
         currentKitFile = file;
+        kitIsDirty = false;
         kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
         kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
         kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
@@ -1780,6 +1833,19 @@ void MainComponent::loadKitFromFile (const juce::File& file)
         padManager.padSettings[idx].loadFromXml (*padEl);
     }
 
+    // Sync per-pad MNFreeze atomics from freshly-loaded PadSettings so the MIDI
+    // intercept loop works correctly for all pads, not just the selected one.
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        auto& mf       = padMnFreeze[i];
+        const auto& ps = padManager.padSettings[i];
+        mf.enabled.store(ps.mnFreezeEnabled, std::memory_order_relaxed);
+        mf.note   .store(ps.midiNote,        std::memory_order_relaxed);
+        mf.ch     .store(ps.midiChannel,     std::memory_order_relaxed);
+        // isActive always starts false after a kit load — no freeze survives a load.
+        mf.isActive.store(false, std::memory_order_relaxed);
+    }
+
     // Update grid name labels for all pads
     for (int i = 0; i < PadManager::kMaxPads; ++i)
     {
@@ -1797,6 +1863,16 @@ void MainComponent::loadKitFromFile (const juce::File& file)
         juce::File f (curPs.sampleFilePath);
         if (f.existsAsFile())
         {
+            // Reset folder navigation so Prev/Next scans the correct folder after kit load.
+            // Same pattern as onPadSelected — without this, currentFolder and folderAudioFiles
+            // remain stale from the previous session and Prev/Next navigates the wrong folder.
+            currentFolder = f.getParentDirectory();
+            {
+                juce::ScopedWriteLock wlock (folderLock);
+                folderAudioFiles.clear();
+            }
+            currentFileIndex = -1;
+
             sampleCard.restoreZoomAndScroll (1.0, 0.0f);
             loadSampleFileAsync (f, true, true, false, padSettingsToSnapshot (curPs));
         }
@@ -1824,10 +1900,126 @@ void MainComponent::loadKitFromFile (const juce::File& file)
     }
 
     currentKitFile = file;
+    kitIsDirty = false;
     kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
     kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
     kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
     sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
+}
+
+void MainComponent::newKitAction()
+{
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+    if (!kitIsDirty)
+    {
+        clearAllPadsForNewKit();
+        return;
+    }
+
+    auto* d = new juce::AlertWindow (
+        "New Kit",
+        "The current kit has unsaved changes.\n"
+        "Do you want to save before starting a new kit?",
+        juce::AlertWindow::QuestionIcon);
+    d->addButton ("Save",        1);
+    d->addButton ("Don't Save",  2);
+    d->addButton ("Cancel",      0);
+
+    d->enterModalState (true,
+        juce::ModalCallbackFunction::create (
+            [this] (int r)
+            {
+                if (r == 0)  // Cancel — do nothing
+                    return;
+
+                if (r == 2)  // Don't save — clear immediately
+                {
+                    clearAllPadsForNewKit();
+                    return;
+                }
+
+                // Save first, then clear after the file dialog closes.
+                const juce::String savedFolder = configManager->getLastKitFolder();
+                const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
+                                                ? juce::File(savedFolder)
+                                                : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+                kitFileChooser = std::make_unique<juce::FileChooser> (
+                    "Save Bank Kit", startDir, "*.jai");
+
+                kitFileChooser->launchAsync (
+                    juce::FileBrowserComponent::saveMode |
+                    juce::FileBrowserComponent::canSelectFiles,
+                    [this] (const juce::FileChooser& fc)
+                    {
+                        auto chosen = fc.getResult();
+                        if (chosen == juce::File{}) return;  // user cancelled save dialog — abort new kit
+
+                        if (chosen.getFileExtension().toLowerCase() != ".jai")
+                            chosen = chosen.withFileExtension ("jai");
+
+                        configManager->saveLastKitFolder (chosen.getParentDirectory().getFullPathName());
+                        saveKitToFile (chosen);
+                        clearAllPadsForNewKit();
+                    });
+            }),
+        true);
+}
+
+void MainComponent::clearAllPadsForNewKit()
+{
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        // Skip pads that have nothing loaded.
+        if (padManager.getSettings(i).sampleFilePath.isEmpty() && !padManager.hasEngine(i))
+            continue;
+
+        auto& engine = padManager.getEngine (i);
+        engine.muteOutput.store (true);
+        engine.clearActiveSoundFlags();
+        engine.forceStopAllVoices();
+        engine.clearSoundsAndVoices();
+        engine.allNotesOff (0, false);
+        {
+            juce::ScopedLock lock (engine.sampleLock);
+            engine.samples.clear();
+            engine.selectedSampleIndex = 0;
+        }
+        engine.clearPeakCache();
+        engine.muteOutput.store (false);
+
+        padManager.getSettings(i).resetToDefaults();
+        padGrid.setPadSampleName (i, {});
+    }
+
+    // Reset selected pad UI.
+    sampleCard.updateUIFromSettings (padManager.getSettings (padManager.selectedPadIndex));
+    sampleCard.setEmptyState (true);
+    currentFolder = juce::File{};
+    {
+        juce::ScopedWriteLock wlock (folderLock);
+        folderAudioFiles.clear();
+    }
+    currentFileIndex = -1;
+
+    // Clear MNFreeze state for all pads.
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        padMnFreeze[i].isActive.store (false, std::memory_order_relaxed);
+        padMnFreeze[i].enabled .store (false, std::memory_order_relaxed);
+    }
+
+    // Reset kit identity.
+    currentKitFile = juce::File{};
+    kitIsDirty = false;
+    kitNameLabel.setText ("New Kit", juce::dontSendNotification);
+    kitNameLabel.setColour (juce::Label::backgroundColourId, juce::Colour (0xFF222222));
+    kitNameLabel.setColour (juce::Label::textColourId,       juce::Colour (0xFF888888));
+
+    sampleCard.showTrimToast ("New kit started", false);
+    printf ("[KIT] All pads cleared — new kit ready\n");
+    fflush (stdout);
 }
 
 void MainComponent::navigateKit (int direction)
@@ -2204,7 +2396,9 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         // For normal loads, settings come from ConfigurationManager (per-sample key).
         double effectiveStart = 0.0;
         double effectiveEnd   = -1.0;   // -1 = full sample length
-        float  effectiveVol   = 1.0f;
+        // Seed from the pad's persisted volume so new samples inherit the pad level.
+        // ConfigManager per-sample state and trim/kit snapshots will override this below.
+        float  effectiveVol   = padManager.getSettings(padManager.selectedPadIndex).volumeLevel;
         bool   effectiveLoop  = false;
 
 
@@ -2314,7 +2508,9 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             {
                 effectiveStart = state.startPoint;
                 effectiveEnd   = state.endPoint;
-                effectiveVol   = state.volume;
+                // Volume is intentionally NOT restored from per-sample state.
+                // Volume is a pad-level setting: it stays at whatever the pad knob
+                // is set to, regardless of which sample file is loaded.
                 effectiveLoop  = state.loopEnabled;
                 sampleCard.setTransientThreshold(state.transientThreshold);
                 sampleCard.setDetectedNoteName(state.detectedNoteName, state.detectedFreqHz);
@@ -2571,6 +2767,8 @@ void MainComponent::midiNoteChanged(int newNote)
     padManager.padSettings[padManager.selectedPadIndex].midiNote    = newNote;
     padManager.padSettings[padManager.selectedPadIndex].midiChannel = sampleCard.getMidiChannel();
 
+    // Sync per-pad MIDI note atomic for MNFreeze intercept.
+    padMnFreeze[padManager.selectedPadIndex].note.store(newNote, std::memory_order_relaxed);
 }
 
 void MainComponent::midiChannelChanged(int newChannel)
@@ -2588,6 +2786,9 @@ void MainComponent::midiChannelChanged(int newChannel)
     // Keep in-memory pad settings in sync — no disk write.
     padManager.padSettings[padManager.selectedPadIndex].midiNote    = sampleCard.getMidiNote();
     padManager.padSettings[padManager.selectedPadIndex].midiChannel = newChannel;
+
+    // Sync per-pad channel atomic for MNFreeze intercept.
+    padMnFreeze[padManager.selectedPadIndex].ch.store(newChannel, std::memory_order_relaxed);
 }
 
 void MainComponent::learningModeChanged(bool isLearning)
@@ -2954,6 +3155,26 @@ void MainComponent::bounceEnabledChanged(bool enabled)
 
 }
 
+
+void MainComponent::mnFreezeEnabledChanged(bool enabled)
+{
+    const int pi = padManager.selectedPadIndex;
+    auto& mf = padMnFreeze[pi];
+
+    // Sync per-pad atomics so the MIDI callback thread can read them lock-free.
+    mf.enabled.store(enabled, std::memory_order_relaxed);
+    mf.note.store(sampleCard.getMidiNote(),    std::memory_order_relaxed);
+    mf.ch  .store(sampleCard.getMidiChannel(), std::memory_order_relaxed);
+
+    // If mode is being turned OFF while this pad's freeze is active, kill it.
+    if (!enabled && mf.isActive.load(std::memory_order_relaxed))
+    {
+        mf.isActive.store(false, std::memory_order_relaxed);
+        activateMnFreezeForPad(pi, false, 0.0f);
+    }
+
+    captureSampleCardToPadSettings(pi);
+}
 
 void MainComponent::checkOneShotTailDone()
 {
@@ -3747,29 +3968,12 @@ void MainComponent::clearPattern()
     fflush (stdout);
 }
 
-void MainComponent::dropTargetPad(int padIndex)
+void MainComponent::executeDropPad(int padIdx)
 {
-    // Stop any active recording first
-    if (recIsActive.load (std::memory_order_relaxed))
-    {
-        recIsActive.store    (false, std::memory_order_relaxed);
-        recMetronomeOn.store (false, std::memory_order_relaxed);
-        sampleCard.setRecordingActive (false);
-    }
-
-    const int padIdx   = padIndex;
-    auto&     settings = padManager.getSettings (padIdx);
-
-    if (settings.sampleFilePath.isEmpty())
-    {
-        sampleCard.showTrimToast ("Pad " + juce::String (padIdx + 1) + " is already empty", false);
-        return;
-    }
-
-    // Flush current pad state before any changes
+    // Flush current pad state before any changes.
     captureSampleCardToPadSettings (padManager.selectedPadIndex);
 
-    // Stop and clear the target engine
+    // Stop and clear the target engine.
     auto& engine = padManager.getEngine (padIdx);
     engine.muteOutput.store (true);
     engine.clearActiveSoundFlags();
@@ -3784,21 +3988,19 @@ void MainComponent::dropTargetPad(int padIndex)
     engine.clearPeakCache();
     engine.muteOutput.store (false);
 
-    // Reset ALL pad settings to factory defaults so a subsequent sample load
+    // Reset sample-data fields to factory defaults so a subsequent sample load
     // doesn't inherit stale start/end/pitch/ADSR/EQ from the old pad.
-    const int savedMidiNote    = settings.midiNote;
-    const int savedMidiChannel = settings.midiChannel;
+    // MIDI note/channel are NOT reset — see PadSettings::resetToDefaults().
+    auto& settings = padManager.getSettings (padIdx);
     settings.resetToDefaults();
-    settings.midiNote    = savedMidiNote;    // preserve MIDI routing
-    settings.midiChannel = savedMidiChannel;
 
-    // Update the pad grid label
+    // Update the pad grid label.
     padGrid.setPadSampleName (padIdx, {});
 
-    // If the target pad is currently selected, reset the SampleCard UI to defaults too
+    // If the target pad is currently selected, reset the SampleCard UI to defaults too.
     if (padIdx == padManager.selectedPadIndex)
     {
-        sampleCard.updateUIFromSettings (settings);  // reset pitch/loop/ADSR/EQ to defaults
+        sampleCard.updateUIFromSettings (settings);
         sampleCard.setEmptyState (true);
         currentFolder = juce::File{};
         {
@@ -3809,9 +4011,210 @@ void MainComponent::dropTargetPad(int padIndex)
     }
 
     sampleCard.showTrimToast ("Pad " + juce::String (padIdx + 1) + " cleared", false);
-    printf ("[DROP] Pad %d cleared — all settings reset to defaults (MIDI note %d preserved)\n",
-            padIdx + 1, savedMidiNote);
+    printf ("[DROP] Pad %d cleared — MIDI note %d / ch %d preserved\n",
+            padIdx + 1, settings.midiNote, settings.midiChannel);
     fflush (stdout);
+}
+
+void MainComponent::dropTargetPad(int padIndex)
+{
+    // Stop any active recording first.
+    if (recIsActive.load (std::memory_order_relaxed))
+    {
+        recIsActive.store    (false, std::memory_order_relaxed);
+        recMetronomeOn.store (false, std::memory_order_relaxed);
+        sampleCard.setRecordingActive (false);
+    }
+
+    const int padIdx = padIndex;
+    auto& settings   = padManager.getSettings (padIdx);
+
+    if (settings.sampleFilePath.isEmpty())
+    {
+        sampleCard.showTrimToast ("Pad " + juce::String (padIdx + 1) + " is already empty", false);
+        return;
+    }
+
+    const juce::File sampleFile (settings.sampleFilePath);
+    const bool fileOnDisk = sampleFile.existsAsFile();
+
+    // Helper: find the next available auto-name "rec-pattern-NNN.wav" in dir.
+    auto findNextAutoName = [](const juce::File& dir) -> juce::File
+    {
+        for (int n = 1; n <= 999; ++n)
+        {
+            juce::File candidate = dir.getChildFile (
+                "rec-pattern-" + juce::String (n).paddedLeft ('0', 3) + ".wav");
+            if (!candidate.existsAsFile())
+                return candidate;
+        }
+        return {};
+    };
+
+    // Helper: build a safe custom name, avoiding collisions.
+    auto buildCustomName = [](const juce::File& dir, const juce::String& base) -> juce::File
+    {
+        juce::File f = dir.getChildFile (base + "-rec-pattern.wav");
+        if (!f.existsAsFile()) return f;
+        for (int n = 2; n <= 999; ++n)
+        {
+            f = dir.getChildFile (base + "-rec-pattern-" + juce::String (n) + ".wav");
+            if (!f.existsAsFile()) return f;
+        }
+        return {};
+    };
+
+    // ── Dialog 1: Delete / Keep / Cancel ──────────────────────────────────────
+    auto* d1 = new juce::AlertWindow (
+        "Drop Pad: " + sampleFile.getFileName(),
+        "What do you want to do with the sample file?",
+        juce::AlertWindow::QuestionIcon);
+    d1->addButton ("Delete file", 1);
+    d1->addButton ("Keep file",   2);
+    d1->addButton ("Cancel",      0);
+
+    d1->enterModalState (true,
+        juce::ModalCallbackFunction::create (
+            [this, padIdx, sampleFile, fileOnDisk, findNextAutoName, buildCustomName](int r1)
+            {
+                if (r1 == 0)   // Cancel — leave pad unchanged
+                    return;
+
+                if (r1 == 1)   // Delete file from disk, then drop
+                {
+                    if (fileOnDisk)
+                        sampleFile.deleteFile();
+                    executeDropPad (padIdx);
+                    return;
+                }
+
+                // Keep file (r1 == 2) -> ask about renaming
+                const juce::File dir = sampleFile.getParentDirectory();
+
+                // ── Dialog 2: Rename? ────────────────────────────────────────
+                auto* d2 = new juce::AlertWindow (
+                    "Keep File",
+                    "Do you want to rename the file?\n\n"
+                    "Yes  -> enter a custom name (saved as <name>-rec-pattern.wav)\n"
+                    "No   -> auto-name as rec-pattern-001.wav",
+                    juce::AlertWindow::QuestionIcon);
+                d2->addButton ("Yes - rename",   1);
+                d2->addButton ("No - auto-name", 2);
+                d2->addButton ("Cancel",         0);
+
+                d2->enterModalState (true,
+                    juce::ModalCallbackFunction::create (
+                        [this, padIdx, sampleFile, dir, fileOnDisk,
+                         findNextAutoName, buildCustomName](int r2)
+                        {
+                            if (r2 == 0)  // Cancel — abort entirely
+                                return;
+
+                            // Shared helper: after a successful rename, ask reload or drop.
+                            auto askReloadOrDrop = [this, padIdx](const juce::File& dest)
+                            {
+                                auto* d = new juce::AlertWindow (
+                                    "File Renamed",
+                                    "Renamed to: " + dest.getFileName() + "\n\n"
+                                    "Do you want to reload the pad with the renamed file,\n"
+                                    "or drop the pad?",
+                                    juce::AlertWindow::QuestionIcon);
+                                d->addButton ("Reload pad", 1);
+                                d->addButton ("Drop pad",   2);
+                                d->enterModalState (true,
+                                    juce::ModalCallbackFunction::create (
+                                        [this, padIdx, dest](int rd)
+                                        {
+                                            if (rd == 1)
+                                            {
+                                                // Switch to the target pad before loading so the
+                                                // file goes into the correct engine, not the
+                                                // currently selected one.
+                                                if (padIdx != padManager.selectedPadIndex)
+                                                {
+                                                    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+                                                    padManager.selectPad (padIdx);
+                                                    padGrid.selectPadQuiet (padIdx);
+                                                }
+                                                currentFolder = dest.getParentDirectory();
+                                                {
+                                                    juce::ScopedWriteLock wlock (folderLock);
+                                                    folderAudioFiles.clear();
+                                                }
+                                                currentFileIndex = -1;
+                                                loadSampleFileAsync (dest, true, false);
+                                            }
+                                            else
+                                            {
+                                                executeDropPad (padIdx);
+                                            }
+                                        }),
+                                    true);
+                            };
+
+                            if (r2 == 2)  // Auto-name
+                            {
+                                if (fileOnDisk)
+                                {
+                                    juce::File dest = findNextAutoName (dir);
+                                    if (dest != juce::File{} && sampleFile.moveFileTo (dest))
+                                    {
+                                        askReloadOrDrop (dest);
+                                        return;
+                                    }
+                                }
+                                executeDropPad (padIdx);
+                                return;
+                            }
+
+                            // Yes — custom name (r2 == 1)
+                            // ── Dialog 3: Enter name ────────────────────────
+                            auto* d3 = new juce::AlertWindow (
+                                "Rename File",
+                                "Enter a name (file will be saved as <name>-rec-pattern.wav):",
+                                juce::AlertWindow::NoIcon);
+                            d3->addTextEditor ("name",
+                                sampleFile.getFileNameWithoutExtension(), "Name:");
+                            d3->addButton ("OK",     1,
+                                juce::KeyPress (juce::KeyPress::returnKey));
+                            d3->addButton ("Cancel", 0,
+                                juce::KeyPress (juce::KeyPress::escapeKey));
+
+                            d3->enterModalState (true,
+                                juce::ModalCallbackFunction::create (
+                                    [this, padIdx, d3, sampleFile, dir,
+                                     fileOnDisk, findNextAutoName, buildCustomName,
+                                     askReloadOrDrop](int r3)
+                                    {
+                                        juce::String customName;
+                                        if (r3 == 1)
+                                            customName = d3->getTextEditorContents ("name").trim();
+                                        delete d3;
+
+                                        if (r3 == 0)  // Cancel — abort entirely
+                                            return;
+
+                                        if (fileOnDisk)
+                                        {
+                                            juce::File dest;
+                                            if (customName.isNotEmpty())
+                                                dest = buildCustomName (dir, customName);
+                                            else
+                                                dest = findNextAutoName (dir);  // fallback
+
+                                            if (dest != juce::File{} && sampleFile.moveFileTo (dest))
+                                            {
+                                                askReloadOrDrop (dest);
+                                                return;
+                                            }
+                                        }
+                                        executeDropPad (padIdx);
+                                    }),
+                                true);
+                        }),
+                    true);
+            }),
+        true);
 }
 
 //==============================================================================
@@ -3996,6 +4399,92 @@ void MainComponent::freezeChanged(bool isFrozen)
     }
 }
 
+void MainComponent::activateMnFreezeForPad(int padIdx, bool nowActive, float velocity)
+{
+    // Message thread only. Activates or deactivates MNFreeze on an arbitrary pad engine
+    // so freeze loops continue running regardless of which pad is selected in the UI.
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+
+    if (!padManager.hasEngine(padIdx)) return;
+
+    auto& engine = padManager.getEngine(padIdx);
+    auto& mf     = padMnFreeze[padIdx];
+    const bool isSelected = (padIdx == padManager.selectedPadIndex);
+
+    if (nowActive)
+    {
+        // Save pre-freeze state (message thread — no race).
+        mf.preVol  = engine.volumeGain.load();
+        mf.preLoop = padManager.getSettings(padIdx).loopEnabled;
+
+        // Scale volume by velocity × pad knob level.
+        const float knobVol = padManager.getSettings(padIdx).volumeLevel;
+        engine.volumeGain.store(juce::jlimit(0.0f, 1.0f, velocity * knobVol));
+
+        // Enable freeze+loop on all sounds in this engine.
+        for (int i = 0; i < engine.getSynthesiser().getNumSounds(); ++i)
+            if (auto* snd = dynamic_cast<LoopingSamplerSound*>(engine.getSynthesiser().getSound(i).get()))
+            {
+                snd->freezeActive.store(true);
+                snd->loopEnabled.store(true);
+            }
+
+        // Inject phantom noteOn if no voice is currently playing.
+        if (!engine.isAnyVoiceActive() && !engine.samples.isEmpty() && engine.samples[0]->isValid())
+        {
+            const int noteToPlay = mf.note.load(std::memory_order_relaxed);
+            engine.getSynthesiser().noteOn(1, noteToPlay, 0.8f);
+        }
+
+        padGrid.setMidiFreezeLocked(padIdx, true);
+
+        // If the selected pad is the one being frozen, sync the sampleCard UI.
+        if (isSelected)
+        {
+            sampleCard.setLoopButtonStateQuiet(true);
+            sampleCard.setFreezeButtonStateQuiet(true);
+        }
+    }
+    else
+    {
+        // Step 1: Silence audio thread immediately.
+        engine.muteOutput.store(true);
+
+        // Step 2: Clear freezeActive so stopNote() works normally.
+        for (int i = 0; i < engine.getSynthesiser().getNumSounds(); ++i)
+            if (auto* snd = dynamic_cast<LoopingSamplerSound*>(engine.getSynthesiser().getSound(i).get()))
+                snd->freezeActive.store(false);
+
+        // Step 3: Force-stop all voices.
+        engine.forceStopAllVoices();
+
+        // Step 4: Belt-and-suspenders JUCE voice-state reset.
+        engine.getSynthesiser().allNotesOff(0, false);
+
+        // Step 5: Restore loop state that was active before freeze.
+        const bool loopOn = mf.preLoop;
+        engine.loopEnabled.store(loopOn);
+        for (int i = 0; i < engine.getSynthesiser().getNumSounds(); ++i)
+            if (auto* snd = dynamic_cast<LoopingSamplerSound*>(engine.getSynthesiser().getSound(i).get()))
+                snd->loopEnabled.store(loopOn);
+
+        // Step 6: Restore volume.
+        engine.volumeGain.store(mf.preVol);
+
+        // Step 7: Resume audio output.
+        engine.muteOutput.store(false);
+
+        padGrid.setMidiFreezeLocked(padIdx, false);
+
+        // If selected, sync sampleCard UI back to saved loop state.
+        if (isSelected)
+        {
+            sampleCard.setLoopButtonStateQuiet(loopOn);
+            sampleCard.setFreezeButtonStateQuiet(false);
+        }
+    }
+}
+
 void MainComponent::handleMidiLearn(int noteNumber)
 {
     // Runs on the message thread (dispatched via callAsync in handleIncomingMidiMessage).
@@ -4055,6 +4544,7 @@ void MainComponent::saveCurrentSampleState()
     // In-memory only — no disk writes during runtime.
     // State is only written to disk when the user explicitly saves a kit.
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    kitIsDirty = true;
 }
 
 void MainComponent::captureSampleCardToPadSettings(int padIdx)
@@ -4088,6 +4578,7 @@ void MainComponent::captureSampleCardToPadSettings(int padIdx)
     ps.oneShotEnabled = sampleCard.isOneShotEnabled();
     ps.reverseEnabled = sampleCard.isReverseEnabled();
     ps.bounceEnabled  = sampleCard.isBounceEnabled();
+    ps.mnFreezeEnabled = sampleCard.isMnFreezeEnabled();
 
     // Volume + normalize
     ps.volumeLevel  = sampleCard.getVolume();

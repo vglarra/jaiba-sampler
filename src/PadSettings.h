@@ -54,6 +54,7 @@ struct PadSettings
     bool oneShotEnabled = false;
     bool reverseEnabled = false;
     bool bounceEnabled  = false;
+    bool mnFreezeEnabled = false;  // MIDI Note Freeze: incoming note toggles freeze+loop
 
     //==========================================================================
     // Volume / normalize
@@ -158,6 +159,7 @@ struct PadSettings
         oneShotEnabled = false;
         reverseEnabled = false;
         bounceEnabled  = false;
+        mnFreezeEnabled = false;
 
         volumeLevel  = 1.0f;
         normEnabled  = false;
@@ -183,9 +185,9 @@ struct PadSettings
         gridSnapEnabled     = false;
         gridResolutionIndex = 5;
 
-        midiNote    = 60;
-        midiChannel = 1;
-        midiDevice.clear();
+        // MIDI routing (midiNote, midiChannel, midiDevice) intentionally NOT reset here.
+        // Drop Pad clears sample data but keeps the pad's MIDI assignment so the user
+        // doesn't have to re-configure it after loading a new sample.
 
         zoomLevel          = 1.0;
         zoomScrollPosition = 0.0f;
@@ -210,6 +212,7 @@ struct PadSettings
         el.setAttribute ("oneShot",     oneShotEnabled ? 1 : 0);
         el.setAttribute ("reverse",     reverseEnabled ? 1 : 0);
         el.setAttribute ("bounce",      bounceEnabled  ? 1 : 0);
+        el.setAttribute ("mnFreeze",    mnFreezeEnabled ? 1 : 0);
         el.setAttribute ("vol",         (double)volumeLevel);
         el.setAttribute ("normEn",      normEnabled  ? 1 : 0);
         el.setAttribute ("normTarget",  (double)normTargetDb);
@@ -267,6 +270,7 @@ struct PadSettings
         oneShotEnabled   = el.getIntAttribute    ("oneShot",     0) != 0;
         reverseEnabled   = el.getIntAttribute    ("reverse",     0) != 0;
         bounceEnabled    = el.getIntAttribute    ("bounce",      0) != 0;
+        mnFreezeEnabled  = el.getIntAttribute    ("mnFreeze",    0) != 0;
         volumeLevel      = (float)el.getDoubleAttribute ("vol",        1.0);
         normEnabled      = el.getIntAttribute    ("normEn",      0) != 0;
         normTargetDb     = (float)el.getDoubleAttribute ("normTarget", -6.0);
@@ -335,6 +339,7 @@ struct PadSettings
         props->setValue(p + "oneShot",       oneShotEnabled);
         props->setValue(p + "reverse",       reverseEnabled);
         props->setValue(p + "bounce",        bounceEnabled);
+        props->setValue(p + "mnFreeze",      mnFreezeEnabled);
 
         props->setValue(p + "vol",           (double)volumeLevel);
         props->setValue(p + "normEn",        normEnabled);
@@ -401,7 +406,8 @@ struct PadSettings
         loopEnabled    = props->getBoolValue   (p + "loop",        false);
         oneShotEnabled = props->getBoolValue   (p + "oneShot",     false);
         reverseEnabled = props->getBoolValue   (p + "reverse",     false);
-        bounceEnabled  = props->getBoolValue   (p + "bounce",      false);
+        bounceEnabled   = props->getBoolValue   (p + "bounce",      false);
+        mnFreezeEnabled = props->getBoolValue   (p + "mnFreeze",    false);
 
         volumeLevel  = (float)props->getDoubleValue(p + "vol",        1.0);
         normEnabled  =        props->getBoolValue  (p + "normEn",     false);

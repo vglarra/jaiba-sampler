@@ -33,6 +33,10 @@ public:
     int   getPadIndex()     const { return padIndex; }
     const juce::String& getSampleName() const { return sampleName; }
 
+    // MNFreeze dot — lights up ice blue when this pad has an active MIDI-Note-Freeze loop.
+    void setMidiFreezeLocked (bool locked) { midiFreezeLocked = locked; repaint(); }
+    bool isMidiFreezeLocked() const        { return midiFreezeLocked; }
+
     std::function<void(int)> onClicked;
 
     // Go fuchsia immediately with no auto-restore timer.
@@ -100,8 +104,10 @@ public:
     {
         // Restore immediately on mouse release — fuchsia lasts exactly the click duration.
         triggerEnd (0);
-        if (cachedPath.contains (e.position) && onReleased)
-            onReleased (padIndex);
+        // Always fire onReleased regardless of cursor position — prevents stuck notes
+        // when the user drags the mouse outside the pad before releasing.
+        if (onReleased) onReleased (padIndex);
+        (void)e;
     }
 
     void paint (juce::Graphics& g) override
@@ -128,10 +134,24 @@ public:
         {
             auto b = getLocalBounds().toFloat();
             auto [cx, cy] = std::make_pair (b.getCentreX(), b.getCentreY());
-            g.setColour (currentState == State::Triggered
-                         ? juce::Colour (0xFFFF0B8F)
-                         : juce::Colour (0xFF888888));
-            g.fillEllipse (cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
+            // Dot color priority: triggered (fuchsia) > MNFreeze active (ice blue) > normal (gray)
+            juce::Colour dotColour;
+            float dotR = 3.0f;
+            if (currentState == State::Triggered)
+            {
+                dotColour = juce::Colour (0xFFFF0B8F);  // fuchsia — MIDI hit
+            }
+            else if (midiFreezeLocked)
+            {
+                dotColour = juce::Colour (0xFF00CFFF);  // ice blue — MNFreeze loop active
+                dotR = 4.5f;  // slightly larger to be clearly visible
+            }
+            else
+            {
+                dotColour = juce::Colour (0xFF888888);  // gray — loaded/selected, idle
+            }
+            g.setColour (dotColour);
+            g.fillEllipse (cx - dotR, cy - dotR, dotR * 2.0f, dotR * 2.0f);
         }
 
                 // Draw pad number on the narrow base (opposite side from filename)
@@ -413,10 +433,11 @@ private:
 
     int          padIndex;
     Direction    direction;
-    State        currentState  = State::Empty;
-    State        preFlashState = State::Empty;
+    State        currentState    = State::Empty;
+    State        preFlashState   = State::Empty;
     juce::String sampleName;
-    bool         isHovered     = false;
+    bool         isHovered       = false;
+    bool         midiFreezeLocked = false;  // ice-blue dot when MNFreeze loop is active
 
     juce::Path cachedPath;
 };
@@ -435,7 +456,8 @@ public:
             auto dir    = isDown ? TrianglePad::Direction::Down
                                  : TrianglePad::Direction::Up;
             auto p = std::make_unique<TrianglePad> (startPadIndex + i, dir);
-            p->onClicked = [this] (int idx) { if (onPadClicked) onPadClicked (idx); };
+            p->onClicked  = [this] (int idx) { if (onPadClicked)  onPadClicked  (idx); };
+            p->onReleased = [this] (int idx) { if (onPadReleased) onPadReleased (idx); };
             addAndMakeVisible (*p);
             pads.push_back (std::move (p));
         }
@@ -500,8 +522,10 @@ public:
     {
         addAndMakeVisible (topRow);
         addAndMakeVisible (bottomRow);
-        topRow.onPadClicked    = [this] (int idx) { handlePadClicked (idx); };
-        bottomRow.onPadClicked = [this] (int idx) { handlePadClicked (idx); };
+        topRow.onPadClicked     = [this] (int idx) { handlePadClicked  (idx); };
+        bottomRow.onPadClicked  = [this] (int idx) { handlePadClicked  (idx); };
+        topRow.onPadReleased    = [this] (int idx) { handlePadReleased (idx); };
+        bottomRow.onPadReleased = [this] (int idx) { handlePadReleased (idx); };
     }
 
     void setRowHeight (int h) { rowHeight = h; resized(); }
@@ -541,6 +565,19 @@ public:
         if (onPadSelected) onPadSelected (idx);
     }
 
+    // Visual-only pad selection — updates the grid highlight without firing onPadSelected.
+    // Use when the caller is about to manage the pad switch logic itself.
+    void selectPadQuiet (int idx)
+    {
+        if (selectedIndex >= 0 && selectedIndex != idx)
+            if (auto* prev = padAt (selectedIndex))
+                prev->setState (prev->getSampleName().isNotEmpty()
+                                ? TrianglePad::State::Loaded
+                                : TrianglePad::State::Empty);
+        selectedIndex = idx;
+        if (auto* p = padAt (idx)) p->setState (TrianglePad::State::Selected);
+    }
+
     // Start fuchsia with no auto-timer — must be paired with triggerEnd().
     // Used for mouse-down and MIDI note-on.
     void triggerStart (int idx)
@@ -560,10 +597,17 @@ public:
         if (auto* p = padAt (idx)) p->triggerFlash();
     }
 
+    // MNFreeze dot — call with locked=true when freeze loop is active, false when released.
+    void setMidiFreezeLocked (int idx, bool locked)
+    {
+        if (auto* p = padAt (idx)) p->setMidiFreezeLocked (locked);
+    }
+
     int getSelectedPadIndex() const { return selectedIndex; }
 
     std::function<void(int)> onPadSelected;
-    std::function<void(int)> onPadTriggered;
+    std::function<void(int)> onPadTriggered;   // mouseDown on pad — fire noteOn
+    std::function<void(int)> onPadReleased;    // mouseUp  on pad — fire noteOff
 
     void paint (juce::Graphics&) override {}
 
@@ -583,14 +627,26 @@ private:
     {
         DBG ("[PAD-UI] Pad " << idx + 1 << " clicked");
 
-        // Select first so preFlashState captures Selected, not Empty/Loaded
         if (selectedIndex != idx)
+        {
+            // First click: select the pad (turns purple).
+            // No fuchsia flash — the purple selection IS the visual feedback.
             selectPad (idx);
+        }
+        else
+        {
+            // Re-click on already-selected pad: show fuchsia for the duration of the press.
+            triggerStart (idx);
+        }
 
-        // Light up fuchsia on press — triggerEnd() fires on mouseUp.
-        triggerStart (idx);
-
+        // noteOn for both cases — duration is determined by the matching mouseUp.
         if (onPadTriggered) onPadTriggered (idx);
+    }
+
+    void handlePadReleased (int idx)
+    {
+        // noteOff — ends the note started in handlePadClicked.
+        if (onPadReleased) onPadReleased (idx);
     }
 };
 

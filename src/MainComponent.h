@@ -215,6 +215,8 @@ private:
     bool hasAnySamplesLoaded() const;
     void showSettingsMenu();
     void showKitMenu();
+    void newKitAction();
+    void clearAllPadsForNewKit();
     void saveKitToFile   (const juce::File& file);
     void loadKitFromFile (const juce::File& file);
     void navigateKit     (int direction);   // -1 = prev, +1 = next .jai in same folder
@@ -242,6 +244,7 @@ private:
     void oneShotEnabledChanged(bool enabled) override;
     void reverseEnabledChanged(bool enabled) override;
     void bounceEnabledChanged(bool enabled) override;
+    void mnFreezeEnabledChanged(bool enabled) override;
     void pitchStepCentsChanged(int cents) override;
     void adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs) override;
     void activeTabChanged(int tabIndex) override;
@@ -262,6 +265,7 @@ private:
     void loadPattern() override;
     void clearPattern() override;
     void dropTargetPad(int padIndex) override;
+    void executeDropPad(int padIdx);  // runs the actual drop after file-disposition dialogs
 
     //==============================================================================
     // MIDI Learn handling
@@ -361,6 +365,7 @@ private:
     //==============================================================================
     // Kit navigation
     juce::File currentKitFile;   // last successfully loaded/saved .jai file; empty if none
+    bool kitIsDirty = false;     // true when pads changed since last save/load/new-kit
 
     //==============================================================================
     // Folder navigation
@@ -458,6 +463,26 @@ private:
     bool isOneShotTailPlaying = false;
 
     void checkOneShotTailDone();
+
+    //==============================================================================
+    // MNFreeze — MIDI Note Freeze: per-pad tracking so any pad's freeze keeps
+    // working independently of which pad is currently selected in the UI.
+    // Atomics are written on the MIDI callback thread; non-atomic fields are
+    // message-thread-only.
+    struct PadMnFreezeState
+    {
+        std::atomic<bool> enabled  { false };  // MNFreeze button is ON for this pad
+        std::atomic<bool> isActive { false };  // freeze is currently engaged on this pad
+        std::atomic<int>  note     { 60 };     // MIDI note this pad listens to
+        std::atomic<int>  ch       { 1 };      // MIDI channel (0 = any)
+        float             preVol   = 1.0f;     // volumeGain before freeze (message thread)
+        bool              preLoop  = false;    // loop state before freeze (message thread)
+    };
+    PadMnFreezeState padMnFreeze[16];
+
+    // Applies or removes MNFreeze for an arbitrary pad engine.
+    // Must be called on the message thread.
+    void activateMnFreezeForPad (int padIdx, bool nowActive, float velocity);
 
     //==============================================================================
     // Opt 3 — deferred transient detection: runs once after 800ms of navigation idle

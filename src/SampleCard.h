@@ -1052,6 +1052,21 @@ public:
         };
         addAndMakeVisible(bounceButton);
 
+        // MNFreeze (MIDI Note Freeze) — toggle: incoming MIDI note toggles freeze+loop on/off.
+        // Velocity of the triggering note scales the loop volume.
+        mnFreezeButton.setClickingTogglesState(true);
+        mnFreezeButton.setToggleState(false, juce::dontSendNotification);
+        mnFreezeButton.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF4A4A4A));
+        mnFreezeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFF00CFFF)); // ice blue — matches freeze active dot
+        mnFreezeButton.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCECECE));
+        mnFreezeButton.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xFF111111));
+        mnFreezeButton.setTooltip("MIDI Note Freeze: next incoming MIDI note toggles this pad's freeze loop on/off. Note velocity sets loop volume.");
+        mnFreezeButton.onClick = [this] {
+            mnFreezeEnabled = mnFreezeButton.getToggleState();
+            listeners.call([this](Listener& l) { l.mnFreezeEnabledChanged(mnFreezeEnabled); });
+        };
+        addAndMakeVisible(mnFreezeButton);
+
         // Trim button — orange-red to indicate a new-file-creating (irreversible) action
         trimButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFFE84A1A));
         trimButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
@@ -1837,6 +1852,12 @@ public:
             auto col = row1.removeFromLeft(62);
             bounceButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
         }
+        {
+            // MNFreeze (MIDI Note Freeze) button — right of Bnc
+            // Slightly wider column so "MNFreeze" text fits without truncation.
+            auto col = row1.removeFromLeft(76);
+            mnFreezeButton.setBounds(col.withSizeKeepingCentre(72, kBtnH));
+        }
 
         // 4px gap between rows (matches tab-bar gap)
         tabContentArea.removeFromTop(4);
@@ -2121,6 +2142,15 @@ public:
         bounceButton.setToggleState(false, juce::dontSendNotification);
     }
 
+    bool isMnFreezeEnabled() const { return mnFreezeEnabled; }
+
+    // Quietly restore MNFreeze state — does NOT fire listener.
+    void setMnFreezeEnabled(bool enabled)
+    {
+        mnFreezeEnabled = enabled;
+        mnFreezeButton.setToggleState(enabled, juce::dontSendNotification);
+    }
+
     // Called by MainComponent when a note-off arrives while oneshot is active (tail started),
     // or when all voices have finished (tail ended).  Pulses the button during the tail.
     void setOneShotTailActive(bool active)
@@ -2210,6 +2240,21 @@ public:
     }
 
     bool isFreezeEnabled() const { return isFreezeActive; }
+
+    // Quiet UI-only setters used by activateMnFreezeForPad() when the selected pad's
+    // visual state needs to match an externally-driven MNFreeze toggle.
+    // Do NOT fire listeners — the audio change was already made atomically.
+    void setLoopButtonStateQuiet(bool on)
+    {
+        loopButton.setToggleState(on, juce::dontSendNotification);
+        if (waveformComponent != nullptr)
+            waveformComponent->setLoopHighlight(on);
+    }
+    void setFreezeButtonStateQuiet(bool on)
+    {
+        isFreezeActive = on;
+        applyFreezeButtonStyle(on);
+    }
 
     // Called by MainComponent when a new sample is loaded.
     // Always resets freeze (it never persists). Fires freezeChanged(false) only if was active.
@@ -2311,6 +2356,7 @@ public:
         setOneShotEnabled (s.oneShotEnabled);
         setReverseEnabled (s.reverseEnabled);
         setBounceEnabled  (s.bounceEnabled);
+        setMnFreezeEnabled(s.mnFreezeEnabled);
 
         // Volume
         setVolume (s.volumeLevel);
@@ -2642,6 +2688,7 @@ public:
         virtual void oneShotEnabledChanged(bool enabled) = 0;
         virtual void reverseEnabledChanged(bool enabled) = 0;
         virtual void bounceEnabledChanged(bool enabled) = 0;
+        virtual void mnFreezeEnabledChanged(bool enabled) = 0;
         virtual void pitchStepCentsChanged(int cents) = 0;
         virtual void adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs) = 0;
         virtual void activeTabChanged(int tabIndex) = 0;
@@ -4297,6 +4344,8 @@ void adjustPitchUp()
     bool reverseEnabledState = false;
     juce::TextButton bounceButton { "Bnc" };
     bool bounceEnabledState = false;
+    juce::TextButton mnFreezeButton { "MNFreeze" };
+    bool mnFreezeEnabled = false;
     OneShotPulseTimer oneShotPulseTimer { *this };
     int  oneShotPulsePhase = 0;
     juce::TextButton gridSnapButton { "Grid" };
@@ -5227,7 +5276,7 @@ private:
         for (auto* c : std::initializer_list<juce::Component*>{
             &pitchDownButton, &pitchLabel, &pitchUpButton,
             &pitchStepButton, &pitchStepLabel,
-            &tuneButton, &freezeButton, &loopButton, &oneShotButton, &reverseButton, &bounceButton,
+            &tuneButton, &freezeButton, &loopButton, &oneShotButton, &reverseButton, &bounceButton, &mnFreezeButton,
             &gridSnapButton, &gridResolutionButton,
             &detectionToggleButton,
             &prevTransientButton, &nextTransientButton,
