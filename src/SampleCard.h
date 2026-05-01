@@ -5193,6 +5193,22 @@ public:
             waveformComponent->setRecordingOverlay(recording);
         if (recContent != nullptr)
             recContent->setRecordingActive(recording, targetPadIndex);
+
+        if (recording)
+        {
+            // Hide the "No sample loaded" label — it sits on top of the waveform
+            // component and would cover the red recording overlay.
+            emptyStateLabel.setVisible(false);
+            // Ensure the Rec tab is shown so the recording panel and overlay are visible.
+            // Use quiet variant — no need to persist this automatic switch.
+            if (activeTab != 3)
+                setActiveTabQuiet(3);
+        }
+        else if (isEmptyPad)
+        {
+            // Restore the empty-state label when recording stops on a still-empty pad.
+            emptyStateLabel.setVisible(true);
+        }
     }
 
     // Update the Rec tab status label from outside (e.g. after save/load/clear).

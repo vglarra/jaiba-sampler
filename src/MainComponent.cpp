@@ -1710,8 +1710,8 @@ void MainComponent::showKitMenu()
     menu.addItem (1, "Save Bank Kit...");
     menu.addItem (2, "Load Bank Kit...");
     menu.addSeparator();
-    menu.addItem (3, "Save Global Map  (coming soon)", false);
-    menu.addItem (4, "Load Global Map  (coming soon)", false);
+    menu.addItem (3, "Save Global Jaiva Map  (GJM)  (coming soon)", false);
+    menu.addItem (4, "Load Global Jaiva Map  (GJM)  (coming soon)", false);
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&kitButton),
         [this] (int result)
@@ -1781,6 +1781,10 @@ void MainComponent::showKitMenu()
 
 void MainComponent::saveKitToFile (const juce::File& file)
 {
+    // Flush current SampleCard state so norm/EQ/gain changes made since the
+    // last change-event (especially deferred async norm scans) are captured.
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
     auto root = std::make_unique<juce::XmlElement> ("JaivaKit");
     root->setAttribute ("version",     1);
     root->setAttribute ("appVersion",  "1.0.0");
@@ -3320,6 +3324,8 @@ void MainComponent::performTrimAsync()
     snap.transientThreshold        = (float)sampleCard.getTransientThreshold();
     snap.gridSnapEnabled           = sampleCard.isGridSnapEnabled();
     snap.gridResolutionIndex       = sampleCard.getGridResolutionIndex();
+    snap.midiNote                  = sampleCard.getMidiNote();
+    snap.midiChannel               = sampleCard.getMidiChannel();
 
 
     // ── Step 1b: capture sample data under lock ─────────────────────────────
@@ -3532,6 +3538,25 @@ void MainComponent::performTrimAsync()
 
 void MainComponent::beginRecording (double bpm, double quantInBeats,
                                     bool metronomeOn, int targetPadIndex, bool overdub)
+{
+    // If the target pad already has a sample, go through the same drop-pad dialog
+    // flow before starting the recording.  The user can delete, rename, or keep the
+    // existing file; recording starts only if the pad is actually dropped.
+    if (!padManager.getSettings (targetPadIndex).sampleFilePath.isEmpty())
+    {
+        dropTargetPadWithCallback (targetPadIndex,
+            [this, bpm, quantInBeats, metronomeOn, targetPadIndex, overdub]()
+            {
+                proceedWithRecording (bpm, quantInBeats, metronomeOn, targetPadIndex, overdub);
+            });
+        return;
+    }
+
+    proceedWithRecording (bpm, quantInBeats, metronomeOn, targetPadIndex, overdub);
+}
+
+void MainComponent::proceedWithRecording (double bpm, double quantInBeats,
+                                          bool metronomeOn, int targetPadIndex, bool overdub)
 {
     printf ("[REC] beginRecording  bpm=%.1f  quant=%.4f  metro=%d  target=Pad%d\n",
             bpm, quantInBeats, (int)metronomeOn, targetPadIndex + 1);
@@ -3892,7 +3917,18 @@ void MainComponent::finalizeLiveRender()
             {
                 captureSampleCardToPadSettings (padManager.selectedPadIndex);
                 saveOutgoingSampleState();
+
+                // Switch engine and visual grid selection to the target pad.
                 padManager.selectPad (targetPad);
+                padGrid.selectPadQuiet (targetPad);   // turn target pad purple in grid
+
+                // Reset folder navigation so Prev/Next browses the recorded file's folder.
+                currentFolder = finalFile.getParentDirectory();
+                {
+                    juce::ScopedWriteLock wlock (folderLock);
+                    folderAudioFiles.clear();
+                }
+                currentFileIndex = -1;
 
                 sampleCard.restoreZoomAndScroll (1.0, 0.0f);
                 loadSampleFileAsync (finalFile, /*autoPlay=*/true, /*resetZoom=*/true,
@@ -4016,7 +4052,7 @@ void MainComponent::executeDropPad(int padIdx)
     fflush (stdout);
 }
 
-void MainComponent::dropTargetPad(int padIndex)
+void MainComponent::dropTargetPadWithCallback (int padIndex, std::function<void()> onDropComplete)
 {
     // Stop any active recording first.
     if (recIsActive.load (std::memory_order_relaxed))
@@ -4075,7 +4111,8 @@ void MainComponent::dropTargetPad(int padIndex)
 
     d1->enterModalState (true,
         juce::ModalCallbackFunction::create (
-            [this, padIdx, sampleFile, fileOnDisk, findNextAutoName, buildCustomName](int r1)
+            [this, padIdx, sampleFile, fileOnDisk, findNextAutoName, buildCustomName,
+             onDropComplete](int r1)
             {
                 if (r1 == 0)   // Cancel — leave pad unchanged
                     return;
@@ -4085,6 +4122,7 @@ void MainComponent::dropTargetPad(int padIndex)
                     if (fileOnDisk)
                         sampleFile.deleteFile();
                     executeDropPad (padIdx);
+                    if (onDropComplete) onDropComplete();
                     return;
                 }
 
@@ -4105,31 +4143,37 @@ void MainComponent::dropTargetPad(int padIndex)
                 d2->enterModalState (true,
                     juce::ModalCallbackFunction::create (
                         [this, padIdx, sampleFile, dir, fileOnDisk,
-                         findNextAutoName, buildCustomName](int r2)
+                         findNextAutoName, buildCustomName, onDropComplete](int r2)
                         {
                             if (r2 == 0)  // Cancel — abort entirely
                                 return;
 
-                            // Shared helper: after a successful rename, ask reload or drop.
-                            auto askReloadOrDrop = [this, padIdx](const juce::File& dest)
+                            // After a successful rename: offer reload (normal context) or just
+                            // drop (recording context — no "Reload pad" option offered).
+                            auto askReloadOrDrop = [this, padIdx, onDropComplete](const juce::File& dest)
                             {
+                                const bool recordingCtx = (bool)onDropComplete;
                                 auto* d = new juce::AlertWindow (
                                     "File Renamed",
                                     "Renamed to: " + dest.getFileName() + "\n\n"
-                                    "Do you want to reload the pad with the renamed file,\n"
-                                    "or drop the pad?",
+                                    + (recordingCtx
+                                       ? "Drop the pad and start recording?"
+                                       : "Do you want to reload the pad with the renamed file,\n"
+                                         "or drop the pad?"),
                                     juce::AlertWindow::QuestionIcon);
-                                d->addButton ("Reload pad", 1);
-                                d->addButton ("Drop pad",   2);
+                                if (!recordingCtx)
+                                    d->addButton ("Reload pad", 1);
+                                d->addButton (recordingCtx ? "Drop and record" : "Drop pad", 2);
+                                d->addButton ("Cancel", 0);
                                 d->enterModalState (true,
                                     juce::ModalCallbackFunction::create (
-                                        [this, padIdx, dest](int rd)
+                                        [this, padIdx, dest, onDropComplete](int rd)
                                         {
-                                            if (rd == 1)
+                                            if (rd == 0)  // Cancel
+                                                return;
+
+                                            if (rd == 1)  // Reload pad (normal context only)
                                             {
-                                                // Switch to the target pad before loading so the
-                                                // file goes into the correct engine, not the
-                                                // currently selected one.
                                                 if (padIdx != padManager.selectedPadIndex)
                                                 {
                                                     captureSampleCardToPadSettings (padManager.selectedPadIndex);
@@ -4144,9 +4188,10 @@ void MainComponent::dropTargetPad(int padIndex)
                                                 currentFileIndex = -1;
                                                 loadSampleFileAsync (dest, true, false);
                                             }
-                                            else
+                                            else  // Drop pad (+ fire recording callback if set)
                                             {
                                                 executeDropPad (padIdx);
+                                                if (onDropComplete) onDropComplete();
                                             }
                                         }),
                                     true);
@@ -4164,6 +4209,7 @@ void MainComponent::dropTargetPad(int padIndex)
                                     }
                                 }
                                 executeDropPad (padIdx);
+                                if (onDropComplete) onDropComplete();
                                 return;
                             }
 
@@ -4184,7 +4230,7 @@ void MainComponent::dropTargetPad(int padIndex)
                                 juce::ModalCallbackFunction::create (
                                     [this, padIdx, d3, sampleFile, dir,
                                      fileOnDisk, findNextAutoName, buildCustomName,
-                                     askReloadOrDrop](int r3)
+                                     askReloadOrDrop, onDropComplete](int r3)
                                     {
                                         juce::String customName;
                                         if (r3 == 1)
@@ -4209,12 +4255,18 @@ void MainComponent::dropTargetPad(int padIndex)
                                             }
                                         }
                                         executeDropPad (padIdx);
+                                        if (onDropComplete) onDropComplete();
                                     }),
                                 true);
                         }),
                     true);
             }),
         true);
+}
+
+void MainComponent::dropTargetPad (int padIndex)
+{
+    dropTargetPadWithCallback (padIndex, {});
 }
 
 //==============================================================================

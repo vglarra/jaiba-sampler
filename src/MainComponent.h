@@ -257,6 +257,8 @@ private:
     void padGainChanged(float gain) override;
     void beginRecording(double bpm, double quantInBeats,
                         bool metronomeOn, int targetPadIndex, bool overdub) override;
+    void proceedWithRecording(double bpm, double quantInBeats,
+                              bool metronomeOn, int targetPadIndex, bool overdub);
     void endRecording() override;
     void playbackQuantisedEvents() override;
     void metronomeStandaloneChanged (bool on, double bpm) override;
@@ -265,6 +267,7 @@ private:
     void loadPattern() override;
     void clearPattern() override;
     void dropTargetPad(int padIndex) override;
+    void dropTargetPadWithCallback(int padIndex, std::function<void()> onDropComplete);
     void executeDropPad(int padIdx);  // runs the actual drop after file-disposition dialogs
 
     //==============================================================================
