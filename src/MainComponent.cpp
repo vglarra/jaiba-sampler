@@ -223,6 +223,23 @@ MainComponent::MainComponent()
     kitPrevButton.onClick = [this] { navigateKit (-1); };
     kitNextButton.onClick = [this] { navigateKit (+1); };
 
+    // GJM status label — right side of the GlobalControlsBar row
+    gjmStatusLabel.setFont (juce::Font (11.0f, juce::Font::bold));
+    gjmStatusLabel.setJustificationType (juce::Justification::centredLeft);
+    gjmStatusLabel.setColour (juce::Label::backgroundColourId, juce::Colour (0xFF101820));
+    gjmStatusLabel.setColour (juce::Label::textColourId,       juce::Colour (0xFF3A5A7A));
+    gjmStatusLabel.setText ("New Session", juce::dontSendNotification);
+    gjmStatusLabel.setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (gjmStatusLabel);
+
+    // Wire GlobalControlsBar bank Up/Down to GJM bank switching (always active)
+    globalControlsBar.setMaxBank (GjmManager::kNumBanks);
+    globalControlsBar.onBankChanged = [this] (int bank1Based)
+    {
+        if (!gjmParsing.load())
+            switchGjmBank (bank1Based - 1);
+    };
+
     // Reset / Panic button — dark red, signals STOP/DANGER
     resetButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF8B0000));
     resetButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
@@ -652,6 +669,8 @@ void MainComponent::paint(juce::Graphics& g)
     g.drawRect(kitButton.getBounds(), 1);
     g.drawRect(kitPrevButton.getBounds(), 1);
     g.drawRect(kitNextButton.getBounds(), 1);
+    if (gjmStatusLabel.isVisible() && gjmStatusLabel.getWidth() > 0)
+        g.drawRect(gjmStatusLabel.getBounds(), 1);
     g.drawRect(resetButton.getBounds(), 1);
     g.drawRect(baseTuningLabel.getBounds(), 1);
     g.drawRect(testToneButton.getBounds(), 1);
@@ -752,6 +771,12 @@ void MainComponent::resized()
         kitPrevButton.setBounds  (kitArea.removeFromLeft (kNavBtnW).withSizeKeepingCentre (kNavBtnW, 20));
         kitArea.removeFromLeft (2);
         kitNextButton.setBounds  (kitArea.removeFromLeft (kNavBtnW).withSizeKeepingCentre (kNavBtnW, 20));
+
+        // GJM status label — fills whatever space remains to the right of kit controls
+        kitArea.removeFromLeft (10);
+        if (kitArea.getWidth() > 30)
+            gjmStatusLabel.setBounds (kitArea.withSizeKeepingCentre (
+                juce::jmin (220, kitArea.getWidth()), 20));
     }
 
     // =========================================================
@@ -1703,79 +1728,25 @@ void MainComponent::updateSamplerSounds()
 void MainComponent::showKitMenu()
 {
     juce::PopupMenu menu;
-
-    menu.addItem (5, "New Kit");
+    menu.addSectionHeader ("Session");
+    menu.addItem (5, "New Session");
+    menu.addItem (3, gjmManager.isUntitled ? "Save Session..." : "Save Session");
+    menu.addItem (6, "Save Session As...");
+    menu.addItem (4, "Load Session...");
     menu.addSeparator();
-    menu.addSectionHeader ("Bank Kit");
+    menu.addSectionHeader ("Current Bank Kit");
     menu.addItem (1, "Save Bank Kit...");
     menu.addItem (2, "Load Bank Kit...");
-    menu.addSeparator();
-    menu.addItem (3, "Save Global Jaiva Map  (GJM)  (coming soon)", false);
-    menu.addItem (4, "Load Global Jaiva Map  (GJM)  (coming soon)", false);
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&kitButton),
         [this] (int result)
         {
-            if (result == 5)
-            {
-                newKitAction();
-            }
-            else if (result == 1)
-            {
-                // --- Save Bank Kit ---
-                // Capture current pad before opening dialog.
-                captureSampleCardToPadSettings (padManager.selectedPadIndex);
-
-                const juce::String savedFolder = configManager->getLastKitFolder();
-                const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
-                                                ? juce::File(savedFolder)
-                                                : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-
-                kitFileChooser = std::make_unique<juce::FileChooser> (
-                    "Save Bank Kit",
-                    startDir,
-                    "*.jai");
-
-                kitFileChooser->launchAsync (
-                    juce::FileBrowserComponent::saveMode |
-                    juce::FileBrowserComponent::canSelectFiles,
-                    [this] (const juce::FileChooser& fc)
-                    {
-                        auto chosen = fc.getResult();
-                        if (chosen == juce::File{}) return;  // user cancelled
-
-                        // Ensure .jai extension
-                        if (chosen.getFileExtension().toLowerCase() != ".jai")
-                            chosen = chosen.withFileExtension ("jai");
-
-                        configManager->saveLastKitFolder(chosen.getParentDirectory().getFullPathName());
-                        saveKitToFile (chosen);
-                    });
-            }
-            else if (result == 2)
-            {
-                // --- Load Bank Kit ---
-                const juce::String savedFolder = configManager->getLastKitFolder();
-                const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
-                                                ? juce::File(savedFolder)
-                                                : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-
-                kitFileChooser = std::make_unique<juce::FileChooser> (
-                    "Load Bank Kit",
-                    startDir,
-                    "*.jai");
-
-                kitFileChooser->launchAsync (
-                    juce::FileBrowserComponent::openMode |
-                    juce::FileBrowserComponent::canSelectFiles,
-                    [this] (const juce::FileChooser& fc)
-                    {
-                        auto chosen = fc.getResult();
-                        if (chosen == juce::File{} || !chosen.existsAsFile()) return;
-                        configManager->saveLastKitFolder(chosen.getParentDirectory().getFullPathName());
-                        loadKitFromFile (chosen);
-                    });
-            }
+            if      (result == 5) newKitAction();
+            else if (result == 3) saveSessionAction (false);
+            else if (result == 6) saveSessionAction (true);
+            else if (result == 4) loadSessionAction();
+            else if (result == 1) saveBankKitAction();
+            else if (result == 2) loadBankKitAction();
         });
 }
 
@@ -1878,7 +1849,7 @@ void MainComponent::loadKitFromFile (const juce::File& file)
             currentFileIndex = -1;
 
             sampleCard.restoreZoomAndScroll (1.0, 0.0f);
-            loadSampleFileAsync (f, true, true, false, padSettingsToSnapshot (curPs));
+            loadSampleFileAsync (f, /*autoPlay=*/false, true, false, padSettingsToSnapshot (curPs));
         }
         else
         {
@@ -1905,9 +1876,17 @@ void MainComponent::loadKitFromFile (const juce::File& file)
 
     currentKitFile = file;
     kitIsDirty = false;
-    kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
-    kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
-    kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
+
+    // Sync the loaded kit into the active GJM bank slot
+    {
+        auto& activeB = gjmManager.banks[gjmManager.activeBank];
+        activeB.kitFilePath = file.getFullPathName();
+        activeB.displayName = file.getFileNameWithoutExtension();
+        for (int i = 0; i < PadManager::kMaxPads; ++i)
+            activeB.pads[i] = padManager.padSettings[i];
+        activeB.isReady = true;
+    }
+
     sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
 }
 
@@ -1915,60 +1894,38 @@ void MainComponent::newKitAction()
 {
     captureSampleCardToPadSettings (padManager.selectedPadIndex);
 
-    if (!kitIsDirty)
+    if (!gjmManager.isDirty && !kitIsDirty)
     {
         clearAllPadsForNewKit();
         return;
     }
 
-    auto* d = new juce::AlertWindow (
-        "New Kit",
-        "The current kit has unsaved changes.\n"
-        "Do you want to save before starting a new kit?",
-        juce::AlertWindow::QuestionIcon);
-    d->addButton ("Save",        1);
-    d->addButton ("Don't Save",  2);
-    d->addButton ("Cancel",      0);
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::AlertWindow::QuestionIcon)
+            .withTitle ("New Session")
+            .withMessage ("You have unsaved changes.\n"
+                          "Save the session before starting a new one?")
+            .withButton ("Save Session")
+            .withButton ("Don't Save")
+            .withButton ("Cancel"),
+        [this] (int r)
+        {
+            if (r == 0 || r == 3)  // Cancel or dismissed
+                return;
 
-    d->enterModalState (true,
-        juce::ModalCallbackFunction::create (
-            [this] (int r)
+            if (r == 2)  // Don't Save — clear immediately
             {
-                if (r == 0)  // Cancel — do nothing
-                    return;
+                clearAllPadsForNewKit();
+                return;
+            }
 
-                if (r == 2)  // Don't save — clear immediately
-                {
-                    clearAllPadsForNewKit();
-                    return;
-                }
-
-                // Save first, then clear after the file dialog closes.
-                const juce::String savedFolder = configManager->getLastKitFolder();
-                const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
-                                                ? juce::File(savedFolder)
-                                                : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
-
-                kitFileChooser = std::make_unique<juce::FileChooser> (
-                    "Save Bank Kit", startDir, "*.jai");
-
-                kitFileChooser->launchAsync (
-                    juce::FileBrowserComponent::saveMode |
-                    juce::FileBrowserComponent::canSelectFiles,
-                    [this] (const juce::FileChooser& fc)
-                    {
-                        auto chosen = fc.getResult();
-                        if (chosen == juce::File{}) return;  // user cancelled save dialog — abort new kit
-
-                        if (chosen.getFileExtension().toLowerCase() != ".jai")
-                            chosen = chosen.withFileExtension ("jai");
-
-                        configManager->saveLastKitFolder (chosen.getParentDirectory().getFullPathName());
-                        saveKitToFile (chosen);
-                        clearAllPadsForNewKit();
-                    });
-            }),
-        true);
+            // r == 1 — Save first, then clear
+            saveSessionAction (false);
+            // clearAllPadsForNewKit() is NOT called here because saveSessionAction
+            // opens an async file dialog; the user flow is: save completes → user
+            // manually clicks New Session again if they still want to clear.
+        });
 }
 
 void MainComponent::clearAllPadsForNewKit()
@@ -2014,14 +1971,13 @@ void MainComponent::clearAllPadsForNewKit()
         padMnFreeze[i].enabled .store (false, std::memory_order_relaxed);
     }
 
-    // Reset kit identity.
+    // Reset session identity — start fresh untitled session
     currentKitFile = juce::File{};
     kitIsDirty = false;
-    kitNameLabel.setText ("New Kit", juce::dontSendNotification);
-    kitNameLabel.setColour (juce::Label::backgroundColourId, juce::Colour (0xFF222222));
-    kitNameLabel.setColour (juce::Label::textColourId,       juce::Colour (0xFF888888));
+    gjmManager.reset();
+    updateGjmUI();
 
-    sampleCard.showTrimToast ("New kit started", false);
+    sampleCard.showTrimToast ("New session started", false);
     printf ("[KIT] All pads cleared — new kit ready\n");
     fflush (stdout);
 }
@@ -2052,6 +2008,388 @@ void MainComponent::navigateKit (int direction)
 
     configManager->saveLastKitFolder (folder.getFullPathName());
     loadKitFromFile (kits[next]);
+}
+
+//==============================================================================
+// GJM — Global Jaiva Map implementation
+//==============================================================================
+
+void MainComponent::loadGjmFromFile (const juce::File& file)
+{
+    if (!gjmManager.loadManifest (file))
+    {
+        sampleCard.showTrimToast ("Invalid .gjm file", true);
+        return;
+    }
+    // loadManifest() sets isUntitled=false, isDirty=false, isLoaded=true
+
+    // Disable bank nav while the background parse job runs
+    globalControlsBar.setMaxBank (GjmManager::kNumBanks);
+    globalControlsBar.setBankIndex (1);
+    globalControlsBar.setNavEnabled (false);
+    gjmParsing.store (true);
+
+    gjmStatusLabel.setText ("Loading session...", juce::dontSendNotification);
+    gjmStatusLabel.setColour (juce::Label::backgroundColourId, juce::Colour (0xFF1A1A00));
+    gjmStatusLabel.setColour (juce::Label::textColourId,       juce::Colour (0xFFCCCC00));
+
+    // Parse all 16 bank kit files in a single background job (sequential XML reads, ~20-80ms total).
+    // When done, callAsync fires finishGjmLoad() on the message thread.
+    backgroundThreads.addJob ([this]()
+    {
+        gjmManager.parseAllBanks();   // thread-safe: only this job writes to banks[].pads
+        juce::MessageManager::callAsync ([this]() { finishGjmLoad(); });
+    });
+}
+
+void MainComponent::finishGjmLoad()
+{
+    gjmParsing.store (false);
+    globalControlsBar.setNavEnabled (true);
+
+    // activeBank is already 0 from loadManifest() — do NOT set it here.
+    // Setting it before switchGjmBank(0) would make activeBank == bankIdx inside
+    // switchGjmBank, causing the outgoing-save guard to fire and overwrite bank 0's
+    // freshly-parsed data with the empty startup padSettings.
+    switchGjmBank (0);
+
+    const int n = gjmManager.numBanksWithFiles();
+    sampleCard.showTrimToast ("GJM loaded: " + gjmManager.gjmFile.getFileNameWithoutExtension()
+                              + "  (" + juce::String (n) + " banks)", false);
+}
+
+void MainComponent::saveGjmToFile (const juce::File& file)
+{
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+    // Flush active bank's in-memory pads into gjmManager before writing
+    {
+        auto& activeB = gjmManager.banks[gjmManager.activeBank];
+        for (int i = 0; i < PadManager::kMaxPads; ++i)
+            activeB.pads[i] = padManager.padSettings[i];
+        activeB.isReady = true;
+    }
+
+    // For each bank that has samples and no kit file path yet, auto-generate one
+    for (int b = 0; b < GjmManager::kNumBanks; ++b)
+    {
+        auto& bank = gjmManager.banks[b];
+        if (!bank.isReady) continue;
+
+        bool hasSamples = false;
+        for (auto& ps : bank.pads)
+            if (!ps.sampleFilePath.isEmpty()) { hasSamples = true; break; }
+        if (!hasSamples) continue;
+
+        if (bank.kitFilePath.isEmpty())
+        {
+            // Use user-set display name if it's not a placeholder, otherwise auto-number
+            const bool hasCustomName = bank.displayName.isNotEmpty()
+                && bank.displayName != ("Bank " + juce::String (b + 1));
+
+            juce::String kitFilename = hasCustomName
+                ? (bank.displayName + "_kit.jai")
+                : juce::String::formatted ("kit-%03d.jai", b + 1);
+
+            bank.kitFilePath = file.getParentDirectory()
+                                   .getChildFile (kitFilename)
+                                   .getFullPathName();
+            bank.displayName = juce::File (bank.kitFilePath).getFileNameWithoutExtension();
+        }
+
+        gjmManager.saveBankKit (b, file);
+    }
+
+    if (gjmManager.saveManifest (file))
+    {
+        gjmManager.gjmFile    = file;
+        gjmManager.isUntitled = false;
+        gjmManager.isDirty    = false;
+        kitIsDirty = false;
+
+        configManager->saveLastKitFolder (file.getParentDirectory().getFullPathName());
+        sampleCard.showTrimToast ("Session saved: " + file.getFileName(), false);
+        updateGjmUI();
+    }
+    else
+    {
+        sampleCard.showTrimToast ("Failed to save session", true);
+    }
+}
+
+void MainComponent::switchGjmBank (int bankIdx)
+{
+    if (bankIdx < 0 || bankIdx >= GjmManager::kNumBanks) return;
+    if (!gjmManager.isLoaded) return;
+
+    // Safety fallback: if the bank somehow wasn't pre-parsed (e.g. file added after load),
+    // parse it synchronously now (fast XML only, <5ms).
+    gjmManager.ensureBankReady (bankIdx);
+
+    // Save outgoing bank's current state back to gjmManager — but ONLY when actually
+    // switching to a different bank. On initial load, activeBank == bankIdx == 0, and
+    // skipping this prevents empty startup padSettings from overwriting the freshly-parsed
+    // bank 0 data.
+    if (gjmManager.activeBank != bankIdx)
+    {
+        captureSampleCardToPadSettings (padManager.selectedPadIndex);
+        auto& outgoing = gjmManager.banks[gjmManager.activeBank];
+        for (int i = 0; i < PadManager::kMaxPads; ++i)
+            outgoing.pads[i] = padManager.padSettings[i];
+        outgoing.isReady = true;
+    }
+
+    // Swap padManager settings with the target bank's cached pads
+    gjmManager.activeBank = bankIdx;
+    const auto& incoming = gjmManager.banks[bankIdx];
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+        padManager.padSettings[i] = incoming.pads[i];
+
+    // Sync MNFreeze atomics so MIDI intercept reflects the new bank instantly
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        auto& mf       = padMnFreeze[i];
+        const auto& ps = padManager.padSettings[i];
+        mf.enabled.store (ps.mnFreezeEnabled, std::memory_order_relaxed);
+        mf.note   .store (ps.midiNote,        std::memory_order_relaxed);
+        mf.ch     .store (ps.midiChannel,     std::memory_order_relaxed);
+        mf.isActive.store (false,             std::memory_order_relaxed);
+    }
+
+    // Clear audio engines for pads that have no sample in the incoming bank.
+    // Without this, MIDI events would still trigger playback from the previous bank's
+    // loaded audio data — the engine holds sound even when the padSettings are swapped.
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        if (padManager.padSettings[i].sampleFilePath.isEmpty() && padManager.hasEngine (i))
+        {
+            auto& engine = padManager.getEngine (i);
+            engine.muteOutput.store (true);
+            engine.clearActiveSoundFlags();
+            engine.forceStopAllVoices();
+            engine.clearSoundsAndVoices();
+            engine.allNotesOff (0, false);
+            {
+                juce::ScopedLock lock (engine.sampleLock);
+                engine.samples.clear();
+                engine.selectedSampleIndex = 0;
+            }
+            engine.clearPeakCache();
+            engine.muteOutput.store (false);
+        }
+    }
+
+    // Update grid name labels for all 16 pads
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        const auto& ps = padManager.padSettings[i];
+        padGrid.setPadSampleName (i, ps.sampleFilePath.isEmpty()
+                                       ? juce::String{}
+                                       : juce::File (ps.sampleFilePath).getFileName());
+    }
+
+    // Load the selected pad's audio into SampleCard
+    const int  curPad = padManager.selectedPadIndex;
+    const auto& curPs = padManager.padSettings[curPad];
+    if (!curPs.sampleFilePath.isEmpty())
+    {
+        juce::File f (curPs.sampleFilePath);
+        if (f.existsAsFile())
+        {
+            currentFolder = f.getParentDirectory();
+            { juce::ScopedWriteLock wlock (folderLock); folderAudioFiles.clear(); }
+            currentFileIndex = -1;
+            sampleCard.restoreZoomAndScroll (1.0, 0.0f);
+            loadSampleFileAsync (f, /*autoPlay=*/false, true, false, padSettingsToSnapshot (curPs));
+        }
+        else
+        {
+            sampleCard.setEmptyState (true);
+        }
+    }
+    else
+    {
+        sampleCard.setEmptyState (true);
+    }
+
+    // Pre-warm audio for all other pads in the new bank (background, non-blocking)
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        if (i == curPad) continue;
+        const auto& ps = padManager.padSettings[i];
+        if (!ps.sampleFilePath.isEmpty())
+        {
+            juce::File f (ps.sampleFilePath);
+            if (f.existsAsFile())
+                preloadPadEngineAsync (i, f, ps);
+        }
+    }
+
+    updateGjmUI();
+    DBG ("[GJM] Switched to bank " + juce::String (bankIdx + 1) + ": " + incoming.displayName);
+}
+
+void MainComponent::updateGjmUI()
+{
+    const int  bank1     = gjmManager.activeBank + 1;
+    const bool untitled  = gjmManager.isUntitled;
+    const bool dirty     = gjmManager.isDirty;
+
+    // Kit button always labelled "Session"
+    kitButton.setButtonText ("Session");
+
+    // Session name in kitNameLabel
+    const juce::String sessionName = untitled
+        ? (dirty ? "Untitled*" : "New Session")
+        : gjmManager.gjmFile.getFileNameWithoutExtension() + (dirty ? "*" : "");
+
+    kitNameLabel.setText (sessionName, juce::dontSendNotification);
+    kitNameLabel.setColour (juce::Label::backgroundColourId,
+        untitled ? juce::Colour (0xFF222222) : juce::Colour (0xFF1A3050));
+    kitNameLabel.setColour (juce::Label::textColourId,
+        untitled ? juce::Colour (0xFF888888) : juce::Colour (0xFFB8DEFF));
+
+    // GJM status label
+    juce::String statusText = "Bank " + juce::String (bank1) + " / "
+                            + juce::String (GjmManager::kNumBanks);
+    if (!untitled)
+        statusText = gjmManager.gjmFile.getFileNameWithoutExtension() + "  " + statusText;
+
+    gjmStatusLabel.setText (statusText, juce::dontSendNotification);
+    gjmStatusLabel.setColour (juce::Label::backgroundColourId,
+        untitled ? juce::Colour (0xFF101820) : juce::Colour (0xFF1A3050));
+    gjmStatusLabel.setColour (juce::Label::textColourId,
+        untitled ? juce::Colour (0xFF3A5A7A) : juce::Colour (0xFFB8DEFF));
+
+    // Bank nav controls
+    globalControlsBar.setBankLabelText ("Bank " + juce::String (bank1));
+    globalControlsBar.setBankIndex (bank1);
+    globalControlsBar.setMaxBank (GjmManager::kNumBanks);
+    globalControlsBar.setNavEnabled (!gjmParsing.load());
+}
+
+void MainComponent::saveSessionAction (bool forceDialog)
+{
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+    if (gjmManager.isUntitled || forceDialog || !gjmManager.gjmFile.existsAsFile())
+    {
+        // First save or "Save As" — ask the user to pick a location
+        const juce::String savedFolder = configManager->getLastKitFolder();
+        const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
+                                        ? juce::File(savedFolder)
+                                        : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+        gjmFileChooser = std::make_unique<juce::FileChooser> (
+            "Save Session", startDir, "*.gjm");
+
+        gjmFileChooser->launchAsync (
+            juce::FileBrowserComponent::saveMode |
+            juce::FileBrowserComponent::canSelectFiles,
+            [this] (const juce::FileChooser& fc)
+            {
+                auto chosen = fc.getResult();
+                if (chosen == juce::File{}) return;  // user cancelled
+                if (chosen.getFileExtension().toLowerCase() != ".gjm")
+                    chosen = chosen.withFileExtension ("gjm");
+                configManager->saveLastKitFolder (chosen.getParentDirectory().getFullPathName());
+                saveGjmToFile (chosen);
+            });
+    }
+    else
+    {
+        // Named session — save directly, no dialog
+        saveGjmToFile (gjmManager.gjmFile);
+    }
+}
+
+void MainComponent::loadSessionAction()
+{
+    const juce::String savedFolder = configManager->getLastKitFolder();
+    const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
+                                    ? juce::File(savedFolder)
+                                    : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    gjmFileChooser = std::make_unique<juce::FileChooser> (
+        "Load Session", startDir, "*.gjm");
+
+    gjmFileChooser->launchAsync (
+        juce::FileBrowserComponent::openMode |
+        juce::FileBrowserComponent::canSelectFiles,
+        [this] (const juce::FileChooser& fc)
+        {
+            auto chosen = fc.getResult();
+            if (chosen == juce::File{} || !chosen.existsAsFile()) return;
+            configManager->saveLastKitFolder (chosen.getParentDirectory().getFullPathName());
+            loadGjmFromFile (chosen);
+        });
+}
+
+void MainComponent::saveBankKitAction()
+{
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+    // Flush into active GJM bank before saving
+    auto& activeB = gjmManager.banks[gjmManager.activeBank];
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+        activeB.pads[i] = padManager.padSettings[i];
+    activeB.isReady = true;
+
+    const juce::String savedFolder = configManager->getLastKitFolder();
+    const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
+                                    ? juce::File(savedFolder)
+                                    : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    kitFileChooser = std::make_unique<juce::FileChooser> (
+        "Save Bank Kit", startDir, "*.jai");
+
+    kitFileChooser->launchAsync (
+        juce::FileBrowserComponent::saveMode |
+        juce::FileBrowserComponent::canSelectFiles,
+        [this] (const juce::FileChooser& fc)
+        {
+            auto chosen = fc.getResult();
+            if (chosen == juce::File{}) return;
+            if (chosen.getFileExtension().toLowerCase() != ".jai")
+                chosen = chosen.withFileExtension ("jai");
+
+            configManager->saveLastKitFolder (chosen.getParentDirectory().getFullPathName());
+
+            // Store kit path in current bank
+            gjmManager.banks[gjmManager.activeBank].kitFilePath = chosen.getFullPathName();
+            gjmManager.banks[gjmManager.activeBank].displayName = chosen.getFileNameWithoutExtension();
+
+            saveKitToFile (chosen);
+
+            // If session is saved, also update the manifest to record the new kit path
+            if (!gjmManager.isUntitled && gjmManager.gjmFile.existsAsFile())
+                gjmManager.saveManifest (gjmManager.gjmFile);
+        });
+}
+
+void MainComponent::loadBankKitAction()
+{
+    const juce::String savedFolder = configManager->getLastKitFolder();
+    const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
+                                    ? juce::File(savedFolder)
+                                    : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    kitFileChooser = std::make_unique<juce::FileChooser> (
+        "Load Bank Kit", startDir, "*.jai");
+
+    kitFileChooser->launchAsync (
+        juce::FileBrowserComponent::openMode |
+        juce::FileBrowserComponent::canSelectFiles,
+        [this] (const juce::FileChooser& fc)
+        {
+            auto chosen = fc.getResult();
+            if (chosen == juce::File{} || !chosen.existsAsFile()) return;
+            configManager->saveLastKitFolder (chosen.getParentDirectory().getFullPathName());
+
+            loadKitFromFile (chosen);
+            gjmManager.isDirty = false;  // loading a saved kit is not a dirty action
+            updateGjmUI();
+        });
 }
 
 MainComponent::TrimSettingsSnapshot MainComponent::padSettingsToSnapshot (const PadSettings& ps) const
@@ -4582,6 +4920,12 @@ void MainComponent::loadLastSession()
         }
     }
 
+    // Start with an empty untitled in-memory session — 16 banks, no files, no disk writes.
+    gjmManager.reset();
+    globalControlsBar.setBankIndex (1);
+    globalControlsBar.setMaxBank (GjmManager::kNumBanks);
+    updateGjmUI();
+
     padGrid.selectPad(0);
 }
 
@@ -4596,7 +4940,9 @@ void MainComponent::saveCurrentSampleState()
     // In-memory only — no disk writes during runtime.
     // State is only written to disk when the user explicitly saves a kit.
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
-    kitIsDirty = true;
+    kitIsDirty          = true;
+    gjmManager.isDirty  = true;
+    updateGjmUI();
 }
 
 void MainComponent::captureSampleCardToPadSettings(int padIdx)
@@ -4709,66 +5055,39 @@ bool MainComponent::hasAnySamplesLoaded() const
 
 void MainComponent::requestQuit()
 {
-    printf ("DEBUG: requestQuit() — samplesLoaded=%d\n", (int)hasAnySamplesLoaded());
-    fflush (stdout);
-    if (!hasAnySamplesLoaded())
+    if (!gjmManager.isDirty && !kitIsDirty)
     {
-        // Nothing loaded — close immediately.
         juce::JUCEApplication::getInstance()->systemRequestedQuit();
         return;
     }
 
-    // Samples are loaded — ask whether to save a kit first.
-    juce::AlertWindow::showAsync(
+    juce::AlertWindow::showAsync (
         juce::MessageBoxOptions()
-            .withIconType(juce::AlertWindow::QuestionIcon)
-            .withTitle("Save Kit?")
-            .withMessage("You have samples loaded. Save a kit before closing?")
-            .withButton("Save Kit")
-            .withButton("Close Without Saving")
-            .withButton("Cancel"),
-        [this](int result)
+            .withIconType (juce::AlertWindow::QuestionIcon)
+            .withTitle ("Save Session?")
+            .withMessage ("You have unsaved changes. Save the session before closing?")
+            .withButton ("Save Session")
+            .withButton ("Close Without Saving")
+            .withButton ("Cancel"),
+        [this] (int result)
         {
             if (result == 1)
             {
-                // "Save Kit" — open file chooser, then quit after save.
-                const juce::String savedFolder = configManager->getLastKitFolder();
-                const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
-                                                ? juce::File(savedFolder)
-                                                : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-                kitFileChooser = std::make_unique<juce::FileChooser>(
-                    "Save Kit As",
-                    startDir,
-                    "*.jai");
-
-                kitFileChooser->launchAsync(
-                    juce::FileBrowserComponent::saveMode |
-                    juce::FileBrowserComponent::canSelectFiles |
-                    juce::FileBrowserComponent::warnAboutOverwriting,
-                    [this](const juce::FileChooser& fc)
-                    {
-                        const auto result = fc.getResult();
-                        if (result != juce::File{})
-                        {
-                            auto chosen = result.withFileExtension("jai");
-                            configManager->saveLastKitFolder(chosen.getParentDirectory().getFullPathName());
-                            // Capture the latest in-memory SampleCard state before saving —
-                            // same as the menu "Save Bank Kit" path does (Bug 3 fix).
-                            captureSampleCardToPadSettings(padManager.selectedPadIndex);
-                            saveKitToFile(chosen);  // also updates kitNameLabel
-                        }
-                        // Quit whether save succeeded or user dismissed.
-                        juce::JUCEApplication::getInstance()->systemRequestedQuit();
-                    });
+                // Save session (may open a file dialog if untitled)
+                saveSessionAction (false);
+                // Quit after save — for titled sessions this is instant
+                // (no dialog), so we can quit immediately.
+                // For untitled sessions the file dialog is async; the user
+                // will close the app again after saving.
+                if (!gjmManager.isUntitled)
+                    juce::JUCEApplication::getInstance()->systemRequestedQuit();
             }
             else if (result == 2)
             {
-                // "Close Without Saving"
                 juce::JUCEApplication::getInstance()->systemRequestedQuit();
             }
-            // result == 0 is "Cancel" — do nothing.
+            // result == 0 or 3 = Cancel — do nothing
         });
-
 }
 
 bool MainComponent::isValidMidiDevice(const juce::String& deviceName)

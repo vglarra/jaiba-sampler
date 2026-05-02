@@ -16,6 +16,7 @@
 #include "LoopingSampler.h"
 #include "PadManager.h"
 #include "TrianglePadGrid.h"
+#include "GjmManager.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -220,6 +221,17 @@ private:
     void saveKitToFile   (const juce::File& file);
     void loadKitFromFile (const juce::File& file);
     void navigateKit     (int direction);   // -1 = prev, +1 = next .jai in same folder
+
+    // GJM — Global Jaiva Map (16-bank manifest)
+    void loadGjmFromFile  (const juce::File& file);
+    void saveGjmToFile    (const juce::File& file);
+    void switchGjmBank    (int bankIdx);   // 0-based; instant swap + async audio pre-warm
+    void finishGjmLoad    ();             // called on message thread after background parse
+    void updateGjmUI      ();
+    void saveSessionAction (bool forceDialog);
+    void loadSessionAction ();
+    void saveBankKitAction ();
+    void loadBankKitAction ();
     TrimSettingsSnapshot padSettingsToSnapshot (const PadSettings& ps) const;
     void scanCurrentFolderForAudioFiles();
     void navigateToFile(int index);
@@ -363,12 +375,19 @@ private:
     juce::Label cpuUsageLabel;
     std::unique_ptr<juce::FileChooser> fileChooser;
     std::unique_ptr<juce::FileChooser> kitFileChooser;  // kept alive during async kit dialogs
+    std::unique_ptr<juce::FileChooser> gjmFileChooser;  // kept alive during async GJM dialogs
     AudioPreviewComponent* activePreviewComp = nullptr;  // non-owning; JUCE owns via fileChooser
     
     //==============================================================================
     // Kit navigation
     juce::File currentKitFile;   // last successfully loaded/saved .jai file; empty if none
     bool kitIsDirty = false;     // true when pads changed since last save/load/new-kit
+
+    //==============================================================================
+    // GJM — Global Jaiva Map
+    GjmManager  gjmManager;
+    juce::Label gjmStatusLabel;              // shows "No GJM" or "filename ● N/16"
+    std::atomic<bool> gjmParsing { false };  // true while background kit-parse job runs
 
     //==============================================================================
     // Folder navigation

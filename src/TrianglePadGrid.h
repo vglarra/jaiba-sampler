@@ -651,7 +651,7 @@ private:
 };
 
 // ================================================================================
-// GlobalControlsBar – unchanged from your original (but included for completeness)
+// GlobalControlsBar — bank navigation (Up/Down) wired to GJM bank switching
 // ================================================================================
 class GlobalControlsBar : public juce::Component
 {
@@ -663,10 +663,11 @@ public:
         bankUpBtn.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFFCECECE));
         addAndMakeVisible (bankUpBtn);
 
-        bankLabel.setText ("Bank 1", juce::dontSendNotification);
         bankLabel.setJustificationType (juce::Justification::centred);
-        bankLabel.setColour (juce::Label::textColourId, juce::Colours::white);
-        bankLabel.setFont (juce::Font (12.0f));
+        bankLabel.setColour (juce::Label::backgroundColourId, juce::Colour (0xFF1E1E1E));
+        bankLabel.setColour (juce::Label::textColourId,       juce::Colour (0xFF4BFF7A));
+        bankLabel.setFont (juce::Font (11.0f, juce::Font::bold));
+        bankLabel.setInterceptsMouseClicks (false, false);
         addAndMakeVisible (bankLabel);
 
         bankDownBtn.setButtonText ("Down");
@@ -675,14 +676,16 @@ public:
         bankDownBtn.setEnabled (false);
         addAndMakeVisible (bankDownBtn);
 
-        globalLabel.setText ("Global Controls", juce::dontSendNotification);
-        globalLabel.setJustificationType (juce::Justification::centredRight);
-        globalLabel.setColour (juce::Label::textColourId, juce::Colour (0xFF888888));
-        globalLabel.setFont (juce::Font (12.0f));
-        addAndMakeVisible (globalLabel);
+        bankUpBtn.onClick   = [this]
+        {
+            if (currentBank < maxBank) { ++currentBank; updateBank(); if (onBankChanged) onBankChanged (currentBank); }
+        };
+        bankDownBtn.onClick = [this]
+        {
+            if (currentBank > 1) { --currentBank; updateBank(); if (onBankChanged) onBankChanged (currentBank); }
+        };
 
-        bankUpBtn.onClick   = [this] { ++currentBank; updateBank(); if (onBankChanged) onBankChanged(currentBank); };
-        bankDownBtn.onClick = [this] { if (currentBank > 1) { --currentBank; updateBank(); if (onBankChanged) onBankChanged(currentBank); } };
+        updateBank();
     }
 
     void paint (juce::Graphics& g) override
@@ -696,25 +699,58 @@ public:
     {
         auto area = getLocalBounds().reduced (8, 0);
         auto left = area.removeFromLeft (144);
-        bankUpBtn.setBounds   (left.removeFromLeft (36).withSizeKeepingCentre (32, 20));
+        bankDownBtn.setBounds (left.removeFromLeft (36).withSizeKeepingCentre (32, 20));
         left.removeFromLeft (4);
         bankLabel.setBounds   (left.removeFromLeft (60).withSizeKeepingCentre (56, 20));
         left.removeFromLeft (4);
-        bankDownBtn.setBounds (left.removeFromLeft (36).withSizeKeepingCentre (32, 20));
-        globalLabel.setBounds (area);
+        bankUpBtn.setBounds   (left.removeFromLeft (36).withSizeKeepingCentre (32, 20));
+        // Right area left for gjmStatusLabel (MainComponent child, overlaid on this row)
     }
 
+    // Fired with the new 1-based bank index whenever the user presses Up or Down.
     std::function<void(int)> onBankChanged;
+
+    // Called by MainComponent when a GJM is loaded to set the bank ceiling.
+    void setMaxBank (int newMax)
+    {
+        maxBank = juce::jmax (1, newMax);
+        currentBank = juce::jlimit (1, maxBank, currentBank);
+        updateBank();
+    }
+
+    // Programmatically move to a 1-based bank index without firing onBankChanged.
+    void setBankIndex (int bank1Based)
+    {
+        currentBank = juce::jlimit (1, maxBank, bank1Based);
+        updateBank();
+    }
+
+    // Override the label text (e.g. "GJM 3/16" or "No GJM").
+    void setBankLabelText (const juce::String& text)
+    {
+        bankLabel.setText (text, juce::dontSendNotification);
+    }
+
+    // Enable/disable both nav buttons (used while GJM is being parsed in background).
+    void setNavEnabled (bool enabled)
+    {
+        bankUpBtn.setEnabled   (enabled && currentBank < maxBank);
+        bankDownBtn.setEnabled (enabled && currentBank > 1);
+    }
+
+    int getCurrentBank() const { return currentBank; }
 
 private:
     juce::TextButton bankUpBtn, bankDownBtn;
-    juce::Label      bankLabel, globalLabel;
-    int              currentBank = 1;
+    juce::Label      bankLabel;
+    int  currentBank = 1;
+    int  maxBank     = 1;   // set to GjmManager::kNumBanks when a GJM is loaded
 
     void updateBank()
     {
         bankLabel.setText ("Bank " + juce::String (currentBank),
                            juce::dontSendNotification);
         bankDownBtn.setEnabled (currentBank > 1);
+        bankUpBtn.setEnabled   (currentBank < maxBank);
     }
 };
