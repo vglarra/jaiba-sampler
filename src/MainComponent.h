@@ -17,6 +17,7 @@
 #include "PadManager.h"
 #include "TrianglePadGrid.h"
 #include "GjmManager.h"
+#include "GlobalLoopColumn.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -159,6 +160,7 @@ private:
     // Loads a sample into a specific pad engine WITHOUT touching the SampleCard UI.
     // Used at startup to restore all saved pads into RAM so pad switching is instant.
     void preloadPadEngineAsync(int padIdx, juce::File file, PadSettings settings);
+    void preloadGlobalPadEngineAsync(int globalPadIdx, juce::File file, PadSettings settings);
     void updateSamplerSounds();
 
     // Audio device management
@@ -356,6 +358,7 @@ private:
     // ── Pad grid UI (Part 1 — visual only) ──────────────────
     GlobalControlsBar globalControlsBar;
     TrianglePadGrid   padGrid;
+    GlobalLoopColumn  globalLoopColumn;
 
     // UI Components
     juce::TextButton menuButton{ "Menu" };
@@ -384,6 +387,21 @@ private:
     bool kitIsDirty = false;     // true when pads changed since last save/load/new-kit
 
     //==============================================================================
+    // Global Loop Pads — 5 persistent loop-pad slots that survive bank switching.
+    enum class PadSelectionSource { Bank, Global };
+    PadSelectionSource padSelectionSource  = PadSelectionSource::Bank;
+    int                selectedGlobalPadIndex = -1;
+    bool               globalPadPlaying[PadManager::kNumGlobalPads] = {};
+
+    void selectGlobalPad          (int slotIdx);
+    void toggleGlobalPadPlayback  (int slotIdx);
+    void captureGlobalPadFromSampleCard (int slotIdx);
+    void saveGlobalPadStateFromEngine   (int slotIdx);
+    void updateGlobalPadVisuals   ();
+    void transferKitPadToGlobal   (int kitPadIdx, int globalPadIdx);
+    void dropGlobalPad            (int globalPadIdx);
+
+    //==============================================================================
     // GJM — Global Jaiva Map
     GjmManager  gjmManager;
     juce::Label gjmStatusLabel;              // shows "No GJM" or "filename ● N/16"
@@ -408,9 +426,20 @@ private:
     PadManager padManager { formatManager };
 
     // Convenience accessor — returns engine for the currently selected pad.
-    // padManager.selectedPadIndex tracks which pad is active in the UI.
-    PadAudioEngine& pad() { return padManager.getEngine(padManager.selectedPadIndex); }
-    const PadAudioEngine& pad() const { return padManager.getEngine(padManager.selectedPadIndex); }
+    // When a global loop pad is selected (padSelectionSource == Global), routes to
+    // padManager.getGlobalEngine(selectedGlobalPadIndex) instead.
+    PadAudioEngine& pad()
+    {
+        if (padSelectionSource == PadSelectionSource::Global && selectedGlobalPadIndex >= 0)
+            return padManager.getGlobalEngine(selectedGlobalPadIndex);
+        return padManager.getEngine(padManager.selectedPadIndex);
+    }
+    const PadAudioEngine& pad() const
+    {
+        if (padSelectionSource == PadSelectionSource::Global && selectedGlobalPadIndex >= 0)
+            return padManager.getGlobalEngine(selectedGlobalPadIndex);
+        return padManager.getEngine(padManager.selectedPadIndex);
+    }
     
     //==============================================================================
     // MIDI components

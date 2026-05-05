@@ -578,6 +578,18 @@ public:
         if (auto* p = padAt (idx)) p->setState (TrianglePad::State::Selected);
     }
 
+    // Restore the currently selected pad to Loaded/Empty without selecting a new one.
+    // Use when an external selection source (e.g. GlobalLoopColumn) takes focus.
+    void clearSelection()
+    {
+        if (selectedIndex >= 0)
+            if (auto* prev = padAt (selectedIndex))
+                prev->setState (prev->getSampleName().isNotEmpty()
+                                ? TrianglePad::State::Loaded
+                                : TrianglePad::State::Empty);
+        selectedIndex = -1;
+    }
+
     // Start fuchsia with no auto-timer — must be paired with triggerEnd().
     // Used for mouse-down and MIDI note-on.
     void triggerStart (int idx)

@@ -601,7 +601,12 @@ public:
         // Top row buttons - font size 14px to match pitch controls
         addButton.setButtonText("+");
         addButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
-        addButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
+        addButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFC3FF42));
+        addButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xFFC3FF42));
+        addButton.setConnectedEdges(juce::TextButton::ConnectedOnLeft | 
+juce::TextButton::ConnectedOnRight);
+        // Use a custom LookAndFeel to make the + text bold and draw border
+        addButton.setLookAndFeel(&boldPlusLaf);
         addAndMakeVisible(addButton);
         
         // Configure Prev button (top right)
@@ -672,6 +677,8 @@ public:
         midiNoteLabel.setJustificationType(juce::Justification::centred);
         midiNoteLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFE25A00));
         midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
+        midiNoteLabel.setTooltip("MIDI trigger note — double-click to disable");
+        midiNoteLabel.addMouseListener(this, false);
         updateMidiNoteDisplay();
         addAndMakeVisible(midiNoteLabel);
         
@@ -686,6 +693,8 @@ public:
         midiChannelLabel.setJustificationType(juce::Justification::centred);
         midiChannelLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
         midiChannelLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
+        midiChannelLabel.setTooltip("MIDI channel — double-click to disable");
+        midiChannelLabel.addMouseListener(this, false);
         updateMidiChannelDisplay();
         addAndMakeVisible(midiChannelLabel);
         
@@ -2286,7 +2295,12 @@ public:
     // was already preloaded with the correct MIDI note.
     void setMidiNote(int note, bool notify = true)
     {
-        if (note >= 0 && note <= 127 && note != currentMidiNote)
+        // Allow -1 (disabled) in addition to 0-127. updateMidiNoteDisplay() already
+        // renders -1 as "-- (off)". Without this, updateUIFromSettings(gPad) with
+        // midiNote=-1 silently leaves currentMidiNote at the previous pad's value,
+        // causing captureGlobalPadFromSampleCard to write the stale value into the
+        // G pad settings when the user switches to another G pad.
+        if (note >= -1 && note <= 127 && note != currentMidiNote)
         {
             currentMidiNote = note;
             updateMidiNoteDisplay();
@@ -2299,7 +2313,9 @@ public:
 
     void setMidiChannel(int channel, bool notify = true)
     {
-        if (channel >= 0 && channel <= 16 && channel != currentMidiChannel)
+        // Allow -1 (disabled) — same reasoning as setMidiNote above.
+        // updateMidiChannelDisplay() already renders -1 as "Ch --".
+        if (channel >= -1 && channel <= 16 && channel != currentMidiChannel)
         {
             currentMidiChannel = channel;
             updateMidiChannelDisplay();
@@ -3871,17 +3887,16 @@ public:
     
     void adjustMidiNote(int delta)
     {
-        int newNote = currentMidiNote + delta;
-        
+        // If currently disabled (-1), first +delta brings it to 0 (re-enable from bottom).
+        const int base = (currentMidiNote < 0) ? -1 : currentMidiNote;
+        int newNote = base + delta;
+
         // Constrain to valid MIDI range (0-127)
         if (newNote >= 0 && newNote <= 127)
         {
             currentMidiNote = newNote;
             updateMidiNoteDisplay();
-            
-            // Notify listeners
             listeners.call([this](Listener& l) { l.midiNoteChanged(currentMidiNote); });
-            
         }
     }
     
@@ -3919,18 +3934,38 @@ public:
     
     void updateMidiNoteDisplay()
     {
-        juce::String noteName = juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true);
-        midiNoteLabel.setText(juce::String(currentMidiNote) + " (" + noteName + ")", 
-                              juce::dontSendNotification);
+        if (currentMidiNote < 0)
+        {
+            midiNoteLabel.setText("-- (off)", juce::dontSendNotification);
+            midiNoteLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF555555));
+        }
+        else
+        {
+            juce::String noteName = juce::MidiMessage::getMidiNoteName(currentMidiNote, true, true, true);
+            midiNoteLabel.setText(juce::String(currentMidiNote) + " (" + noteName + ")",
+                                  juce::dontSendNotification);
+            midiNoteLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFE25A00));
+        }
     }
-    
+
     void updateMidiChannelDisplay()
     {
-        if (currentMidiChannel == 0)
+        if (currentMidiChannel < 0)
+        {
+            midiChannelLabel.setText("Ch --", juce::dontSendNotification);
+            midiChannelLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF555555));
+        }
+        else if (currentMidiChannel == 0)
+        {
             midiChannelLabel.setText("Ch All", juce::dontSendNotification);
+            midiChannelLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
+        }
         else
-            midiChannelLabel.setText("Ch " + juce::String(currentMidiChannel), 
+        {
+            midiChannelLabel.setText("Ch " + juce::String(currentMidiChannel),
                                      juce::dontSendNotification);
+            midiChannelLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
+        }
     }
     
     void toggleLearnMode()
@@ -4291,7 +4326,33 @@ void adjustPitchUp()
 
     // Empty pad overlay
     juce::Label emptyStateLabel;
-    bool        isEmptyPad = false;
+        bool        isEmptyPad = false;
+
+    // Custom LookAndFeel for the bold + button
+        struct BoldPlusButtonLAF : public juce::LookAndFeel_V4
+    {
+        juce::Font getTextButtonFont(juce::TextButton&, int) override
+        {
+            return juce::Font(16.0f, juce::Font::bold);
+        }
+        void drawButtonBackground(juce::Graphics& g, juce::Button& button, const juce::Colour&,
+                                   bool, bool) override
+        {
+            auto bounds = button.getLocalBounds().toFloat();
+            g.setColour(juce::Colour(0xFF4A4A4A));  // dark fill
+            g.fillRect(bounds);
+            g.setColour(juce::Colour(0xFFC3FF42));  // neon green border
+            g.drawRect(bounds, 1.0f);
+        }
+        void drawButtonText(juce::Graphics& g, juce::TextButton& button, bool, bool) override
+        {
+            auto bounds = button.getLocalBounds().toFloat();
+            g.setColour(juce::Colour(0xFFC3FF42));  // neon green text
+            g.setFont(getTextButtonFont(button, button.getHeight()));
+            g.drawText(button.getButtonText(), bounds, juce::Justification::centred);
+        }
+    };
+    BoldPlusButtonLAF boldPlusLaf;
 
     // UI Components
     juce::TextButton addButton{"+"};
@@ -4558,10 +4619,29 @@ void adjustPitchUp()
             dropPadButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
             dropPadButton.onClick = [this]
             {
-                const int t = currentTargetPad;
-                owner.listeners.call([t](Listener& l) { l.dropTargetPad(t); });
+                if (isGlobalPadMode)
+                {
+                    if (owner.onDropGlobalPad) owner.onDropGlobalPad(globalPadTarget);
+                }
+                else
+                {
+                    const int t = currentTargetPad;
+                    owner.listeners.call([t](Listener& l) { l.dropTargetPad(t); });
+                }
             };
             addAndMakeVisible(dropPadButton);
+
+            // ----- Transfer (G pad mode only — hidden in normal mode) -----
+            transferButton.setButtonText("Load Kit Pad");
+            transferButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF003A6A));
+            transferButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFFFFFFF));
+            transferButton.onClick = [this]
+            {
+                if (owner.onTransferKitPadToGlobal)
+                    owner.onTransferKitPadToGlobal(currentTargetPad, globalPadTarget);
+            };
+            transferButton.setVisible(false);
+            addAndMakeVisible(transferButton);
 
             // ----- Overdub toggle (unwired — feature disabled for latency focus) -----
             overdubButton.setButtonText("Overdub");
@@ -4668,6 +4748,33 @@ void adjustPitchUp()
         double getQuantBeats() const { return quantIdToBeats(quantCombo.getSelectedId()); }
         bool   isMetronomeOn() const { return metronomeButton.getToggleState(); }
 
+        // Called by MainComponent when a G pad is selected / deselected.
+        // In G pad mode: hides Record, shows Transfer, adjustTargetPad shows kit pad source.
+        void setGlobalPadMode(bool enabled, int gPadIdx = -1)
+        {
+            isGlobalPadMode = enabled;
+            globalPadTarget = gPadIdx;
+
+            recordButton  .setVisible(!enabled);
+            transferButton.setVisible( enabled);
+
+            if (enabled)
+            {
+                const juce::String gName = "G" + juce::String(gPadIdx + 1);
+                // Reset currentTargetPad to a valid kit pad for the selector.
+                currentTargetPad = juce::jlimit(0, 15, currentTargetPad);
+                targetPadLabel.setText(gName + " <- Pad " + juce::String(currentTargetPad + 1),
+                                       juce::dontSendNotification);
+                setStatus("Select kit pad to transfer into " + gName);
+            }
+            else
+            {
+                targetPadLabel.setText("Target: " + juce::String(currentTargetPad + 1),
+                                       juce::dontSendNotification);
+                setStatus("Ready");
+            }
+        }
+
         void resized() override
         {
             // Three rows of 20px with 4px gaps — matches Controls tab row height.
@@ -4706,12 +4813,14 @@ void adjustPitchUp()
             row2.removeFromLeft(6);
             dropPadButton.setBounds(row2.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
 
-            // ---- Row 3: Overdub | Record | Stop | Play | Save | Load | Clear | Status ----
+            // ---- Row 3: Overdub | Record/Transfer | Stop | Play | Save | Load | Clear | Status ----
             auto row3 = area.removeFromTop(kRowH);
 
             overdubButton    .setBounds(row3.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
             row3.removeFromLeft(3);
+            // Record and Transfer share the same slot — only one is visible at a time.
             recordButton     .setBounds(row3.removeFromLeft(52).withSizeKeepingCentre(50, kRowH));
+            transferButton   .setBounds(recordButton.getBounds());
             row3.removeFromLeft(3);
             stopButton       .setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
             row3.removeFromLeft(3);
@@ -4728,8 +4837,10 @@ void adjustPitchUp()
 
     private:
         SampleCard& owner;
-        int    currentTargetPad = 15;
-        double currentBpm       = 120.0;
+        int    currentTargetPad  = 15;
+        double currentBpm        = 120.0;
+        bool   isGlobalPadMode   = false;
+        int    globalPadTarget   = -1;
 
         juce::Label      targetPadLabel;
         juce::TextButton targetPadMinusButton;
@@ -4739,6 +4850,7 @@ void adjustPitchUp()
         juce::TextButton metronomeButton;
         juce::Slider     metronomeVolumeSlider;
         juce::TextButton dropPadButton;
+        juce::TextButton transferButton;
         juce::TextButton overdubButton;
         juce::TextButton recordButton;
         juce::TextButton stopButton;
@@ -4750,9 +4862,19 @@ void adjustPitchUp()
 
         void adjustTargetPad(int delta)
         {
+            // Kit pads only: 0-15 (displayed as 1-16).
             currentTargetPad = juce::jlimit(0, 15, currentTargetPad + delta);
-            targetPadLabel.setText("Target: " + juce::String(currentTargetPad + 1),
-                                   juce::dontSendNotification);
+            if (isGlobalPadMode && globalPadTarget >= 0)
+            {
+                const juce::String gName = "G" + juce::String(globalPadTarget + 1);
+                targetPadLabel.setText(gName + " <- Pad " + juce::String(currentTargetPad + 1),
+                                       juce::dontSendNotification);
+            }
+            else
+            {
+                targetPadLabel.setText("Target: " + juce::String(currentTargetPad + 1),
+                                       juce::dontSendNotification);
+            }
         }
 
         static double quantIdToBeats(int id)
@@ -5249,6 +5371,20 @@ public:
     // Fired when the EQ Reset button is clicked — MainComponent writes pre-computed flat
     // coefficients directly to EqCoeffDoubleBuffer (no computation, no synchronous save).
     std::function<void()> onEqReset;
+
+    // G pad workflow callbacks — wired by MainComponent.
+    // onTransferKitPadToGlobal(kitPadIdx, globalPadIdx): copy kit pad audio into G pad slot.
+    // onDropGlobalPad(globalPadIdx): clear a G pad slot entirely.
+    std::function<void(int kitPadIdx, int globalPadIdx)> onTransferKitPadToGlobal;
+    std::function<void(int globalPadIdx)>                onDropGlobalPad;
+
+    // Switch Rec tab to G-pad transfer mode (or back to normal recording mode).
+    // Forwarded to RecControlPanel so MainComponent doesn't need to access the inner class.
+    void setRecGlobalPadMode(bool enabled, int gPadIdx = -1)
+    {
+        if (recContent != nullptr)
+            recContent->setGlobalPadMode(enabled, gPadIdx);
+    }
 
     // Called by MainComponent to show/hide the "Trimming..." state.
     void setTrimInProgress(bool inProgress)
@@ -5782,6 +5918,7 @@ private:
 
     // Double-click on vol knob: JUCE resets value via setDoubleClickReturnValue;
     // we add a brief white flash on volValueLabel to confirm the reset.
+    // Double-click on MIDI note/channel labels: disable (set to -1 / "off").
     void mouseDoubleClick(const juce::MouseEvent& e) override
     {
         if (e.eventComponent == &volumeKnob)
@@ -5796,6 +5933,40 @@ private:
                     p->volValueLabel.repaint();
                 }
             });
+        }
+        else if (e.eventComponent == &midiNoteLabel)
+        {
+            // Double-click → disable MIDI note trigger
+            currentMidiNote = -1;
+            updateMidiNoteDisplay();
+            midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0x88FFFFFF));
+            midiNoteLabel.repaint();
+            juce::Timer::callAfterDelay(150, [safe = juce::Component::SafePointer<SampleCard>(this)]()
+            {
+                if (auto* p = safe.getComponent())
+                {
+                    p->midiNoteLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
+                    p->midiNoteLabel.repaint();
+                }
+            });
+            listeners.call([](Listener& l) { l.midiNoteChanged(-1); });
+        }
+        else if (e.eventComponent == &midiChannelLabel)
+        {
+            // Double-click → disable MIDI channel filter
+            currentMidiChannel = -1;
+            updateMidiChannelDisplay();
+            midiChannelLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0x88FFFFFF));
+            midiChannelLabel.repaint();
+            juce::Timer::callAfterDelay(150, [safe = juce::Component::SafePointer<SampleCard>(this)]()
+            {
+                if (auto* p = safe.getComponent())
+                {
+                    p->midiChannelLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
+                    p->midiChannelLabel.repaint();
+                }
+            });
+            listeners.call([](Listener& l) { l.midiChannelChanged(-1); });
         }
     }
 

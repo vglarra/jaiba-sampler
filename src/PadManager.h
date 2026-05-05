@@ -24,7 +24,8 @@
 class PadManager
 {
 public:
-    static constexpr int kMaxPads = 16;
+    static constexpr int kMaxPads       = 16;
+    static constexpr int kNumGlobalPads = 5;   // persistent loop pads, survive bank switches
 
     //==========================================================================
     explicit PadManager(juce::AudioFormatManager& fmt)
@@ -34,9 +35,20 @@ public:
         for (int i = 0; i < kMaxPads; ++i)
             padSettings[i].padIndex = i;
 
+        // Global pad settings — indices 16-20 by convention.
+        for (int i = 0; i < kNumGlobalPads; ++i)
+        {
+            globalSettings[i].padIndex = kMaxPads + i;
+            // Default midiNote=60 would collide with kit pad defaults; disable until
+            // explicitly configured via Transfer or GJM load.
+            globalSettings[i].midiNote    = -1;
+            globalSettings[i].midiChannel = -1;
+        }
+
         // Create engine 0 immediately — it is always active.
         engines[0] = std::make_unique<PadAudioEngine>(fmt);
         // Engines 1–15 are created lazily on first getEngine() call.
+        // Global engines are also created lazily.
     }
 
     ~PadManager() = default;
@@ -53,11 +65,19 @@ public:
         for (auto& e : engines)
             if (e != nullptr)
                 e->prepareToPlay(samplesPerBlockExpected, sampleRate);
+
+        for (auto& e : globalEngines)
+            if (e != nullptr)
+                e->prepareToPlay(samplesPerBlockExpected, sampleRate);
     }
 
     void releaseResources()
     {
         for (auto& e : engines)
+            if (e != nullptr)
+                e->releaseResources();
+
+        for (auto& e : globalEngines)
             if (e != nullptr)
                 e->releaseResources();
     }
@@ -75,6 +95,19 @@ public:
 
             // Future: per-pad MIDI note/channel filter here.
             e->renderNextBlock(outputBuffer, midiMessages, startSample, numSamples);
+        }
+
+        // Global loop pads — rendered with an empty MIDI buffer since their note-on
+        // is injected directly into their Synthesiser (not via the MIDI collector).
+        {
+            juce::MidiBuffer emptyMidi;
+            for (int i = 0; i < kNumGlobalPads; ++i)
+            {
+                auto& e = globalEngines[i];
+                if (e == nullptr)         continue;
+                if (e->muteOutput.load()) continue;
+                e->renderNextBlock(outputBuffer, emptyMidi, startSample, numSamples);
+            }
         }
 
         // Apply master volume last — scales the fully mixed output.
@@ -113,6 +146,33 @@ public:
     }
 
     //==========================================================================
+    // Global engine access (indices 0..kNumGlobalPads-1)
+
+    PadAudioEngine& getGlobalEngine(int index)
+    {
+        jassert(index >= 0 && index < kNumGlobalPads);
+        if (globalEngines[index] == nullptr)
+        {
+            globalEngines[index] = std::make_unique<PadAudioEngine>(formatManager);
+            if (lastSampleRate > 0.0)
+                globalEngines[index]->prepareToPlay(lastBlockSize, lastSampleRate);
+        }
+        return *globalEngines[index];
+    }
+
+    const PadAudioEngine& getGlobalEngine(int index) const
+    {
+        jassert(index >= 0 && index < kNumGlobalPads);
+        jassert(globalEngines[index] != nullptr);
+        return *globalEngines[index];
+    }
+
+    bool hasGlobalEngine(int index) const
+    {
+        return index >= 0 && index < kNumGlobalPads && globalEngines[index] != nullptr;
+    }
+
+    //==========================================================================
     // Selected pad — which pad the SampleCard UI is currently connected to.
 
     int selectedPadIndex = 0;
@@ -139,14 +199,22 @@ public:
     }
 
     //==========================================================================
+    // Global pad settings (public — MainComponent orchestrates complex sequences)
+    PadSettings globalSettings[kNumGlobalPads];
+
+    //==========================================================================
     // MIDI routing — find which pad is mapped to a given note+channel.
     // Returns pad index [0,15] or -1 if none match.
     int findPadForMidiNote(int note, int channel) const
     {
         for (int i = 0; i < kMaxPads; ++i)
-            if (padSettings[i].midiNote    == note &&
-                padSettings[i].midiChannel == channel)
+        {
+            if (padSettings[i].midiNote < 0 || padSettings[i].midiChannel < 0)
+                continue;  // disabled
+            if (padSettings[i].midiNote == note &&
+                (padSettings[i].midiChannel == 0 || padSettings[i].midiChannel == channel))
                 return i;
+        }
         return -1;
     }
 
@@ -171,6 +239,20 @@ public:
             e->clearActiveSoundFlags();
             e->forceStopAllVoices();
             e->allNotesOff(0, false);
+        }
+        // Global engines keep looping unless explicitly stopped by stopAllGlobalPads()
+    }
+
+    void stopAllGlobalPads()
+    {
+        for (auto& e : globalEngines)
+        {
+            if (e == nullptr) continue;
+            e->muteOutput.store(true);
+            e->clearActiveSoundFlags();
+            e->forceStopAllVoices();
+            e->allNotesOff(0, false);
+            e->muteOutput.store(false);
         }
     }
 
@@ -197,7 +279,8 @@ public:
 
 private:
     juce::AudioFormatManager& formatManager;
-    std::array<std::unique_ptr<PadAudioEngine>, kMaxPads> engines;
+    std::array<std::unique_ptr<PadAudioEngine>, kMaxPads>       engines;
+    std::array<std::unique_ptr<PadAudioEngine>, kNumGlobalPads> globalEngines;
     std::atomic<float> masterVolumeGain { 0.7f };
 
     // Cached audio device params for lazily-created engines.

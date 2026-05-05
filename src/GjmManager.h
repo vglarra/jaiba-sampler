@@ -54,9 +54,12 @@ class GjmManager
 public:
     GjmManager() = default;
 
-    static constexpr int kNumBanks = 16;
+    static constexpr int kNumBanks      = 16;
+    static constexpr int kNumGlobalPads = 5;   // persistent loop pads in .gjm file
 
     std::array<GjmBank, kNumBanks> banks;
+    PadSettings globalPads[kNumGlobalPads];    // saved/loaded from <GlobalLoopPads> section
+
     juce::File gjmFile;
     int  activeBank = 0;   // 0-based
     bool isLoaded   = false;
@@ -68,6 +71,15 @@ public:
     void reset()
     {
         for (auto& b : banks) b.reset();
+        for (int i = 0; i < kNumGlobalPads; ++i)
+        {
+            globalPads[i] = PadSettings{};
+            globalPads[i].padIndex    = kNumBanks + i;  // indices 16-20
+            // Disable MIDI routing for global pads in new sessions — avoids collisions
+            // with kit pad defaults (midiNote=60 on all).
+            globalPads[i].midiNote    = -1;
+            globalPads[i].midiChannel = -1;
+        }
         gjmFile    = juce::File{};
         activeBank = 0;
         isLoaded   = true;
@@ -116,14 +128,37 @@ public:
         for (auto& b : banks)
             b.reset();
 
+        // Reset global pads to MIDI-disabled before loading so any pad absent from
+        // the XML does not accidentally inherit the PadSettings default of midiNote=60.
+        for (int i = 0; i < kNumGlobalPads; ++i)
+        {
+            globalPads[i] = PadSettings{};
+            globalPads[i].padIndex    = kNumBanks + i;
+            globalPads[i].midiNote    = -1;
+            globalPads[i].midiChannel = -1;
+        }
+
         for (auto* bankEl : xml->getChildIterator())
         {
-            if (bankEl->getTagName() != "Bank") continue;
-            const int idx = bankEl->getIntAttribute ("index", -1);
-            if (idx < 0 || idx >= kNumBanks) continue;
-            banks[idx].kitFilePath = resolveKitPath (bankEl->getStringAttribute ("kitPath"), file).getFullPathName();
-            banks[idx].displayName = bankEl->getStringAttribute (
-                "name", "Bank " + juce::String (idx + 1));
+            if (bankEl->getTagName() == "Bank")
+            {
+                const int idx = bankEl->getIntAttribute ("index", -1);
+                if (idx < 0 || idx >= kNumBanks) continue;
+                banks[idx].kitFilePath = resolveKitPath (bankEl->getStringAttribute ("kitPath"), file).getFullPathName();
+                banks[idx].displayName = bankEl->getStringAttribute (
+                    "name", "Bank " + juce::String (idx + 1));
+            }
+            else if (bankEl->getTagName() == "GlobalLoopPads")
+            {
+                for (auto* padEl : bankEl->getChildIterator())
+                {
+                    if (padEl->getTagName() != "GlobalPad") continue;
+                    const int idx = padEl->getIntAttribute ("index", -1);
+                    if (idx < 0 || idx >= kNumGlobalPads) continue;
+                    globalPads[idx].loadFromXml (*padEl);
+                    globalPads[idx].padIndex = kNumBanks + idx;
+                }
+            }
         }
 
         isLoaded   = true;
@@ -168,6 +203,15 @@ public:
             bankEl->setAttribute ("kitPath", storeKitPath (juce::File (banks[i].kitFilePath), file));
             bankEl->setAttribute ("name",    banks[i].displayName);
         }
+
+        auto* globalEl = root->createNewChildElement ("GlobalLoopPads");
+        for (int i = 0; i < kNumGlobalPads; ++i)
+        {
+            auto* padEl = globalEl->createNewChildElement ("GlobalPad");
+            padEl->setAttribute ("index", i);
+            globalPads[i].saveToXml (*padEl);
+        }
+
         return root->writeTo (file);
     }
 

@@ -34,6 +34,19 @@ MainComponent::MainComponent()
     addAndMakeVisible (globalControlsBar);
     addAndMakeVisible (padGrid);
 
+    // ── Global Loop Column ──────────────────────────────────────
+    addAndMakeVisible (globalLoopColumn);
+
+    globalLoopColumn.onPadSelected = [this] (int slotIdx)
+    {
+        selectGlobalPad (slotIdx);
+    };
+
+    globalLoopColumn.onPadTogglePlayback = [this] (int slotIdx)
+    {
+        toggleGlobalPadPlayback (slotIdx);
+    };
+
     padGrid.onPadTriggered = [this] (int padIndex)
     {
         if (!padManager.hasEngine (padIndex)) return;
@@ -82,8 +95,19 @@ MainComponent::MainComponent()
         const auto t0 = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
 
         // ── Step 1: Capture outgoing pad state (in-memory, no disk flush) ──
+        // MUST happen BEFORE padSelectionSource is changed.  When we were on a G pad,
+        // captureSampleCardToPadSettings checks padSelectionSource==Global and routes to
+        // captureGlobalPadFromSampleCard — saving G pad state correctly.  If padSelectionSource
+        // were switched to Bank first, that guard would miss and the G pad's SampleCard data
+        // (midiNote=60, midiChannel=1 defaults) would be written into the outgoing kit pad,
+        // corrupting its MIDI mapping.
         captureSampleCardToPadSettings (padManager.selectedPadIndex);
         saveOutgoingSampleState();
+
+        // Switching to a bank pad — deselect any active global pad slot.
+        padSelectionSource = PadSelectionSource::Bank;
+        globalLoopColumn.clearSelection();
+        sampleCard.setRecGlobalPadMode(false);
 
         // ── Step 2: Switch active pad index — instant (atomic-equivalent for UI thread) ──
         padManager.selectPad (padIndex);
@@ -346,6 +370,16 @@ MainComponent::MainComponent()
           return 1;
       };
       sampleCard.onTrimRequested = [this] { performTrimAsync(); };
+
+      sampleCard.onTransferKitPadToGlobal = [this] (int kitPadIdx, int globalPadIdx)
+      {
+          transferKitPadToGlobal(kitPadIdx, globalPadIdx);
+      };
+
+      sampleCard.onDropGlobalPad = [this] (int globalPadIdx)
+      {
+          dropGlobalPad(globalPadIdx);
+      };
 
       // FIX 2: Fast path for EQ Reset — write pre-computed flat coefficients atomically.
       // No coefficient math, no resetEqState() data race, no synchronous disk write.
@@ -788,15 +822,27 @@ void MainComponent::resized()
     strip.removeFromTop (kGap);
 
     // =========================================================
-    // SAMPLE CARD  (kCardH, centred)
+    // SAMPLE CARD + GLOBAL LOOP COLUMN  (kCardH, centred)
     // =========================================================
     {
+        constexpr int kGlobalColW = 62;  // width of GlobalLoopColumn
+        constexpr int kGlobalColGap = 6; // gap between card and column
+
         auto cardStrip = strip.removeFromTop (dynamicCardH);
-        int  cardW     = getWidth() - kHMargin * 2;
-        if (cardW < 100) cardW = 100;
-        auto cardBounds = juce::Rectangle<int> (0, 0, cardW, dynamicCardH)
-                              .withCentre (cardStrip.getCentre());
-        sampleCard.setBounds (cardBounds);
+        int  totalW    = getWidth() - kHMargin * 2;
+        if (totalW < 100) totalW = 100;
+
+        // Reserve space for GlobalLoopColumn on the right
+        const int cardW = juce::jmax (100, totalW - kGlobalColW - kGlobalColGap);
+
+        // Centre the combined block (card + gap + column) in the available width
+        const int combinedW = cardW + kGlobalColGap + kGlobalColW;
+        const int startX    = kHMargin + (totalW - combinedW) / 2;
+
+        sampleCard.setBounds (startX, cardStrip.getY(), cardW, dynamicCardH);
+        globalLoopColumn.setBounds (startX + cardW + kGlobalColGap,
+                                    cardStrip.getY(),
+                                    kGlobalColW, dynamicCardH);
     }
 
     strip.removeFromTop (kGap);
@@ -1303,10 +1349,48 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
         }
     }
 
+    // Global loop pad MIDI routing — checked before bank-pad routing.
+    // Each global pad has its own midiNote/midiChannel in padManager.globalSettings[].
+    if (message.isNoteOn() || message.isNoteOff())
+    {
+        const int note    = message.getNoteNumber();
+        const int channel = message.getChannel();
+
+        for (int g = 0; g < PadManager::kNumGlobalPads; ++g)
+        {
+            const auto& gs = padManager.globalSettings[g];
+            if (gs.midiNote >= 0 && gs.midiChannel >= 0
+                && gs.midiNote == note && (gs.midiChannel == 0 || gs.midiChannel == channel))
+            {
+                if (message.isNoteOn() && padManager.hasGlobalEngine(g))
+                {
+                    // Inject noteOn directly — global engines don't go through midiCollector
+                    padManager.getGlobalEngine(g).getSynthesiser().noteOn(
+                        channel, note, message.getFloatVelocity());
+                    juce::MessageManager::callAsync([this, g] {
+                        globalLoopColumn.triggerFlash(g);
+                    });
+                }
+                else if (message.isNoteOff() && padManager.hasGlobalEngine(g))
+                {
+                    padManager.getGlobalEngine(g).getSynthesiser().noteOff(
+                        channel, note, message.getFloatVelocity(), true);
+                }
+                return;  // consumed by global pad
+            }
+        }
+    }
+
     // Channel filter: drop messages on wrong channel (0 = any).
-    const int selectedChannel = sampleCard.getMidiChannel();
-    if (selectedChannel != 0 && message.getChannel() != selectedChannel)
-        return;
+    // Skip filter entirely when a G pad is displayed — G pads default to midiChannel=1
+    // and would incorrectly block all MIDI from kit pads on other channels while the
+    // SampleCard shows a G pad.  The per-pad synthesizer note-range already handles routing.
+    if (padSelectionSource == PadSelectionSource::Bank)
+    {
+        const int selectedChannel = sampleCard.getMidiChannel();
+        if (selectedChannel != 0 && message.getChannel() != selectedChannel)
+            return;
+    }
 
     // Add to lock-free FIFO — audio thread drains this each block.
     // This is the ONLY operation that affects audio latency in this path.
@@ -1634,6 +1718,149 @@ void MainComponent::preloadPadEngineAsync(int padIdx, juce::File file, PadSettin
     });
 }
 
+void MainComponent::preloadGlobalPadEngineAsync(int globalPadIdx, juce::File file, PadSettings settings)
+{
+    backgroundThreads.addJob([this, globalPadIdx, file, settings]()
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+        if (reader == nullptr)
+            return;
+
+        auto* sample = new MappedSample();
+        sample->file            = file;
+        sample->name            = file.getFileName();
+        sample->rootNote        = juce::jlimit(0, 127, settings.midiNote >= 0 ? settings.midiNote : 60);
+        sample->lowNote         = sample->rootNote;
+        sample->highNote        = sample->rootNote;
+        sample->sampleRate      = reader->sampleRate;
+        sample->numChannels     = reader->numChannels;
+        sample->lengthInSamples = reader->lengthInSamples;
+        sample->attack          = 0.01;
+        sample->release         = 0.1;
+        sample->startPointSeconds = settings.startPointSeconds;
+        sample->endPointSeconds   = settings.endPointSeconds;
+        sample->pitchOffset       = settings.pitchCents;
+
+        auto buffer = std::make_shared<juce::AudioBuffer<float>>(
+            (int)reader->numChannels, (int)reader->lengthInSamples);
+        if (!reader->read(buffer.get(), 0, (int)reader->lengthInSamples, 0, true, true))
+        {
+            delete sample;
+            return;
+        }
+        sample->audioData = std::move(buffer);
+
+        const int         peakNumCh = (int)reader->numChannels;
+        const juce::int64 peakNS   = reader->lengthInSamples;
+        const double      peakSR   = reader->sampleRate;
+
+        auto peaks = std::make_unique<WaveformPeakBin[]>(kWaveformPeakBins);
+        {
+            const float* L = sample->audioData->getReadPointer(0);
+            const float* R = (peakNumCh > 1) ? sample->audioData->getReadPointer(1) : L;
+            for (int bin = 0; bin < kWaveformPeakBins; ++bin)
+            {
+                const juce::int64 sS = (juce::int64)((double)bin       / kWaveformPeakBins * peakNS);
+                const juce::int64 sE = juce::jmin((juce::int64)((double)(bin+1) / kWaveformPeakBins * peakNS), peakNS);
+                WaveformPeakBin& pb = peaks[bin];
+                pb.minL = pb.minR = 1.0f; pb.maxL = pb.maxR = -1.0f;
+                for (juce::int64 s = sS; s < sE; ++s)
+                {
+                    pb.minL = juce::jmin(pb.minL, L[s]); pb.maxL = juce::jmax(pb.maxL, L[s]);
+                    pb.minR = juce::jmin(pb.minR, R[s]); pb.maxR = juce::jmax(pb.maxR, R[s]);
+                }
+            }
+        }
+
+        juce::MessageManager::callAsync(
+            [this, globalPadIdx, sample, settings, file,
+             peaks = std::move(peaks), peakNumCh, peakNS, peakSR]() mutable
+        {
+            PadAudioEngine& engine = padManager.getGlobalEngine(globalPadIdx);
+
+            engine.muteOutput.store(true);
+            engine.clearActiveSoundFlags();
+            engine.forceStopAllVoices();
+            engine.clearSoundsAndVoices();
+            engine.allNotesOff(0, false);
+
+            {
+                juce::ScopedLock lock(engine.sampleLock);
+                engine.samples.clear();
+                engine.selectedSampleIndex = 0;
+                engine.samples.add(sample);
+            }
+
+            engine.storePeakCache(peaks.get(), kWaveformPeakBins, peakNumCh, peakNS, peakSR);
+
+            class DummyAudioReader : public juce::AudioFormatReader
+            {
+            public:
+                DummyAudioReader(double sr, unsigned int ch)
+                    : juce::AudioFormatReader(nullptr, "Dummy")
+                { sampleRate=sr; numChannels=ch; lengthInSamples=1; bitsPerSample=32; usesFloatingPointData=true; }
+                bool readSamples(int* const* dest, int numDest, int startOff,
+                                 juce::int64, int num) override
+                {
+                    for (int ch=0;ch<numDest;++ch)
+                        if(dest[ch]) memset(reinterpret_cast<float*>(dest[ch])+startOff,0,(size_t)num*sizeof(float));
+                    return true;
+                }
+            };
+            DummyAudioReader dummyReader(sample->sampleRate, (unsigned int)sample->numChannels);
+
+            const juce::int64 bufTotal = (juce::int64)sample->audioData->getNumSamples();
+            juce::int64 startSmp = 0, endSmp = juce::jmax((juce::int64)1, bufTotal - 1);
+            if (sample->startPointSeconds > 0.0 && sample->sampleRate > 0)
+                startSmp = juce::jlimit((juce::int64)0, endSmp-1, (juce::int64)(sample->startPointSeconds * sample->sampleRate));
+            if (sample->endPointSeconds > 0.0 && sample->sampleRate > 0)
+                endSmp = juce::jlimit(startSmp+1, bufTotal-1, (juce::int64)(sample->endPointSeconds * sample->sampleRate));
+
+            juce::BigInteger noteRange;
+            noteRange.setRange(0, 128, false);
+            noteRange.setBit(sample->rootNote);
+
+            auto* sound = new LoopingSamplerSound(
+                sample->name, dummyReader, noteRange,
+                sample->rootNote, sample->attack, sample->release, 10.0);
+            sound->fullAudioData = sample->audioData;
+            sound->startSampleAtomic.store(startSmp);
+            sound->endSampleAtomic.store(endSmp);
+            sound->loopEnabled.store(settings.loopEnabled);
+            sound->pitchOffsetAtomic.store(settings.pitchCents);
+            sound->oneShotEnabled.store(settings.oneShotEnabled);
+            sound->baseTuningRatioAtomic.store(1.0f);
+            sound->customAdsrEnabled.store(settings.adsrEnabled);
+            sound->customAdsrAttackMs.store(settings.adsrAttackMs);
+            sound->customAdsrDecayMs.store(settings.adsrDecayMs);
+            sound->customAdsrSustain.store(settings.adsrSustain);
+            sound->customAdsrReleaseMs.store(settings.adsrReleaseMs);
+            sound->reverseEnabled.store(settings.reverseEnabled);
+            sound->bounceEnabled.store(settings.bounceEnabled);
+            engine.getSynthesiser().addSound(sound);
+
+            engine.loopEnabled.store(settings.loopEnabled);
+            engine.volumeGain.store(settings.volumeLevel);
+
+            engine.muteOutput.store(false);
+
+            // Update the column state now that audio is ready.
+            globalLoopColumn.setSlotName (globalPadIdx, file.getFileName());
+            globalLoopColumn.setSlotState (globalPadIdx, GlobalLoopColumn::SlotState::Loaded);
+
+            DBG ("[G-PAD] preloadGlobalPadEngineAsync done: G" + juce::String(globalPadIdx + 1)
+                 + " = " + file.getFileName());
+
+            // If this G pad is currently selected, refresh the waveform display.
+            if (padSelectionSource == PadSelectionSource::Global
+                && selectedGlobalPadIndex == globalPadIdx)
+            {
+                selectGlobalPad(globalPadIdx);
+            }
+        });
+    });
+}
+
 void MainComponent::updateSamplerSounds()
 {
     pad().getSynthesiser().clearSounds();
@@ -1830,47 +2057,70 @@ void MainComponent::loadKitFromFile (const juce::File& file)
                                        : juce::File (ps.sampleFilePath).getFileName());
     }
 
-    // Load the currently selected pad into the UI (with all settings restored)
-    const int curPad = padManager.selectedPadIndex;
-    const auto& curPs = padManager.padSettings[curPad];
-    if (!curPs.sampleFilePath.isEmpty())
+    if (padSelectionSource == PadSelectionSource::Global)
     {
-        juce::File f (curPs.sampleFilePath);
-        if (f.existsAsFile())
+        // A G pad is currently displayed in the SampleCard.  Loading a bank kit must NOT
+        // call loadSampleFileAsync — its callAsync tail fires saveCurrentSampleState() →
+        // captureSampleCardToPadSettings() → captureGlobalPadFromSampleCard(), which would
+        // overwrite the G pad's settings with whichever kit pad happens to be in
+        // padManager.selectedPadIndex.  Instead, preload all kit engines in the background
+        // and keep the SampleCard showing the G pad unchanged.
+        for (int i = 0; i < PadManager::kMaxPads; ++i)
         {
-            // Reset folder navigation so Prev/Next scans the correct folder after kit load.
-            // Same pattern as onPadSelected — without this, currentFolder and folderAudioFiles
-            // remain stale from the previous session and Prev/Next navigates the wrong folder.
-            currentFolder = f.getParentDirectory();
+            const auto& ps = padManager.padSettings[i];
+            if (!ps.sampleFilePath.isEmpty())
             {
-                juce::ScopedWriteLock wlock (folderLock);
-                folderAudioFiles.clear();
+                juce::File f (ps.sampleFilePath);
+                if (f.existsAsFile())
+                    preloadPadEngineAsync (i, f, ps);
             }
-            currentFileIndex = -1;
+        }
+        // Refresh the G pad display so any SampleCard controls that depend on kit state
+        // (e.g. MnFreeze) are kept in sync.
+        selectGlobalPad (selectedGlobalPadIndex);
+    }
+    else
+    {
+        // Load the currently selected kit pad into the UI (with all settings restored)
+        const int curPad = padManager.selectedPadIndex;
+        const auto& curPs = padManager.padSettings[curPad];
+        if (!curPs.sampleFilePath.isEmpty())
+        {
+            juce::File f (curPs.sampleFilePath);
+            if (f.existsAsFile())
+            {
+                // Reset folder navigation so Prev/Next scans the correct folder after kit load.
+                currentFolder = f.getParentDirectory();
+                {
+                    juce::ScopedWriteLock wlock (folderLock);
+                    folderAudioFiles.clear();
+                }
+                currentFileIndex = -1;
 
-            sampleCard.restoreZoomAndScroll (1.0, 0.0f);
-            loadSampleFileAsync (f, /*autoPlay=*/false, true, false, padSettingsToSnapshot (curPs));
+                sampleCard.restoreZoomAndScroll (1.0, 0.0f);
+                loadSampleFileAsync (f, /*autoPlay=*/false, true, false, padSettingsToSnapshot (curPs));
+            }
+            else
+            {
+                sampleCard.setEmptyState (true);
+            }
         }
         else
         {
             sampleCard.setEmptyState (true);
         }
-    }
-    else
-    {
-        sampleCard.setEmptyState (true);
-    }
 
-    // Preload audio for all other pads in the background
-    for (int i = 0; i < PadManager::kMaxPads; ++i)
-    {
-        if (i == curPad) continue;
-        const auto& ps = padManager.padSettings[i];
-        if (!ps.sampleFilePath.isEmpty())
+        // Preload audio for all other pads in the background
+        for (int i = 0; i < PadManager::kMaxPads; ++i)
         {
-            juce::File f (ps.sampleFilePath);
-            if (f.existsAsFile())
-                preloadPadEngineAsync (i, f, ps);
+            if (i == curPad) continue;
+            const auto& ps = padManager.padSettings[i];
+            if (!ps.sampleFilePath.isEmpty())
+            {
+                juce::File f (ps.sampleFilePath);
+                if (f.existsAsFile())
+                    preloadPadEngineAsync (i, f, ps);
+            }
         }
     }
 
@@ -2047,6 +2297,35 @@ void MainComponent::finishGjmLoad()
     gjmParsing.store (false);
     globalControlsBar.setNavEnabled (true);
 
+    // Restore global loop pads from GjmManager into PadManager.
+    // Done before switchGjmBank so the audio engines get pre-warmed.
+    for (int g = 0; g < PadManager::kNumGlobalPads; ++g)
+    {
+        padManager.globalSettings[g] = gjmManager.globalPads[g];
+
+        const auto& gs = padManager.globalSettings[g];
+        if (!gs.sampleFilePath.isEmpty())
+        {
+            juce::File f (gs.sampleFilePath);
+            if (f.existsAsFile())
+            {
+                globalLoopColumn.setSlotName (g, f.getFileName());
+                globalLoopColumn.setSlotState (g, GlobalLoopColumn::SlotState::Loaded);
+                preloadGlobalPadEngineAsync (g, f, gs);
+            }
+            else
+            {
+                globalLoopColumn.setSlotName (g, "(missing)");
+                globalLoopColumn.setSlotState (g, GlobalLoopColumn::SlotState::Empty);
+            }
+        }
+        else
+        {
+            globalLoopColumn.setSlotName (g, {});
+            globalLoopColumn.setSlotState (g, GlobalLoopColumn::SlotState::Empty);
+        }
+    }
+
     // activeBank is already 0 from loadManifest() — do NOT set it here.
     // Setting it before switchGjmBank(0) would make activeBank == bankIdx inside
     // switchGjmBank, causing the outgoing-save guard to fire and overwrite bank 0's
@@ -2061,6 +2340,10 @@ void MainComponent::finishGjmLoad()
 void MainComponent::saveGjmToFile (const juce::File& file)
 {
     captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+    // Flush global loop pad settings from PadManager into GjmManager before writing
+    for (int g = 0; g < PadManager::kNumGlobalPads; ++g)
+        gjmManager.globalPads[g] = padManager.globalSettings[g];
 
     // Flush active bank's in-memory pads into gjmManager before writing
     {
@@ -2132,7 +2415,22 @@ void MainComponent::switchGjmBank (int bankIdx)
     // bank 0 data.
     if (gjmManager.activeBank != bankIdx)
     {
-        captureSampleCardToPadSettings (padManager.selectedPadIndex);
+        // When a G pad is selected, captureSampleCardToPadSettings routes to
+        // captureGlobalPadFromSampleCard which reads the SampleCard — but the
+        // SampleCard may still hold stale kit-pad MIDI values from the previous
+        // operation (before the G pad was displayed).  Use saveGlobalPadStateFromEngine
+        // instead, which reads the engine for audio data and the SampleCard only when
+        // this G pad is the one actually shown.
+        if (padSelectionSource == PadSelectionSource::Bank)
+        {
+            captureSampleCardToPadSettings (padManager.selectedPadIndex);
+        }
+        else
+        {
+            saveGlobalPadStateFromEngine (selectedGlobalPadIndex);
+            // kit pad settings in padManager.padSettings are already up-to-date
+            // (captureSampleCardToPadSettings was called when the kit pad was last deselected)
+        }
         auto& outgoing = gjmManager.banks[gjmManager.activeBank];
         for (int i = 0; i < PadManager::kMaxPads; ++i)
             outgoing.pads[i] = padManager.padSettings[i];
@@ -2188,7 +2486,39 @@ void MainComponent::switchGjmBank (int bankIdx)
                                        : juce::File (ps.sampleFilePath).getFileName());
     }
 
-    // Load the selected pad's audio into SampleCard
+    const bool gPadSelected = (padSelectionSource == PadSelectionSource::Global);
+    const int  savedGIdx    = gPadSelected ? selectedGlobalPadIndex : -1;
+
+    // When a G pad is selected: re-display it immediately (before any loadSampleFileAsync
+    // callAsync fires) and pre-warm all kit pad engines in the background, then return early.
+    // The previous deferred-callAsync approach caused a race: loadSampleFileAsync's own
+    // callAsync modified the SampleCard between the bank-switch and the deferred
+    // selectGlobalPad, so the G pad display read stale SampleCard state.
+    if (gPadSelected && savedGIdx >= 0)
+    {
+        // Pre-warm kit pad engines first (non-blocking background jobs) so MIDI
+        // triggers respond instantly after the bank switch.
+        for (int i = 0; i < PadManager::kMaxPads; ++i)
+        {
+            const auto& ps = padManager.padSettings[i];
+            if (!ps.sampleFilePath.isEmpty())
+            {
+                juce::File f (ps.sampleFilePath);
+                if (f.existsAsFile())
+                    preloadPadEngineAsync (i, f, ps);
+            }
+        }
+
+        // Now redisplay the G pad from clean globalSettings state.
+        // globalSettings[savedGIdx] was saved by saveGlobalPadStateFromEngine above,
+        // so it is authoritative and not contaminated by SampleCard display state.
+        selectGlobalPad (savedGIdx);
+        updateGjmUI();
+        DBG ("[GJM] Switched to bank " + juce::String (bankIdx + 1) + ": " + incoming.displayName + " (G pad retained)");
+        return;
+    }
+
+    // Kit pad selected path: load the selected kit pad's audio into the SampleCard.
     const int  curPad = padManager.selectedPadIndex;
     const auto& curPs = padManager.padSettings[curPad];
     if (!curPs.sampleFilePath.isEmpty())
@@ -2697,13 +3027,6 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         pad().clearSoundsAndVoices();
         pad().allNotesOff(0, false);
 
-        // ── Step 3: Reset card to neutral state ───────────────────────────────────
-        sampleCard.resetStartPoint();
-        sampleCard.resetEndPoint();
-        sampleCard.setLoopEnabled(false);
-        sampleCard.resetFreeze();
-        sampleCard.resetBounce();
-
         // ── Step 4: Install new sample ────────────────────────────────────────────
         {
             juce::ScopedLock lock(pad().sampleLock);
@@ -2712,15 +3035,46 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             pad().samples.add(sample);
         }
 
+        // Cache peaks in engine immediately — needed for instant pad-switch display and
+        // for the SampleCard delivery below (must happen before std::move of peaks).
+        pad().storePeakCache(peaks.get(), kWaveformPeakBins, peakNumCh, peakNSamples, peakSR);
+
+        // ── Guard: when a global pad is selected, skip all SampleCard UI updates ────
+        // Audio is correctly installed in the kit-pad engine above.
+        // Updating the SampleCard here would overwrite the global pad's display.
+        if (padSelectionSource == PadSelectionSource::Global)
+        {
+            const auto& ps = padManager.padSettings[padManager.selectedPadIndex];
+            sample->rootNote  = trimSnapshot.valid ? trimSnapshot.midiNote
+                                                   : (ps.midiNote >= 0 ? ps.midiNote : 60);
+            sample->lowNote   = sample->rootNote;
+            sample->highNote  = sample->rootNote;
+            sample->pitchOffset = trimSnapshot.valid
+                ? (trimSnapshot.pitchCents + trimSnapshot.basePitchOffset * 100)
+                : ps.pitchCents;
+            sample->startPointSeconds = trimSnapshot.valid ? trimSnapshot.startPointSeconds
+                                                           : ps.startPointSeconds;
+            sample->endPointSeconds   = trimSnapshot.valid ? trimSnapshot.endPointSeconds
+                                                           : ps.endPointSeconds;
+            pad().loopEnabled.store (trimSnapshot.valid ? trimSnapshot.loopEnabled : ps.loopEnabled);
+            pad().volumeGain.store  (trimSnapshot.valid ? trimSnapshot.volumeLevel  : ps.volumeLevel);
+            updateSamplerSounds();
+            pad().muteOutput.store(false);
+            return;
+        }
+
+        // ── Step 3: Reset card to neutral state ───────────────────────────────────
+        sampleCard.resetStartPoint();
+        sampleCard.resetEndPoint();
+        sampleCard.setLoopEnabled(false);
+        sampleCard.resetFreeze();
+        sampleCard.resetBounce();
+
         sampleCard.setSampleName(file.getFileName());
         sampleCard.setEmptyState(false);  // Clear "No sample loaded" overlay now that audio is ready
 
         // Deliver pre-computed peaks BEFORE setWaveform() so the very first repaint
         // uses the peak data — zero disk I/O in paint() from this point forward.
-        // Cache peaks in the engine so pad switching can serve them instantly
-        // (no disk access when the user clicks another pad and comes back).
-        pad().storePeakCache(peaks.get(), kWaveformPeakBins, peakNumCh, peakNSamples, peakSR);
-
         sampleCard.setWaveformPeaks(std::move(peaks), peakNumCh, peakNSamples, peakSR);
 
         // Pass sample metadata already read on the background thread — this avoids
@@ -3090,19 +3444,27 @@ void MainComponent::midiNoteChanged(int newNote)
 {
     const double t0 = juce::Time::getMillisecondCounterHiRes();
 
-    // Always update the current sample if one is selected
-    if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < pad().samples.size())
+    if (newNote >= 0)
     {
-        auto* sample = pad().samples[pad().selectedSampleIndex];
-        sample->rootNote = newNote;
-        sample->lowNote  = newNote;
-        sample->highNote = newNote;
-
-
-        // LoopingSamplerSound stores the trigger noteRange — must rebuild to change it.
-        // This is the ONE and ONLY updateSamplerSounds() call for MIDI note changes.
-        updateSamplerSounds();
-
+        // Valid note — update sample mapping and rebuild sounds.
+        if (pad().selectedSampleIndex >= 0 && pad().selectedSampleIndex < (int)pad().samples.size())
+        {
+            auto* sample = pad().samples[pad().selectedSampleIndex];
+            sample->rootNote = newNote;
+            sample->lowNote  = newNote;
+            sample->highNote = newNote;
+            // LoopingSamplerSound stores the trigger noteRange — must rebuild to change it.
+            updateSamplerSounds();
+        }
+    }
+    else
+    {
+        // Disabled (-1) — clear sounds so no MIDI note triggers this pad.
+        pad().muteOutput.store(true);
+        pad().clearActiveSoundFlags();
+        pad().forceStopAllVoices();
+        pad().clearSoundsAndVoices();
+        pad().muteOutput.store(false);
     }
 
     // Keep in-memory pad settings in sync — no disk write.
@@ -3877,6 +4239,14 @@ void MainComponent::performTrimAsync()
 void MainComponent::beginRecording (double bpm, double quantInBeats,
                                     bool metronomeOn, int targetPadIndex, bool overdub)
 {
+    // Safety: recording only targets kit pads 1-16 (indices 0-15).
+    // G pad recording (indices 16+) is not supported.
+    if (targetPadIndex < 0 || targetPadIndex >= 16)
+    {
+        sampleCard.showTrimToast ("Recording targets kit pads 1-16 only", true);
+        return;
+    }
+
     // If the target pad already has a sample, go through the same drop-pad dialog
     // flow before starting the recording.  The user can delete, rename, or keep the
     // existing file; recording starts only if the pad is actually dropped.
@@ -4253,12 +4623,21 @@ void MainComponent::finalizeLiveRender()
             juce::MessageManager::callAsync ([this, finalFile, targetPad,
                                               targetSnap]()
             {
+                // Safety: only kit pads 0-15 are valid recording targets.
+                if (targetPad < 0 || targetPad >= 16)
+                {
+                    printf ("[REC] Invalid target pad %d — aborting finalize\n", targetPad);
+                    return;
+                }
+
                 captureSampleCardToPadSettings (padManager.selectedPadIndex);
                 saveOutgoingSampleState();
 
-                // Switch engine and visual grid selection to the target pad.
+                // Switch engine and visual grid selection to the target bank pad.
+                padSelectionSource = PadSelectionSource::Bank;
+                globalLoopColumn.clearSelection();
                 padManager.selectPad (targetPad);
-                padGrid.selectPadQuiet (targetPad);   // turn target pad purple in grid
+                padGrid.selectPadQuiet (targetPad);
 
                 // Reset folder navigation so Prev/Next browses the recorded file's folder.
                 currentFolder = finalFile.getParentDirectory();
@@ -4438,11 +4817,12 @@ void MainComponent::dropTargetPadWithCallback (int padIndex, std::function<void(
         return {};
     };
 
-    // ── Dialog 1: Delete / Keep / Cancel ──────────────────────────────────────
+    // ── Dialog 1: Drop Pad / Delete / Keep / Cancel ───────────────────────────
     auto* d1 = new juce::AlertWindow (
         "Drop Pad: " + sampleFile.getFileName(),
         "What do you want to do with the sample file?",
         juce::AlertWindow::QuestionIcon);
+    d1->addButton ("Drop Pad",   3);   // clear pad immediately, file untouched
     d1->addButton ("Delete file", 1);
     d1->addButton ("Keep file",   2);
     d1->addButton ("Cancel",      0);
@@ -4454,6 +4834,13 @@ void MainComponent::dropTargetPadWithCallback (int padIndex, std::function<void(
             {
                 if (r1 == 0)   // Cancel — leave pad unchanged
                     return;
+
+                if (r1 == 3)   // Drop Pad only — file left completely untouched on disk
+                {
+                    executeDropPad (padIdx);
+                    if (onDropComplete) onDropComplete();
+                    return;
+                }
 
                 if (r1 == 1)   // Delete file from disk, then drop
                 {
@@ -4945,8 +5332,532 @@ void MainComponent::saveCurrentSampleState()
     updateGjmUI();
 }
 
+void MainComponent::selectGlobalPad (int slotIdx)
+{
+    if (slotIdx < 0 || slotIdx >= PadManager::kNumGlobalPads) return;
+
+    // Save outgoing state before switching source.
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+    // Deselect current kit pad — restore to Loaded/Empty color without firing onPadSelected.
+    padGrid.clearSelection();
+
+    padSelectionSource      = PadSelectionSource::Global;
+    selectedGlobalPadIndex  = slotIdx;
+    globalLoopColumn.selectSlot (slotIdx);
+
+    auto& gs = padManager.globalSettings[slotIdx];
+
+    // Show in SampleCard — read from the global engine if audio is loaded.
+    auto& engine = padManager.getGlobalEngine (slotIdx);
+
+    // Always update MIDI/settings display from globalSettings — even for empty engines.
+    // Without this, MIDI labels from the previously selected kit pad persist in the SampleCard.
+    sampleCard.updateUIFromSettings (gs);
+    baseTuningLabel.setHz (gs.baseTuningHz);
+
+    if (engine.hasSampleLoaded())
+    {
+        sampleCard.setEmptyState (false);
+
+        sampleCard.setWaveformFileOnly (juce::File (gs.sampleFilePath),
+                                        engine.getPeakNumSamples(),
+                                        engine.getPeakSampleRate());
+        sampleCard.setAudioPeaksFromBuffer (engine.getPeakBins(),
+                                             engine.getPeakNumBins(),
+                                             engine.getPeakNumCh(),
+                                             engine.getPeakNumSamples(),
+                                             engine.getPeakSampleRate());
+        sampleCard.setStartPoint (gs.startPointSeconds);
+        if (gs.endPointSeconds > 0.0)
+            sampleCard.setEndPoint (gs.endPointSeconds);
+        sampleCard.restoreZoomAndScroll (gs.zoomLevel, gs.zoomScrollPosition);
+
+        // Push EQ to engine
+        engine.eqActive.store (gs.eqEnabled);
+        engine.eqFilterModes[0] = gs.eq1Mode;
+        engine.eqFilterModes[1] = gs.eq2Mode;
+        engine.eqFilterModes[2] = gs.eq3Mode;
+        engine.padGain.store (juce::jlimit (0.0f, 2.0f, gs.padGain));
+        const double sr = engine.getSampleRate() > 0.0 ? engine.getSampleRate() : 44100.0;
+        PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+        newCoeffs[0] = engine.computeEqCoeffs (gs.eq1Freq, gs.eq1Gain, gs.eq1Q, gs.eq1Mode, sr);
+        newCoeffs[1] = engine.computeEqCoeffs (gs.eq2Freq, gs.eq2Gain, gs.eq2Q, gs.eq2Mode, sr);
+        newCoeffs[2] = engine.computeEqCoeffs (gs.eq3Freq, gs.eq3Gain, gs.eq3Q, gs.eq3Mode, sr);
+        engine.eqCoeffDB.writeFromUI (newCoeffs);
+    }
+    else
+    {
+        sampleCard.setEmptyState (true);
+    }
+
+    // Switch Rec tab to G-pad transfer mode.
+    sampleCard.setRecGlobalPadMode(true, slotIdx);
+}
+
+void MainComponent::toggleGlobalPadPlayback (int slotIdx)
+{
+    if (slotIdx < 0 || slotIdx >= PadManager::kNumGlobalPads) return;
+
+    auto& gs     = padManager.globalSettings[slotIdx];
+    auto& engine = padManager.getGlobalEngine (slotIdx);
+
+    if (!engine.hasSampleLoaded()) return;
+
+    if (globalPadPlaying[slotIdx])
+    {
+        // Stop — MNFreeze-style: mute → clear freeze → force-stop → restore loop state.
+        globalPadPlaying[slotIdx] = false;
+        engine.muteOutput.store (true);
+
+        for (int i = 0; i < engine.getSynthesiser().getNumSounds(); ++i)
+            if (auto* snd = dynamic_cast<LoopingSamplerSound*> (engine.getSynthesiser().getSound (i).get()))
+                snd->freezeActive.store (false);
+
+        engine.forceStopAllVoices();
+        engine.allNotesOff (0, false);
+
+        // Restore the loop state that was configured in the pad settings.
+        const bool loopOn = gs.loopEnabled;
+        engine.loopEnabled.store (loopOn);
+        for (int i = 0; i < engine.getSynthesiser().getNumSounds(); ++i)
+            if (auto* snd = dynamic_cast<LoopingSamplerSound*> (engine.getSynthesiser().getSound (i).get()))
+                snd->loopEnabled.store (loopOn);
+
+        engine.muteOutput.store (false);
+        globalLoopColumn.setSlotPlaying (slotIdx, false);
+
+        // Sync SampleCard loop/freeze buttons when this G pad is currently displayed.
+        if (padSelectionSource == PadSelectionSource::Global && selectedGlobalPadIndex == slotIdx)
+        {
+            sampleCard.setLoopButtonStateQuiet (gs.loopEnabled);
+            sampleCard.setFreezeButtonStateQuiet (false);
+        }
+    }
+    else
+    {
+        // Start — MNFreeze-style: set freeze+loop on sounds, inject noteOn if silent.
+        globalPadPlaying[slotIdx] = true;
+
+        for (int i = 0; i < engine.getSynthesiser().getNumSounds(); ++i)
+            if (auto* snd = dynamic_cast<LoopingSamplerSound*> (engine.getSynthesiser().getSound (i).get()))
+            {
+                snd->freezeActive.store (true);
+                snd->loopEnabled.store (true);
+            }
+        engine.loopEnabled.store (true);
+
+        // Inject a phantom noteOn if no voice is currently active.
+        // MUST use the sample's rootNote, not gs.midiNote — the LoopingSamplerSound's
+        // noteRange has only the rootNote bit set, so a noteOn on any other number
+        // finds no matching sound and produces silence.
+        if (!engine.isAnyVoiceActive())
+        {
+            int note = 60;
+            {
+                juce::ScopedLock lock (engine.sampleLock);
+                if (engine.selectedSampleIndex >= 0 &&
+                    engine.selectedSampleIndex < engine.samples.size())
+                    note = juce::jlimit (0, 127,
+                        engine.samples[engine.selectedSampleIndex]->rootNote);
+            }
+            engine.getSynthesiser().noteOn (1, note, 0.8f);
+        }
+
+        globalLoopColumn.setSlotPlaying (slotIdx, true);
+
+        // Sync SampleCard loop/freeze buttons when this G pad is currently displayed.
+        if (padSelectionSource == PadSelectionSource::Global && selectedGlobalPadIndex == slotIdx)
+        {
+            sampleCard.setLoopButtonStateQuiet (true);
+            sampleCard.setFreezeButtonStateQuiet (true);
+        }
+    }
+}
+
+void MainComponent::captureGlobalPadFromSampleCard (int slotIdx)
+{
+    if (slotIdx < 0 || slotIdx >= PadManager::kNumGlobalPads) return;
+    auto& gs     = padManager.globalSettings[slotIdx];
+    auto& engine = padManager.getGlobalEngine (slotIdx);
+
+    // Sample file path
+    {
+        juce::ScopedLock lock (engine.sampleLock);
+        if (engine.selectedSampleIndex >= 0 &&
+            engine.selectedSampleIndex < engine.samples.size())
+        {
+            gs.sampleFilePath = engine.samples[engine.selectedSampleIndex]->file.getFullPathName();
+        }
+    }
+
+    gs.pitchCents      = sampleCard.getPitchOffset();
+    gs.basePitchOffset = sampleCard.getBasePitchOffset();
+    gs.baseTuningHz    = sampleCard.getBaseTuningHz();
+
+    gs.loopEnabled    = sampleCard.isLoopEnabled();
+    gs.oneShotEnabled = sampleCard.isOneShotEnabled();
+    gs.reverseEnabled = sampleCard.isReverseEnabled();
+    gs.bounceEnabled  = sampleCard.isBounceEnabled();
+
+    gs.volumeLevel  = sampleCard.getVolume();
+    gs.normEnabled  = sampleCard.isNormEnabled();
+    gs.normTargetDb = sampleCard.getNormTargetDb();
+
+    gs.adsrEnabled   = sampleCard.isAdsrEnabled();
+    gs.adsrAttackMs  = sampleCard.getAdsrAttackMs();
+    gs.adsrDecayMs   = sampleCard.getAdsrDecayMs();
+    gs.adsrSustain   = sampleCard.getAdsrSustain();
+    gs.adsrReleaseMs = sampleCard.getAdsrReleaseMs();
+
+    gs.padGain   = sampleCard.getEqGain();
+    gs.eqEnabled = sampleCard.isEqEnabled();
+    gs.eq1Freq   = sampleCard.getEqBandFreq(0); gs.eq1Gain = sampleCard.getEqBandGain(0);
+    gs.eq1Q      = sampleCard.getEqBandQ(0);    gs.eq1Mode = engine.eqFilterModes[0];
+    gs.eq2Freq   = sampleCard.getEqBandFreq(1); gs.eq2Gain = sampleCard.getEqBandGain(1);
+    gs.eq2Q      = sampleCard.getEqBandQ(1);    gs.eq2Mode = engine.eqFilterModes[1];
+    gs.eq3Freq   = sampleCard.getEqBandFreq(2); gs.eq3Gain = sampleCard.getEqBandGain(2);
+    gs.eq3Q      = sampleCard.getEqBandQ(2);    gs.eq3Mode = engine.eqFilterModes[2];
+
+    // Markers
+    {
+        juce::ScopedLock lock (engine.sampleLock);
+        if (engine.selectedSampleIndex >= 0 &&
+            engine.selectedSampleIndex < engine.samples.size())
+        {
+            gs.startPointSeconds = engine.samples[engine.selectedSampleIndex]->startPointSeconds;
+            gs.endPointSeconds   = engine.samples[engine.selectedSampleIndex]->endPointSeconds;
+        }
+    }
+
+    gs.midiNote    = sampleCard.getMidiNote();
+    gs.midiChannel = sampleCard.getMidiChannel();
+    gs.activeTab   = sampleCard.getActiveTabIndex();
+
+    // Update column label
+    globalLoopColumn.setSlotName (slotIdx,
+        gs.sampleFilePath.isEmpty()
+            ? juce::String{}
+            : juce::File (gs.sampleFilePath).getFileName());
+}
+
+void MainComponent::saveGlobalPadStateFromEngine (int slotIdx)
+{
+    // Saves globalSettings[slotIdx] in a way that is safe to call even when a different
+    // pad is displayed in the SampleCard.
+    //
+    // The key difference from captureGlobalPadFromSampleCard:
+    //   - Audio state (sample path, markers) is always read from the engine — authoritative.
+    //   - SampleCard state (pitch, ADSR, EQ, MIDI, etc.) is read ONLY when this G pad is
+    //     the one currently shown.  When a different pad is shown, the existing values in
+    //     globalSettings[slotIdx] are left untouched — they were set correctly the last
+    //     time this G pad was displayed.
+    if (slotIdx < 0 || slotIdx >= PadManager::kNumGlobalPads) return;
+
+    auto& gs     = padManager.globalSettings[slotIdx];
+    auto& engine = padManager.getGlobalEngine (slotIdx);
+
+    // Always read audio / sample path from the engine — it is authoritative.
+    {
+        juce::ScopedLock lock (engine.sampleLock);
+        if (engine.selectedSampleIndex >= 0 &&
+            engine.selectedSampleIndex < engine.samples.size())
+        {
+            gs.sampleFilePath    = engine.samples[engine.selectedSampleIndex]->file.getFullPathName();
+            gs.startPointSeconds = engine.samples[engine.selectedSampleIndex]->startPointSeconds;
+            gs.endPointSeconds   = engine.samples[engine.selectedSampleIndex]->endPointSeconds;
+        }
+    }
+
+    // Read SampleCard values only when this G pad is the one currently displayed.
+    // If a kit pad or a different G pad is shown, the SampleCard holds stale/foreign data
+    // and reading it would corrupt this G pad's settings (particularly midiNote/midiChannel).
+    if (padSelectionSource == PadSelectionSource::Global && selectedGlobalPadIndex == slotIdx)
+    {
+        captureGlobalPadFromSampleCard (slotIdx);
+    }
+}
+
+void MainComponent::updateGlobalPadVisuals()
+{
+    for (int g = 0; g < PadManager::kNumGlobalPads; ++g)
+    {
+        const auto& gs = padManager.globalSettings[g];
+        if (gs.sampleFilePath.isEmpty())
+        {
+            globalLoopColumn.setSlotName  (g, {});
+            globalLoopColumn.setSlotState (g, GlobalLoopColumn::SlotState::Empty);
+        }
+        else
+        {
+            globalLoopColumn.setSlotName  (g, juce::File(gs.sampleFilePath).getFileName());
+            globalLoopColumn.setSlotPlaying (g, globalPadPlaying[g]);
+        }
+    }
+}
+
+void MainComponent::transferKitPadToGlobal(int kitPadIdx, int globalPadIdx)
+{
+    if (kitPadIdx < 0 || kitPadIdx >= PadManager::kMaxPads) return;
+    if (globalPadIdx < 0 || globalPadIdx >= PadManager::kNumGlobalPads) return;
+
+    auto& srcEngine   = padManager.getEngine(kitPadIdx);
+    auto& dstEngine   = padManager.getGlobalEngine(globalPadIdx);
+    auto& srcSettings = padManager.padSettings[kitPadIdx];
+    auto& dstSettings = padManager.globalSettings[globalPadIdx];
+
+    // Read source sample under lock.
+    std::shared_ptr<juce::AudioBuffer<float>> srcAudio;
+    double srcSampleRate  = 0.0;
+    int    srcNumChannels = 0;
+    int    srcRootNote    = 60;
+    double srcStartSec    = 0.0, srcEndSec = -1.0;
+    juce::File srcFile;
+    {
+        juce::ScopedLock lock(srcEngine.sampleLock);
+        if (srcEngine.samples.size() == 0 || srcEngine.selectedSampleIndex < 0)
+        {
+            juce::MessageManager::callAsync([this, kitPadIdx] {
+                sampleCard.showTrimToast("Kit Pad " + juce::String(kitPadIdx + 1) + " has no sample", true);
+            });
+            return;
+        }
+        const auto* smp = srcEngine.samples[srcEngine.selectedSampleIndex];
+        srcAudio       = smp->audioData;
+        srcSampleRate  = smp->sampleRate;
+        srcNumChannels = smp->numChannels;
+        srcRootNote    = smp->rootNote;
+        srcStartSec    = smp->startPointSeconds;
+        srcEndSec      = smp->endPointSeconds;
+        srcFile        = smp->file;
+    }
+
+    if (!srcAudio || srcAudio->getNumSamples() == 0)
+    {
+        sampleCard.showTrimToast("Kit Pad " + juce::String(kitPadIdx + 1) + " has no audio", true);
+        return;
+    }
+
+    // Stop any playing loop on the destination global pad.
+    if (globalPadPlaying[globalPadIdx])
+    {
+        globalPadPlaying[globalPadIdx] = false;
+        dstEngine.muteOutput.store(true);
+        dstEngine.clearActiveSoundFlags();
+        dstEngine.forceStopAllVoices();
+        dstEngine.allNotesOff(0, false);
+        dstEngine.muteOutput.store(false);
+        globalLoopColumn.setSlotPlaying(globalPadIdx, false);
+    }
+
+    // Copy playback settings from source kit pad, but preserve the global pad's own
+    // MIDI assignment. Global pads have independent MIDI routing; inheriting the kit
+    // pad's midiNote would cause them to intercept that note away from the kit pad.
+    const int savedMidiNote    = dstSettings.midiNote;
+    const int savedMidiChannel = dstSettings.midiChannel;
+    dstSettings              = srcSettings;
+    dstSettings.padIndex     = PadManager::kMaxPads + globalPadIdx;
+    dstSettings.sampleFilePath = srcFile.getFullPathName();
+    dstSettings.midiNote    = savedMidiNote;
+    dstSettings.midiChannel = savedMidiChannel;
+
+    // Install copied sample in destination engine.
+    dstEngine.muteOutput.store(true);
+    dstEngine.clearActiveSoundFlags();
+    dstEngine.forceStopAllVoices();
+    dstEngine.clearSoundsAndVoices();
+
+    {
+        juce::ScopedLock lock(dstEngine.sampleLock);
+        dstEngine.samples.clear();
+        dstEngine.selectedSampleIndex = -1;
+
+        auto* copy          = new PadAudioEngine::MappedSample();
+        copy->file          = srcFile;
+        copy->name          = srcFile.getFileNameWithoutExtension();
+        copy->rootNote      = srcRootNote;
+        copy->lowNote       = srcRootNote;
+        copy->highNote      = srcRootNote;
+        copy->audioData     = srcAudio;           // shared_ptr — safe, read-only
+        copy->sampleRate    = srcSampleRate;
+        copy->numChannels   = srcNumChannels;
+        copy->lengthInSamples = srcAudio->getNumSamples();
+        copy->startPointSeconds = srcStartSec;
+        copy->endPointSeconds   = srcEndSec;
+        dstEngine.samples.add(copy);
+        dstEngine.selectedSampleIndex = 0;
+    }
+
+    // Build the LoopingSamplerSound for the destination engine.
+    {
+        juce::ScopedLock lock(dstEngine.sampleLock);
+        const auto* smp = dstEngine.samples[0];
+
+        class DummyAudioReader : public juce::AudioFormatReader
+        {
+        public:
+            DummyAudioReader(double sr, unsigned int ch)
+                : juce::AudioFormatReader(nullptr, "Dummy")
+            { sampleRate = sr; numChannels = ch; lengthInSamples = 1; bitsPerSample = 32; usesFloatingPointData = true; }
+            bool readSamples(int* const* dest, int numDest, int startOff,
+                             juce::int64, int num) override
+            {
+                for (int ch = 0; ch < numDest; ++ch)
+                    if (dest[ch]) memset(reinterpret_cast<float*>(dest[ch]) + startOff, 0, (size_t)num * sizeof(float));
+                return true;
+            }
+        };
+        DummyAudioReader dummyReader(smp->sampleRate, (unsigned int)smp->numChannels);
+
+        const juce::int64 bufTotal  = (juce::int64)smp->audioData->getNumSamples();
+        juce::int64 startSmp = 0;
+        juce::int64 endSmp   = juce::jmax((juce::int64)1, bufTotal - 1);
+        if (smp->startPointSeconds > 0.0 && smp->sampleRate > 0)
+            startSmp = juce::jlimit((juce::int64)0, endSmp - 1, (juce::int64)(smp->startPointSeconds * smp->sampleRate));
+        if (smp->endPointSeconds > 0.0 && smp->sampleRate > 0)
+            endSmp = juce::jlimit(startSmp + 1, bufTotal - 1, (juce::int64)(smp->endPointSeconds * smp->sampleRate));
+
+        juce::BigInteger noteRange;
+        noteRange.setRange(0, 128, false);
+        noteRange.setBit(juce::jlimit(0, 127, smp->rootNote));
+
+        auto* sound = new LoopingSamplerSound(
+            smp->name, dummyReader, noteRange,
+            smp->rootNote, smp->attack, smp->release, 10.0);
+        sound->fullAudioData = smp->audioData;
+        sound->startSampleAtomic.store(startSmp);
+        sound->endSampleAtomic.store(endSmp);
+        sound->loopEnabled.store(dstSettings.loopEnabled);
+        sound->pitchOffsetAtomic.store(dstSettings.pitchCents);
+        sound->oneShotEnabled.store(dstSettings.oneShotEnabled);
+        sound->reverseEnabled.store(dstSettings.reverseEnabled);
+        sound->bounceEnabled.store(dstSettings.bounceEnabled);
+        sound->customAdsrEnabled.store(dstSettings.adsrEnabled);
+        sound->customAdsrAttackMs.store(dstSettings.adsrAttackMs);
+        sound->customAdsrDecayMs.store(dstSettings.adsrDecayMs);
+        sound->customAdsrSustain.store(dstSettings.adsrSustain);
+        sound->customAdsrReleaseMs.store(dstSettings.adsrReleaseMs);
+        dstEngine.getSynthesiser().addSound(sound);
+    }
+    dstEngine.muteOutput.store(false);
+
+    // Mirror peak cache so waveform shows without disk I/O.
+    dstEngine.storePeakCache(srcEngine.getPeakBins(),
+                              srcEngine.getPeakNumBins(),
+                              srcEngine.getPeakNumCh(),
+                              srcEngine.getPeakNumSamples(),
+                              srcEngine.getPeakSampleRate());
+
+    // Update G pad column visual.
+    globalLoopColumn.setSlotName(globalPadIdx, srcFile.getFileName());
+
+    // If this G pad is currently selected, refresh the SampleCard waveform.
+    if (padSelectionSource == PadSelectionSource::Global
+        && selectedGlobalPadIndex == globalPadIdx)
+    {
+        sampleCard.setEmptyState(false);
+        sampleCard.updateUIFromSettings(dstSettings);
+        sampleCard.setWaveformFileOnly(srcFile,
+                                        dstEngine.getPeakNumSamples(),
+                                        dstEngine.getPeakSampleRate());
+        sampleCard.setAudioPeaksFromBuffer(dstEngine.getPeakBins(),
+                                            dstEngine.getPeakNumBins(),
+                                            dstEngine.getPeakNumCh(),
+                                            dstEngine.getPeakNumSamples(),
+                                            dstEngine.getPeakSampleRate());
+        sampleCard.setStartPoint(srcStartSec);
+        if (srcEndSec > 0.0) sampleCard.setEndPoint(srcEndSec);
+    }
+
+    sampleCard.showTrimToast("Transferred Pad " + juce::String(kitPadIdx + 1)
+                              + " -> G" + juce::String(globalPadIdx + 1));
+
+    // Drop the source kit pad — its sample now lives in the G pad engine.
+    // This mirrors switchGjmBank's empty-pad clearing logic.
+    srcEngine.muteOutput.store (true);
+    srcEngine.clearActiveSoundFlags();
+    srcEngine.forceStopAllVoices();
+    srcEngine.clearSoundsAndVoices();
+    srcEngine.allNotesOff (0, false);
+    {
+        juce::ScopedLock lock (srcEngine.sampleLock);
+        srcEngine.samples.clear();
+        srcEngine.selectedSampleIndex = 0;
+    }
+    srcEngine.clearPeakCache();
+    srcEngine.muteOutput.store (false);
+
+    padManager.padSettings[kitPadIdx].sampleFilePath = {};
+    padGrid.setPadSampleName (kitPadIdx, {});
+
+    // If this kit pad is currently displayed in the SampleCard, show empty state.
+    if (padSelectionSource == PadSelectionSource::Bank
+        && padManager.selectedPadIndex == kitPadIdx)
+    {
+        sampleCard.setEmptyState (true);
+    }
+}
+
+void MainComponent::dropGlobalPad(int globalPadIdx)
+{
+    if (globalPadIdx < 0 || globalPadIdx >= PadManager::kNumGlobalPads) return;
+
+    auto& engine = padManager.getGlobalEngine(globalPadIdx);
+
+    // Stop playback if running.
+    if (globalPadPlaying[globalPadIdx])
+    {
+        globalPadPlaying[globalPadIdx] = false;
+        engine.muteOutput.store(true);
+        engine.clearActiveSoundFlags();
+        engine.forceStopAllVoices();
+        engine.allNotesOff(0, false);
+        engine.muteOutput.store(false);
+        globalLoopColumn.setSlotPlaying(globalPadIdx, false);
+    }
+
+    // Clear audio engine.
+    engine.muteOutput.store(true);
+    engine.clearActiveSoundFlags();
+    engine.forceStopAllVoices();
+    engine.clearSoundsAndVoices();
+    {
+        juce::ScopedLock lock(engine.sampleLock);
+        engine.samples.clear();
+        engine.selectedSampleIndex = -1;
+    }
+    engine.clearPeakCache();
+    engine.muteOutput.store(false);
+
+    // Reset settings — disable MIDI routing so the empty G pad does not
+    // accidentally fire on the default midiNote=60 from PadSettings{}.
+    padManager.globalSettings[globalPadIdx] = PadSettings{};
+    padManager.globalSettings[globalPadIdx].padIndex     = PadManager::kMaxPads + globalPadIdx;
+    padManager.globalSettings[globalPadIdx].midiNote     = -1;
+    padManager.globalSettings[globalPadIdx].midiChannel  = -1;
+
+    // Update column visual.
+    globalLoopColumn.setSlotName (globalPadIdx, {});
+    globalLoopColumn.setSlotState(globalPadIdx, GlobalLoopColumn::SlotState::Empty);
+
+    // If this G pad is currently selected, show empty state.
+    if (padSelectionSource == PadSelectionSource::Global
+        && selectedGlobalPadIndex == globalPadIdx)
+    {
+        sampleCard.setEmptyState(true);
+    }
+}
+
 void MainComponent::captureSampleCardToPadSettings(int padIdx)
 {
+    // If a global loop pad is currently selected in the SampleCard, capture to that instead.
+    if (padSelectionSource == PadSelectionSource::Global)
+    {
+        if (selectedGlobalPadIndex >= 0 && selectedGlobalPadIndex < PadManager::kNumGlobalPads)
+            captureGlobalPadFromSampleCard (selectedGlobalPadIndex);
+        return;
+    }
+
     if (padIdx < 0 || padIdx >= PadManager::kMaxPads) return;
     auto& ps = padManager.getSettings(padIdx);
     auto& engine = padManager.getEngine(padIdx);
