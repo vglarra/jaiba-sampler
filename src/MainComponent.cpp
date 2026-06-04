@@ -342,6 +342,10 @@ MainComponent::MainComponent()
       // Add the sample card
       addAndMakeVisible(sampleCard);
 
+      // Level meter — reads L/R peak atomics written by audio thread each block
+      levelMeter.setSources(&outputPeakLevelL, &outputPeakLevelR);
+      addAndMakeVisible(levelMeter);
+
       // Add listeners for the card buttons
       sampleCard.getAddButton().addListener(this);
       sampleCard.getPrevButton().addListener(this);
@@ -674,6 +678,26 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
             juce::ignoreUnused(elapsedUs, budgetUs);
         }
     }
+
+    // ── Output peak measurement (for level meter) ────────────────────────────────
+    // Measured last — after padManager render, metronome beep, and sine wave — so
+    // master volume is already applied and all pads are included.
+    // Uses startSample offset so the scan covers exactly the region JUCE filled.
+    {
+        float peakL = 0.0f, peakR = 0.0f;
+        const int nCh = bufferToFill.buffer->getNumChannels();
+        auto* dataL = bufferToFill.buffer->getReadPointer(0, bufferToFill.startSample);
+        auto* dataR = nCh > 1
+                    ? bufferToFill.buffer->getReadPointer(1, bufferToFill.startSample)
+                    : dataL;
+        for (int i = 0; i < bufferToFill.numSamples; ++i)
+        {
+            peakL = juce::jmax(peakL, std::abs(dataL[i]));
+            peakR = juce::jmax(peakR, std::abs(dataR[i]));
+        }
+        outputPeakLevelL.store(peakL, std::memory_order_relaxed);
+        outputPeakLevelR.store(peakR, std::memory_order_relaxed);
+    }
 }
 
 void MainComponent::releaseResources()
@@ -822,25 +846,30 @@ void MainComponent::resized()
     strip.removeFromTop (kGap);
 
     // =========================================================
-    // SAMPLE CARD + GLOBAL LOOP COLUMN  (kCardH, centred)
+    // SAMPLE CARD + LEVEL METER + GLOBAL LOOP COLUMN  (kCardH, centred)
     // =========================================================
     {
-        constexpr int kGlobalColW = 62;  // width of GlobalLoopColumn
-        constexpr int kGlobalColGap = 6; // gap between card and column
+        constexpr int kMeterW       = 68; // two-channel segmented meter width
+        constexpr int kMeterGap     = 4;  // gap between meter and card
+        constexpr int kGlobalColW   = 62; // width of GlobalLoopColumn
+        constexpr int kGlobalColGap = 6;  // gap between card and column
 
         auto cardStrip = strip.removeFromTop (dynamicCardH);
         int  totalW    = getWidth() - kHMargin * 2;
         if (totalW < 100) totalW = 100;
 
-        // Reserve space for GlobalLoopColumn on the right
-        const int cardW = juce::jmax (100, totalW - kGlobalColW - kGlobalColGap);
+        // Reserve space for meter (left of card) + GlobalLoopColumn (right of card)
+        const int cardW = juce::jmax (100, totalW - kMeterW - kMeterGap
+                                               - kGlobalColW - kGlobalColGap);
 
-        // Centre the combined block (card + gap + column) in the available width
-        const int combinedW = cardW + kGlobalColGap + kGlobalColW;
+        // Centre the combined block in the available width
+        const int combinedW = kMeterW + kMeterGap + cardW + kGlobalColGap + kGlobalColW;
         const int startX    = kHMargin + (totalW - combinedW) / 2;
 
-        sampleCard.setBounds (startX, cardStrip.getY(), cardW, dynamicCardH);
-        globalLoopColumn.setBounds (startX + cardW + kGlobalColGap,
+        levelMeter.setBounds    (startX, cardStrip.getY(), kMeterW, dynamicCardH);
+        sampleCard.setBounds    (startX + kMeterW + kMeterGap,
+                                  cardStrip.getY(), cardW, dynamicCardH);
+        globalLoopColumn.setBounds (startX + kMeterW + kMeterGap + cardW + kGlobalColGap,
                                     cardStrip.getY(),
                                     kGlobalColW, dynamicCardH);
     }
@@ -3358,6 +3387,15 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         }
         // No disk save — kit must be saved explicitly by the user.
         captureSampleCardToPadSettings(padManager.selectedPadIndex);
+
+        // Mark kit dirty only for user-initiated loads (autoPlay=true).
+        // Kit/session restores (autoPlay=false) and pad-switch loads must not mark dirty.
+        if (autoPlay)
+        {
+            kitIsDirty         = true;
+            gjmManager.isDirty = true;
+            updateGjmUI();
+        }
 
         // Part 2H — update the pad grid name for the currently selected pad.
         padManager.padSettings[padManager.selectedPadIndex].sampleFilePath =

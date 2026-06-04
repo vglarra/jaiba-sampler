@@ -18,6 +18,7 @@
 #include "TrianglePadGrid.h"
 #include "GjmManager.h"
 #include "GlobalLoopColumn.h"
+#include "LevelMeter.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -455,6 +456,9 @@ private:
     // Volume — master volume lives in PadManager; per-pad volume lives in PadAudioEngine.
     // These thin wrappers keep the existing MainComponent callsites unchanged.
     std::atomic<float> masterVolumeGain { 0.7f };  // mirrored to padManager for the knob callback
+    std::atomic<float> outputPeakLevelL { 0.0f };  // left-channel peak, written each block
+    std::atomic<float> outputPeakLevelR { 0.0f };  // right-channel peak, written each block
+    LevelMeter         levelMeter;
 
     //==============================================================================
     // Sine wave generation

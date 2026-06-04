@@ -4561,27 +4561,6 @@ void adjustPitchUp()
             targetPadPlusButton.onClick = [this] { adjustTargetPad(+1); };
             addAndMakeVisible(targetPadPlusButton);
 
-            // ----- Quantize -----
-            quantLabel.setText("Quant", juce::dontSendNotification);
-            quantLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFCECECE));
-            quantLabel.setFont(juce::Font(11.0f));
-            quantLabel.setJustificationType(juce::Justification::centredRight);
-            addAndMakeVisible(quantLabel);
-
-            quantCombo.addItem("None (raw)",    7);
-            quantCombo.addItem("1/4",          1);
-            quantCombo.addItem("1/8",          2);
-            quantCombo.addItem("1/16",         3);
-            quantCombo.addItem("1/32",         4);
-            quantCombo.addItem("1/8 triplet",  5);
-            quantCombo.addItem("1/16 triplet", 6);
-            quantCombo.setSelectedId(7, juce::dontSendNotification);  // default: no quantize
-            quantCombo.setColour(juce::ComboBox::backgroundColourId,  juce::Colour(0xFF3A3A3A));
-            quantCombo.setColour(juce::ComboBox::textColourId,        juce::Colour(0xFFCECECE));
-            quantCombo.setColour(juce::ComboBox::outlineColourId,     juce::Colour(0xFF0A0A0A));
-            quantCombo.setColour(juce::ComboBox::arrowColourId,       juce::Colour(0xFFCECECE));
-            addAndMakeVisible(quantCombo);
-
             // ----- Metronome -----
             metronomeButton.setButtonText("Metro");
             metronomeButton.setClickingTogglesState(true);
@@ -4657,7 +4636,7 @@ void adjustPitchUp()
             recordButton.onClick = [this]
             {
                 const double bpm        = currentBpm;
-                const double quantBeats = quantIdToBeats(quantCombo.getSelectedId());
+                const double quantBeats = 0.0;  // no quantization
                 const bool   metro      = metronomeButton.getToggleState();
                 const int    target     = currentTargetPad;
                 const bool   overdub    = overdubButton.getToggleState();
@@ -4690,34 +4669,6 @@ void adjustPitchUp()
             };
             addAndMakeVisible(stopButton);
 
-            // ----- Play Pattern -----
-            playButton.setButtonText("Play Pattern");
-            playButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A5A1A));
-            playButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-            // onClick intentionally unset — feature unwired for latency focus
-            addAndMakeVisible(playButton);
-
-            // ----- Save Pattern -----
-            savePatternButton.setButtonText("Save");
-            savePatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A4A2A));
-            savePatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-            // onClick intentionally unset — feature unwired for latency focus
-            addAndMakeVisible(savePatternButton);
-
-            // ----- Load Pattern -----
-            loadPatternButton.setButtonText("Load");
-            loadPatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF1A2A4A));
-            loadPatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-            // onClick intentionally unset — feature unwired for latency focus
-            addAndMakeVisible(loadPatternButton);
-
-            // ----- Clear Pattern -----
-            clearPatternButton.setButtonText("Clear");
-            clearPatternButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF4A2A1A));
-            clearPatternButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
-            // onClick intentionally unset — feature unwired for latency focus
-            addAndMakeVisible(clearPatternButton);
-
             // ----- Status -----
             statusLabel.setText("Ready", juce::dontSendNotification);
             statusLabel.setColour(juce::Label::textColourId, juce::Colour(0xFF9DC95C));
@@ -4745,7 +4696,7 @@ void adjustPitchUp()
 
         int    getTargetPad()  const { return currentTargetPad; }
         double getBpm()        const { return currentBpm; }
-        double getQuantBeats() const { return quantIdToBeats(quantCombo.getSelectedId()); }
+        double getQuantBeats() const { return 0.0; }
         bool   isMetronomeOn() const { return metronomeButton.getToggleState(); }
 
         // Called by MainComponent when a G pad is selected / deselected.
@@ -4800,20 +4751,17 @@ void adjustPitchUp()
             row1.removeFromLeft(4);
             tapBpmLabel .setBounds(row1);
 
-            // ---- Row 2: Quant combo | Metronome ----
+            // ---- Row 2: Metronome | Volume | Drop Pad ----
             auto row2 = area.removeFromTop(kRowH);
             area.removeFromTop(kGap);
 
-            quantLabel.setBounds(row2.removeFromLeft(42));
-            quantCombo.setBounds(row2.removeFromLeft(110).withSizeKeepingCentre(108, kRowH));
-            row2.removeFromLeft(6);
             metronomeButton.setBounds(row2.removeFromLeft(54).withSizeKeepingCentre(52, kRowH));
             row2.removeFromLeft(4);
             metronomeVolumeSlider.setBounds(row2.removeFromLeft(64).withSizeKeepingCentre(62, kRowH));
             row2.removeFromLeft(6);
             dropPadButton.setBounds(row2.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
 
-            // ---- Row 3: Overdub | Record/Transfer | Stop | Play | Save | Load | Clear | Status ----
+            // ---- Row 3: Overdub | Record/Transfer | Stop | Status ----
             auto row3 = area.removeFromTop(kRowH);
 
             overdubButton    .setBounds(row3.removeFromLeft(56).withSizeKeepingCentre(54, kRowH));
@@ -4823,14 +4771,6 @@ void adjustPitchUp()
             transferButton   .setBounds(recordButton.getBounds());
             row3.removeFromLeft(3);
             stopButton       .setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
-            row3.removeFromLeft(3);
-            playButton       .setBounds(row3.removeFromLeft(50).withSizeKeepingCentre(48, kRowH));
-            row3.removeFromLeft(4);
-            savePatternButton .setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
-            row3.removeFromLeft(3);
-            loadPatternButton .setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
-            row3.removeFromLeft(3);
-            clearPatternButton.setBounds(row3.removeFromLeft(42).withSizeKeepingCentre(40, kRowH));
             row3.removeFromLeft(4);
             statusLabel      .setBounds(row3);
         }
@@ -4845,8 +4785,6 @@ void adjustPitchUp()
         juce::Label      targetPadLabel;
         juce::TextButton targetPadMinusButton;
         juce::TextButton targetPadPlusButton;
-        juce::Label      quantLabel;
-        juce::ComboBox   quantCombo;
         juce::TextButton metronomeButton;
         juce::Slider     metronomeVolumeSlider;
         juce::TextButton dropPadButton;
@@ -4854,10 +4792,6 @@ void adjustPitchUp()
         juce::TextButton overdubButton;
         juce::TextButton recordButton;
         juce::TextButton stopButton;
-        juce::TextButton playButton;
-        juce::TextButton savePatternButton;
-        juce::TextButton loadPatternButton;
-        juce::TextButton clearPatternButton;
         juce::Label      statusLabel;
 
         void adjustTargetPad(int delta)
@@ -4874,21 +4808,6 @@ void adjustPitchUp()
             {
                 targetPadLabel.setText("Target: " + juce::String(currentTargetPad + 1),
                                        juce::dontSendNotification);
-            }
-        }
-
-        static double quantIdToBeats(int id)
-        {
-            switch (id)
-            {
-                case 1: return 0.25;
-                case 2: return 0.125;
-                case 3: return 0.0625;
-                case 4: return 0.03125;
-                case 5: return 1.0 / 6.0;
-                case 6: return 1.0 / 12.0;
-                case 7: return 0.0;   // None — no quantization
-                default: return 0.0;
             }
         }
 
@@ -4958,7 +4877,7 @@ void adjustPitchUp()
             const double bpm = tap.getBpm();
             if (bpm > 0.0)
             {
-                currentBpm = juce::jlimit (60.0, 180.0, bpm);
+                currentBpm = juce::jlimit (60.0, 360.0, bpm);
 
                 tapBpmLabel.setText (juce::String (currentBpm, 1) + " BPM", juce::dontSendNotification);
                 tapBpmLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFFFE000));
