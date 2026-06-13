@@ -123,6 +123,16 @@ public:
         return (float)propertiesFile->getDoubleValue("masterVolume", 0.7);
     }
 
+    void saveVizSensitivity(float sensitivity)
+    {
+        propertiesFile->setValue("vizSensitivity", (double)sensitivity);
+    }
+
+    float getVizSensitivity()
+    {
+        return (float)propertiesFile->getDoubleValue("vizSensitivity", 1.0);
+    }
+
     void saveLoopEnabled(bool loopEnabled)
     {
         propertiesFile->setValue("loopEnabled", loopEnabled);

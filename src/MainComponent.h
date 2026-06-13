@@ -19,6 +19,7 @@
 #include "GjmManager.h"
 #include "GlobalLoopColumn.h"
 #include "LevelMeter.h"
+#include "FftVisualizerView.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -459,6 +460,13 @@ private:
     std::atomic<float> outputPeakLevelL { 0.0f };  // left-channel peak, written each block
     std::atomic<float> outputPeakLevelR { 0.0f };  // right-channel peak, written each block
     LevelMeter         levelMeter;
+    std::unique_ptr<juce::Drawable> logoDrawable;
+
+    //==============================================================================
+    // Fullscreen FFT audio visualizer — toggled via vizToggleButton in the footer.
+    FftVisualizerView fftVisualizer;
+    juce::TextButton  vizToggleButton { "VIZ" };
+    bool              vizMode = true;
 
     //==============================================================================
     // Sine wave generation

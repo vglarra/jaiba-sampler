@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="220" viewBox="0 0 1000 220" role="img">
+  <title>Jaiva Sampler v1.0</title>
+  <desc>JAIVA hex-crab SAMPLER left, V1.0 right. Hex body, arms raised straight up.</desc>
+
+  <rect width="1000" height="220" fill="#2b2b2b"/>
+  <rect width="1000" height="3" fill="#4ecdc4"/>
+  <rect y="217" width="1000" height="3" fill="#4ecdc4"/>
+
+  <!-- ══════════════════════════════════════
+       CRAB centered at x=370, y=130
+       Body = hexagon (flat-top orientation)
+       Arms raised straight up like photo
+       Legs down
+       Arms stay ABOVE text baseline (y=75)
+       Body sits in text mid zone (y=80..150)
+       ══════════════════════════════════════ -->
+  <g transform="translate(370,125)">
+
+    <!-- OUTER HEXAGON body — flat top, r=48 -->
+    <!-- flat-top hex points: angles 0,60,120,180,240,300 deg -->
+    <polygon points="48,0 24,42 -24,42 -48,0 -24,-42 24,-42"
+      fill="none" stroke="#4ecdc4" stroke-width="2.5" stroke-linejoin="miter"/>
+
+    <!-- INNER HEXAGON detail -->
+    <polygon points="28,0 14,24 -14,24 -28,0 -14,-24 14,-24"
+      fill="none" stroke="#4ecdc4" stroke-width="1.6" stroke-linejoin="miter" stroke-opacity="0.65"/>
+
+    <!-- CENTER diamond filled fuchsia -->
+    <polygon points="0,-13 13,0 0,13 -13,0"
+      fill="#e040e0" stroke="none"/>
+
+    <!-- EYES on stalks — sit on top flat edge of hex -->
+    <line x1="-14" y1="-42" x2="-14" y2="-58" stroke="#4ecdc4" stroke-width="2"/>
+    <polygon points="-14,-70 -4,-58 -14,-46 -24,-58" fill="#e040e0" stroke="none"/>
+    <line x1="14" y1="-42" x2="14" y2="-58" stroke="#4ecdc4" stroke-width="2"/>
+    <polygon points="14,-70 24,-58 14,-46 4,-58" fill="#e040e0" stroke="none"/>
+
+    <!-- LEFT ARM — raised straight up from left shoulder of hex -->
+    <!-- shoulder joint at (-48, 0) -->
+    <!-- upper arm: goes up-left steeply -->
+    <polygon points="-48,0  -62,-18  -72,-8  -58,10"
+      fill="none" stroke="#4ecdc4" stroke-width="2.2" stroke-linejoin="miter"/>
+    <!-- forearm: bends more upward -->
+    <polygon points="-72,-8  -78,-38  -66,-44  -60,-14"
+      fill="none" stroke="#4ecdc4" stroke-width="2" stroke-linejoin="miter"/>
+    <!-- wrist going up -->
+    <polygon points="-78,-38  -80,-68  -68,-70  -66,-40"
+      fill="none" stroke="#4ecdc4" stroke-width="1.8" stroke-linejoin="miter"/>
+    <!-- pincer left finger -->
+    <polygon points="-80,-68  -88,-90  -78,-92  -70,-70"
+      fill="none" stroke="#4ecdc4" stroke-width="1.6" stroke-linejoin="miter"/>
+    <!-- pincer right finger -->
+    <polygon points="-80,-68  -70,-88  -60,-84  -68,-62"
+      fill="none" stroke="#4ecdc4" stroke-width="1.5" stroke-linejoin="miter" stroke-opacity="0.8"/>
+
+    <!-- RIGHT ARM — mirror -->
+    <polygon points="48,0  62,-18  72,-8  58,10"
+      fill="none" stroke="#4ecdc4" stroke-width="2.2" stroke-linejoin="miter"/>
+    <polygon points="72,-8  78,-38  66,-44  60,-14"
+      fill="none" stroke="#4ecdc4" stroke-width="2" stroke-linejoin="miter"/>
+    <polygon points="78,-38  80,-68  68,-70  66,-40"
+      fill="none" stroke="#4ecdc4" stroke-width="1.8" stroke-linejoin="miter"/>
+    <!-- pincer left finger -->
+    <polygon points="80,-68  88,-90  78,-92  70,-70"
+      fill="none" stroke="#4ecdc4" stroke-width="1.6" stroke-linejoin="miter"/>
+    <!-- pincer right finger -->
+    <polygon points="80,-68  70,-88  60,-84  68,-62"
+      fill="none" stroke="#4ecdc4" stroke-width="1.5" stroke-linejoin="miter" stroke-opacity="0.8"/>
+
+    <!-- LEFT LEGS — 3 rhomboids angling down-left -->
+    <polygon points="-24,42  -38,52  -44,66  -30,56"
+      fill="none" stroke="#4ecdc4" stroke-width="1.8" stroke-linejoin="miter"/>
+    <polygon points="-10,42  -22,54  -26,70  -14,58"
+      fill="none" stroke="#4ecdc4" stroke-width="1.5" stroke-linejoin="miter" stroke-opacity="1"/>
+    <polygon points="4,42  -6,56  -8,72  2,58"
+      fill="none" stroke="#4ecdc4" stroke-width="1.2" stroke-linejoin="miter" stroke-opacity="1"/>
+
+    <!-- RIGHT LEGS -->
+    <polygon points="24,42  38,52  44,66  30,56"
+      fill="none" stroke="#4ecdc4" stroke-width="1.8" stroke-linejoin="miter"/>
+    <polygon points="10,42  22,54  26,70  14,58"
+      fill="none" stroke="#4ecdc4" stroke-width="1.5" stroke-linejoin="miter" stroke-opacity="1"/>
+    <polygon points="-4,42  6,56  8,72  -2,58"
+      fill="none" stroke="#4ecdc4" stroke-width="1.2" stroke-linejoin="miter" stroke-opacity="1"/>
+
+  </g>
+
+  <!-- ══ JAIVA — y baseline 160, top 75, ends ~x=268 ══ -->
+  <g fill="none" stroke="#e040e0" stroke-width="4" stroke-linecap="square" stroke-linejoin="miter">
+    <!-- J -->
+    <line x1="18"  y1="75" x2="58"  y2="75"/>
+    <line x1="38"  y1="75" x2="38"  y2="148"/>
+    <polyline points="38,148 38,162 22,162 22,150"/>
+    <!-- A -->
+    <polyline points="68,162 88,75 108,162"/>
+    <line x1="75" y1="132" x2="101" y2="132"/>
+    <!-- I -->
+    <line x1="118" y1="75"  x2="148" y2="75"/>
+    <line x1="133" y1="75"  x2="133" y2="162"/>
+    <line x1="118" y1="162" x2="148" y2="162"/>
+    <!-- V -->
+    <polyline points="158,75 182,162 206,75"/>
+    <!-- A -->
+    <polyline points="216,162 236,75 256,162"/>
+    <line x1="223" y1="132" x2="249" y2="132"/>
+  </g>
+
+  <!-- ══ SAMPLER — starts x=468, same baseline ══ -->
+  <g fill="none" stroke="#4ecdc4" stroke-width="3.8" stroke-linecap="square" stroke-linejoin="miter">
+    <!-- S -->
+    <path d="M502,75 L468,75 L468,118 L502,118 L502,162 L468,162" fill="none"/>
+    <!-- A -->
+    <polyline points="512,162 528,75 544,162"/>
+    <line x1="518" y1="132" x2="538" y2="132"/>
+    <!-- M -->
+    <polyline points="552,162 552,75 571,118 590,75 590,162"/>
+    <!-- P -->
+    <line x1="598" y1="75" x2="598" y2="162"/>
+    <path d="M598,75 L628,75 L628,118 L598,118" fill="none"/>
+    <!-- L -->
+    <polyline points="636,75 636,162 664,162"/>
+    <!-- E -->
+    <polyline points="698,75 672,75 672,162 698,162"/>
+    <line x1="672" y1="118" x2="694" y2="118"/>
+    <!-- R -->
+    <line x1="708" y1="75" x2="708" y2="162"/>
+    <path d="M708,75 L734,75 L734,118 L708,118" fill="none"/>
+    <line x1="721" y1="118" x2="740" y2="162"/>
+  </g>
+
+  <!-- ══ V1.0 — large, right ══ -->
+  <g fill="none" stroke="#4ecdc4" stroke-width="5" stroke-linecap="square" stroke-linejoin="miter">
+    <polyline points="768,50 806,185 844,50"/>
+    <line x1="860" y1="50" x2="860" y2="185"/>
+    <line x1="847" y1="64" x2="860" y2="50"/>
+    <rect x="870" y="175" width="8" height="8" fill="#4ecdc4" stroke="none"/>
+    <rect x="882" y="50" width="48" height="135" fill="none" stroke="#4ecdc4" stroke-width="5"/>
+  </g>
+
+  <!-- separator -->
+  <line x1="754" y1="45" x2="754" y2="185" stroke="#4ecdc4" stroke-width="1" stroke-opacity="0.3"/>
+
+</svg>

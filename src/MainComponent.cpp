@@ -1,5 +1,6 @@
 ﻿#include "MainComponent.h"
 #include "UIComponents.h"
+#include "BinaryData.h"
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <string>
 #include <vector>
@@ -346,6 +347,45 @@ MainComponent::MainComponent()
       levelMeter.setSources(&outputPeakLevelL, &outputPeakLevelR);
       addAndMakeVisible(levelMeter);
 
+      // Fullscreen FFT visualizer toggle — hides the pad grid / sample card
+      // and shows an animated spectrum view filling the main content area.
+      vizToggleButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF1a1a2e));
+      vizToggleButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFe040e0));
+      vizToggleButton.setClickingTogglesState(true);
+      vizToggleButton.onClick = [this]
+      {
+          vizMode = vizToggleButton.getToggleState();
+
+          sampleCard.setVisible(!vizMode);
+          fftVisualizer.setVisible(vizMode);
+
+          if (vizMode)
+              fftVisualizer.startVisualizer();
+          else
+              fftVisualizer.stopVisualizer();
+
+          resized();
+      };
+      addAndMakeVisible(vizToggleButton);
+
+      fftVisualizer.setVisible(false);
+      addAndMakeVisible(fftVisualizer);
+
+      // Start in fullscreen visualizer mode by default — matches vizMode's
+      // initial value (true). User can click VIZ to switch to sample editing.
+      vizToggleButton.setToggleState(true, juce::dontSendNotification);
+      sampleCard.setVisible(false);
+      fftVisualizer.setVisible(true);
+      fftVisualizer.startVisualizer();
+
+      // Persist the SENS knob value as it's changed (in-memory; flushed with
+      // the rest of the settings store).
+      fftVisualizer.onSensitivityChanged = [this](float v)
+      {
+          if (configManager != nullptr)
+              configManager->saveVizSensitivity(v);
+      };
+
       // Add listeners for the card buttons
       sampleCard.getAddButton().addListener(this);
       sampleCard.getPrevButton().addListener(this);
@@ -453,6 +493,10 @@ MainComponent::MainComponent()
     // exactly which intervals the message thread is blocked during sample loads.
     heartbeatThread.startThread(juce::Thread::Priority::low);
 
+    if (auto xml = juce::XmlDocument::parse(
+            juce::String::fromUTF8(BinaryData::jaivasamplerlogo_svg,
+                                   BinaryData::jaivasamplerlogo_svgSize)))
+        logoDrawable = juce::Drawable::createFromSVG(*xml);
 }
 
 MainComponent::~MainComponent()
@@ -698,6 +742,33 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
         outputPeakLevelL.store(peakL, std::memory_order_relaxed);
         outputPeakLevelR.store(peakR, std::memory_order_relaxed);
     }
+
+    // ── Fullscreen FFT visualizer feed ───────────────────────────────────────────
+    // Only pushes samples when the visualizer is visible — zero cost otherwise.
+    // Feeds the final master mix (post pad sum, metronome, sine wave, master volume),
+    // summed to mono so the visualizer reacts to the true output regardless of
+    // which channel(s) carry the signal.
+    if (fftVisualizer.isVisible())
+    {
+        const int n = juce::jmin(bufferToFill.numSamples, 2048);
+        float monoBuf[2048];
+        const int nCh = bufferToFill.buffer->getNumChannels();
+        auto* left = bufferToFill.buffer->getReadPointer(0, bufferToFill.startSample);
+
+        if (nCh > 1)
+        {
+            auto* right = bufferToFill.buffer->getReadPointer(1, bufferToFill.startSample);
+            for (int i = 0; i < n; ++i)
+                monoBuf[i] = (left[i] + right[i]) * 0.5f;
+        }
+        else
+        {
+            for (int i = 0; i < n; ++i)
+                monoBuf[i] = left[i];
+        }
+
+        fftVisualizer.pushSamples(monoBuf, n);
+    }
 }
 
 void MainComponent::releaseResources()
@@ -708,13 +779,23 @@ void MainComponent::releaseResources()
 void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xFF1E1E1E));
-    
-    // Draw title centred in the 40px top bar, between Menu button (left) and right controls
-    // Left trim: margin(20) + menu(60) + gap(4+4) = 88px
-    g.setColour(juce::Colour(0xFFCECECE));
-    g.setFont(juce::Font(18.0f, juce::Font::bold));
-    auto titleArea = getLocalBounds().withTrimmedLeft(88).withTrimmedRight(348).removeFromTop(40);
-    g.drawText("JAIVA-SAMPLER||1.0", titleArea, juce::Justification::centred, true);
+
+    if (logoDrawable)
+    {
+        // Constrain to the space between the Menu button and the right-side
+        // controls (Reset/Hz/Master Vol) so the logo never overlaps them,
+        // then shrink by 30% for breathing room.
+        constexpr float kLogoLeftMargin  = 84.0f;  // margin(20) + menu(60) + gap(4)
+        constexpr float kLogoRightMargin = 378.0f; // right-side controls(358) + margin(20)
+        auto availableArea = juce::Rectangle<float>(
+            kLogoLeftMargin, 0.0f,
+            juce::jmax(0.0f, (float)getWidth() - kLogoLeftMargin - kLogoRightMargin), 90.0f);
+        auto logoArea = availableArea.withSizeKeepingCentre(
+            availableArea.getWidth() * 0.7f, availableArea.getHeight() * 0.7f);
+        logoDrawable->drawWithin(g, logoArea,
+            juce::RectanglePlacement::centred |
+            juce::RectanglePlacement::onlyReduceInSize, 1.0f);
+    }
 
     // Line above footer (footer is 50px from bottom)
     g.setColour(juce::Colour(0xFF404040));
@@ -763,7 +844,7 @@ void MainComponent::resized()
     if (isResizing) return;
     isResizing = true;
 
-    constexpr int kTopBarH   = 40;
+    constexpr int kTopBarH   = 90;
     constexpr int kGlobCtrlH = 40;
     constexpr int kPadRowH   = 120;
     constexpr int kCardMinH  = 250;
@@ -872,6 +953,10 @@ void MainComponent::resized()
         globalLoopColumn.setBounds (startX + kMeterW + kMeterGap + cardW + kGlobalColGap,
                                     cardStrip.getY(),
                                     kGlobalColW, dynamicCardH);
+
+        // Fullscreen FFT visualizer overlays exactly the SampleCard area —
+        // pad rows above/below and the global loop column stay visible.
+        fftVisualizer.setBounds (sampleCard.getBounds());
     }
 
     strip.removeFromTop (kGap);
@@ -887,6 +972,8 @@ void MainComponent::resized()
     // =========================================================
     {
         auto footerArea = getLocalBounds().removeFromBottom (kFooterH).reduced (kHMargin, 0);
+
+        vizToggleButton.setBounds (footerArea.removeFromRight (60).reduced (0, 10));
 
         auto leftFooter = footerArea.withTrimmedRight (130);
         constexpr int kRowH2       = 20;
@@ -2368,6 +2455,20 @@ void MainComponent::finishGjmLoad()
 
 void MainComponent::saveGjmToFile (const juce::File& file)
 {
+    // gjmManager.isUntitled is true at the start of every session (loadLastSession()
+    // always calls gjmManager.reset()), so banks[1..15] are at their reset defaults
+    // (kitFilePath empty, isReady=false) even if the user is saving over an EXISTING
+    // .gjm file that has 16 banks worth of kit references. Without this hydration
+    // step, saveManifest() below would write an empty kitPath for every bank except
+    // the active one — severing the manifest's links to the other banks' .jai files
+    // (which remain untouched on disk but become unreachable on the next Load
+    // Session, appearing as "erased" config). Loading the existing manifest first
+    // populates banks[].kitFilePath/displayName for all banks so they round-trip
+    // unchanged; only the active bank is then overwritten below with the current
+    // in-memory pad settings.
+    if (gjmManager.isUntitled && file.existsAsFile())
+        gjmManager.loadManifest (file);
+
     captureSampleCardToPadSettings (padManager.selectedPadIndex);
 
     // Flush global loop pad settings from PadManager into GjmManager before writing
@@ -5352,6 +5453,9 @@ void MainComponent::loadLastSession()
     updateGjmUI();
 
     padGrid.selectPad(0);
+
+    // ── Restore FFT visualizer sensitivity (defaults to 1.0 if never saved) ─────────
+    fftVisualizer.setSensitivity(configManager->getVizSensitivity());
 }
 
 void MainComponent::saveOutgoingSampleState()
