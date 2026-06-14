@@ -1,14 +1,18 @@
-# My Sampler
+# Jaiva Sampler
 
-A standalone audio sampler built with JUCE.
+A standalone MIDI-triggered audio sampler built with JUCE.
 
 ## Building
-\`\`\`bash
-git clone --recursive https://github.com/yourusername/mysampler.git
-cd mysampler
-cmake -B build -G "Visual Studio 17 2022"
+
+This project uses JUCE as a git submodule, so clone with `--recursive`
+(or run `git submodule update --init` after a normal clone):
+
+```bash
+git clone --recursive https://github.com/<your-github-username>/jaiva-sampler.git
+cd jaiva-sampler
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Debug
-\`\`\`
+```
 
 ## Features
 - Audio file loading (WAV/AIFF/MP3)
