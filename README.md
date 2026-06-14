@@ -14,6 +14,12 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Debug
 ```
 
+## Screenshots
+
+| Sampler view | Visualizer mode |
+|---|---|
+| ![Sampler view](docs/screenshots/jaiva-sampler-front-sampler-view_2026-06-14.png) | ![Visualizer mode](docs/screenshots/jaiva-sampler-front-viz-mode_2026-06-14.png) |
+
 ## Features
 - Audio file loading (WAV/AIFF/MP3)
 - MIDI input handling
