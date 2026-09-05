@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="220" viewBox="0 0 1000 220" role="img">
-  <title>Jaiva Sampler v1.0</title>
-  <desc>JAIVA hex-crab SAMPLER left, V1.0 right. Hex body, arms raised straight up.</desc>
+  <title>Jaiba Sampler v1.0</title>
+  <desc>JAIBA hex-crab SAMPLER left, V1.0 right. Hex body, arms raised straight up.</desc>
 
   <rect width="1000" height="220" fill="#2b2b2b"/>
   <rect width="1000" height="3" fill="#4ecdc4"/>
@@ -85,7 +85,7 @@
 
   </g>
 
-  <!-- ══ JAIVA — y baseline 160, top 75, ends ~x=268 ══ -->
+  <!-- ══ JAIBA — y baseline 160, top 75, ends ~x=268 ══ -->
   <g fill="none" stroke="#e040e0" stroke-width="4" stroke-linecap="square" stroke-linejoin="miter">
     <!-- J -->
     <line x1="18"  y1="75" x2="58"  y2="75"/>

@@ -11,7 +11,7 @@ public:
         fflush(stdout);
     }
     
-    const juce::String getApplicationName() override { return "Jaiva Sampler V001"; }
+    const juce::String getApplicationName() override { return "Jaiba Sampler"; }
     const juce::String getApplicationVersion() override { return "1.0.0"; }
     
     void initialise(const juce::String&) override

@@ -9,9 +9,9 @@ public:
     ConfigurationManager()
     {
         juce::PropertiesFile::Options options;
-        options.applicationName = "JaivaSampler";
+        options.applicationName = "JaibaSampler";
         options.filenameSuffix = ".settings";
-        options.folderName = "JaivaSampler";
+        options.folderName = "JaibaSampler";
         options.osxLibrarySubFolder = "Application Support";
         // Large value — we control all flushes explicitly via flush().
         // saveIfNeeded() calls inside setters are intentionally removed.

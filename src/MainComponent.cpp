@@ -1,4 +1,4 @@
-﻿#include "MainComponent.h"
+#include "MainComponent.h"
 #include "UIComponents.h"
 #include "BinaryData.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -494,8 +494,8 @@ MainComponent::MainComponent()
     heartbeatThread.startThread(juce::Thread::Priority::low);
 
     if (auto xml = juce::XmlDocument::parse(
-            juce::String::fromUTF8(BinaryData::jaivasamplerlogo_svg,
-                                   BinaryData::jaivasamplerlogo_svgSize)))
+            juce::String::fromUTF8(BinaryData::jaibasamplerlogo_svg,
+                                   BinaryData::jaibasamplerlogo_svgSize)))
         logoDrawable = juce::Drawable::createFromSVG(*xml);
 }
 
@@ -2099,7 +2099,7 @@ void MainComponent::saveKitToFile (const juce::File& file)
     // last change-event (especially deferred async norm scans) are captured.
     captureSampleCardToPadSettings (padManager.selectedPadIndex);
 
-    auto root = std::make_unique<juce::XmlElement> ("JaivaKit");
+    auto root = std::make_unique<juce::XmlElement> ("JaibaKit");
     root->setAttribute ("version",     1);
     root->setAttribute ("appVersion",  "1.0.0");
     root->setAttribute ("savedDate",   juce::Time::getCurrentTime().toString (true, true));
@@ -2131,7 +2131,7 @@ void MainComponent::saveKitToFile (const juce::File& file)
 void MainComponent::loadKitFromFile (const juce::File& file)
 {
     auto xml = juce::XmlDocument::parse (file);
-    if (xml == nullptr || xml->getTagName() != "JaivaKit")
+    if (xml == nullptr || (xml->getTagName() != "JaibaKit" && xml->getTagName() != "JaivaKit"))
     {
         juce::AlertWindow::showMessageBoxAsync (
             juce::MessageBoxIconType::WarningIcon,
@@ -2377,7 +2377,7 @@ void MainComponent::navigateKit (int direction)
 }
 
 //==============================================================================
-// GJM — Global Jaiva Map implementation
+// GJM — Global Jaiba Map implementation
 //==============================================================================
 
 void MainComponent::loadGjmFromFile (const juce::File& file)
@@ -3259,7 +3259,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             {
                 const float gain   = pad().computeNormGainFromAudio(targetDb);
                 pad().normGain.store(gain);
-                const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
+                const float gainDb = (gain > 0.0f) ? 20.0f * std::log10(gain) : 0.0f;
                 sampleCard.setNormGainDisplay(gainDb);
             }
             else
@@ -3515,6 +3515,15 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             });
         }
     });
+}
+
+// Convenience overload — forwards to the full form with an all-defaults snapshot.
+// Defined out-of-line so TrimSettingsSnapshot's default member initializers are
+// usable (the class is complete here, unlike at the in-class declaration).
+void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay,
+                                        bool resetZoom, bool deferTransients)
+{
+    loadSampleFileAsync(file, autoPlay, resetZoom, deferTransients, TrimSettingsSnapshot{});
 }
 
 void MainComponent::loadNextSample()
@@ -3899,7 +3908,7 @@ void MainComponent::normChanged(bool enabled, float targetDb)
     {
         const float gain   = pad().computeNormGainFromAudio(targetDb);
         pad().normGain.store(gain);
-        const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
+        const float gainDb = (gain > 0.0f) ? 20.0f * std::log10(gain) : 0.0f;
         sampleCard.setNormGainDisplay(gainDb);
         captureSampleCardToPadSettings(padManager.selectedPadIndex);
     }
@@ -3912,7 +3921,7 @@ void MainComponent::normChanged(bool enabled, float targetDb)
         backgroundThreads.addJob([this, capturedTarget]()
         {
             const float gain   = pad().computeNormGainFromAudio(capturedTarget);
-            const float gainDb = (gain > 0.0f) ? 20.0f * std::log10f(gain) : 0.0f;
+            const float gainDb = (gain > 0.0f) ? 20.0f * std::log10(gain) : 0.0f;
 
             juce::MessageManager::callAsync([this, gain, gainDb]()
             {

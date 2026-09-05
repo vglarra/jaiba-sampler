@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(MySampler VERSION 0.1.0)
+project(JaibaSampler VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,7 +11,7 @@ add_subdirectory(lib/JUCE)
 
 # Create your application
 juce_add_gui_app(MySampler
-    PRODUCT_NAME "My Sampler"
+    PRODUCT_NAME "jaibasampler"
     COMPANY_NAME "YourCompany"
     VERSION ${PROJECT_VERSION}
 )
@@ -19,7 +19,7 @@ juce_add_gui_app(MySampler
 # Embed binary resources (e.g. logo SVG) as BinaryData
 juce_add_binary_data(MySamplerBinaryData
     SOURCES
-        src/Resources/jaiva-sampler-logo.svg
+        src/Resources/jaiba-sampler-logo.svg
 )
 
 # Add your source files
@@ -46,6 +46,16 @@ target_link_libraries(MySampler
         juce::juce_dsp
         juce::juce_gui_basics
         juce::juce_gui_extra
+)
+
+# This app uses no WebBrowserComponent and no JUCE network (curl) APIs.
+# JUCE enables JUCE_WEB_BROWSER / JUCE_USE_CURL by default on Linux, which would
+# pull in webkit2gtk/GTK headers and libcurl; disabling them keeps the Linux
+# build lean and portable. Harmless on other platforms (flags unused there).
+target_compile_definitions(MySampler
+    PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
 )
 
 # Add Windows-specific libraries HERE (after JUCE modules)

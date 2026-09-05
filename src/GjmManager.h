@@ -5,7 +5,7 @@
 #include "PadSettings.h"
 
 //==============================================================================
-// GjmBank — one slot in a 16-bank Global Jaiva Map
+// GjmBank — one slot in a 16-bank Global Jaiba Map
 //==============================================================================
 struct GjmBank
 {
@@ -32,7 +32,7 @@ struct GjmBank
 };
 
 //==============================================================================
-// GjmManager — owns a 16-bank Global Jaiva Map manifest and its cached pads
+// GjmManager — owns a 16-bank Global Jaiba Map manifest and its cached pads
 //
 // Threading model (important — read before modifying):
 //
@@ -99,7 +99,7 @@ public:
         if (!file.existsAsFile()) return result;
 
         auto xml = juce::XmlDocument::parse (file);
-        if (xml == nullptr || xml->getTagName() != "JaivaKit") return result;
+        if (xml == nullptr || (xml->getTagName() != "JaibaKit" && xml->getTagName() != "JaivaKit")) return result;
 
         for (auto* padEl : xml->getChildIterator())
         {
@@ -118,7 +118,7 @@ public:
     bool loadManifest (const juce::File& file)
     {
         auto xml = juce::XmlDocument::parse (file);
-        if (xml == nullptr || xml->getTagName() != "GlobalJaivaMap")
+        if (xml == nullptr || (xml->getTagName() != "GlobalJaibaMap" && xml->getTagName() != "GlobalJaivaMap"))
             return false;
 
         gjmFile    = file;
@@ -192,7 +192,7 @@ public:
     // Save the GJM manifest XML (kit file paths + names).
     bool saveManifest (const juce::File& file) const
     {
-        auto root = std::make_unique<juce::XmlElement> ("GlobalJaivaMap");
+        auto root = std::make_unique<juce::XmlElement> ("GlobalJaibaMap");
         root->setAttribute ("version",   1);
         root->setAttribute ("savedDate", juce::Time::getCurrentTime().toString (true, true));
 
@@ -234,7 +234,7 @@ public:
         }
 
         juce::File kitFile (b.kitFilePath);
-        auto root = std::make_unique<juce::XmlElement> ("JaivaKit");
+        auto root = std::make_unique<juce::XmlElement> ("JaibaKit");
         root->setAttribute ("version",   1);
         root->setAttribute ("savedDate", juce::Time::getCurrentTime().toString (true, true));
         for (int i = 0; i < 16; ++i)

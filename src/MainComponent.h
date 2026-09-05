@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -157,8 +157,15 @@ private:
     // deferTransients=true during Prev/Next navigation: skips detectTransients() on the
     // message thread and fires it via transientDetectionTimer 800ms after navigation stops.
     // trimSnapshot: when valid=true, restore all settings from snapshot instead of config lookup.
+    // Full form: takes an explicit settings snapshot (trim / kit / GJM loads).
+    void loadSampleFileAsync(const juce::File& file, bool autoPlay, bool resetZoom,
+                             bool deferTransients, TrimSettingsSnapshot trimSnapshot);
+    // Convenience overload with an all-defaults snapshot. Declared as a separate
+    // overload instead of a `= {}` default argument because GCC rejects a
+    // braced-init-list default for a type whose default member initializers are
+    // not yet usable while still inside its enclosing class definition.
     void loadSampleFileAsync(const juce::File& file, bool autoPlay = true, bool resetZoom = false,
-                              bool deferTransients = false, TrimSettingsSnapshot trimSnapshot = {});
+                             bool deferTransients = false);
     // Loads a sample into a specific pad engine WITHOUT touching the SampleCard UI.
     // Used at startup to restore all saved pads into RAM so pad switching is instant.
     void preloadPadEngineAsync(int padIdx, juce::File file, PadSettings settings);
@@ -226,7 +233,7 @@ private:
     void loadKitFromFile (const juce::File& file);
     void navigateKit     (int direction);   // -1 = prev, +1 = next .jai in same folder
 
-    // GJM — Global Jaiva Map (16-bank manifest)
+    // GJM — Global Jaiba Map (16-bank manifest)
     void loadGjmFromFile  (const juce::File& file);
     void saveGjmToFile    (const juce::File& file);
     void switchGjmBank    (int bankIdx);   // 0-based; instant swap + async audio pre-warm
@@ -404,7 +411,7 @@ private:
     void dropGlobalPad            (int globalPadIdx);
 
     //==============================================================================
-    // GJM — Global Jaiva Map
+    // GJM — Global Jaiba Map
     GjmManager  gjmManager;
     juce::Label gjmStatusLabel;              // shows "No GJM" or "filename ● N/16"
     std::atomic<bool> gjmParsing { false };  // true while background kit-parse job runs

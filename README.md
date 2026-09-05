@@ -1,4 +1,4 @@
-# Jaiva Sampler
+# Jaiba Sampler
 
 A standalone MIDI-triggered audio sampler built with JUCE.
 
@@ -18,7 +18,7 @@ cmake --build build --config Debug
 
 | Sampler view | Visualizer mode |
 |---|---|
-| ![Sampler view](docs/screenshots/jaiva-sampler-front-sampler-view_2026-06-14.png) | ![Visualizer mode](docs/screenshots/jaiva-sampler-front-viz-mode_2026-06-14.png) |
+| ![Sampler view](docs/screenshots/jaiba-sampler-front-sampler-view_2026-06-14.png) | ![Visualizer mode](docs/screenshots/jaiba-sampler-front-viz-mode_2026-06-14.png) |
 
 ## Features
 - Audio file loading (WAV/AIFF/MP3)
