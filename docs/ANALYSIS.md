@@ -494,4 +494,29 @@ PadAudioEngine/PadManager architecture").
 
 ---
 
+## Appendix B — Identity migration status (2026-09-05)
+
+Items from §2 resolved by the identity migration (commit on `main`, 2026-09-05):
+
+- **Naming drift.** The project identity is now "Jaiba Sampler" everywhere:
+  - `CMakeLists.txt`: `project(JaibaSampler VERSION 1.0.0)`; target renamed
+    `MySampler` → `JaibaSampler` (artefacts land in `JaibaSampler_artefacts/`);
+    `PRODUCT_NAME` → `"JaibaSampler"`; `COMPANY_NAME` → `"Jaiba"`;
+    binary-data target → `JaibaSamplerBinaryData` (generated namespace stays
+    `BinaryData`, so source references were unaffected).
+  - `src/Main.cpp`: `getApplicationVersion()` now returns
+    `ProjectInfo::versionString`, so the version is sourced from CMake
+    (`1.0.0`) instead of a second literal.
+  - `src/MainComponent.cpp`: the `appVersion` attribute written to `.jai`
+    kit files also uses `ProjectInfo::versionString`.
+  - Legacy `JaibaKit`/`JaivaKit` and `GlobalJaibaMap`/`GlobalJaivaMap` XML
+    tags are kept as accepted *inputs* only (backward file-format compat);
+    new files are written with the `Jaiba*` tags.
+
+Not changed (out of scope for identity): `CMakePresets.json` remains
+Windows-only; the README "Usage"/"Project Structure" rewrite and the root
+`.txt` archaeology from §9 are separate hygiene items (§7).
+
+---
+
 *End of analysis.*

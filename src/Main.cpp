@@ -1,4 +1,5 @@
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "JuceHeader.h"
 #include "MainComponent.h"
 #include <cstdio>
 
@@ -12,7 +13,7 @@ public:
     }
     
     const juce::String getApplicationName() override { return "Jaiba Sampler"; }
-    const juce::String getApplicationVersion() override { return "1.0.0"; }
+    const juce::String getApplicationVersion() override { return ProjectInfo::versionString; }
     
     void initialise(const juce::String&) override
     {

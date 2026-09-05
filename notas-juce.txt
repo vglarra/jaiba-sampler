@@ -18,16 +18,16 @@ cmake -S . -B build -G "Visual Studio 17 2022"
 cmake --build build --config Debug
 
 # Run
-./build/MySampler_artefacts/Debug/"My Sampler.exe"
+./build/JaibaSampler_artefacts/Debug/JaibaSampler.exe
 
 o en una linea: 
-cmake --build build --config Debug; & "./build/MySampler_artefacts/Debug/My Sampler.exe"
+cmake --build build --config Debug; & "./build/JaibaSampler_artefacts/Debug/JaibaSampler.exe"
 
 Para compilar cambios
 cmake --build build --config Debug
 
 Para escribir errores en consola:
-& "./build/MySampler_artefacts/Debug/My Sampler.exe" | Write-Host
+& "./build/JaibaSampler_artefacts/Debug/JaibaSampler.exe" | Write-Host
 
 para comprobar versión de JUCE
 Get-Content "C:\Users\vlarr\Documents\SW\juce-projects\mysampler\lib\JUCE\CHANGE_LIST.md" -Head 10

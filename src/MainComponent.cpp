@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "UIComponents.h"
+#include "JuceHeader.h"
 #include "BinaryData.h"
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <string>
@@ -2101,7 +2102,7 @@ void MainComponent::saveKitToFile (const juce::File& file)
 
     auto root = std::make_unique<juce::XmlElement> ("JaibaKit");
     root->setAttribute ("version",     1);
-    root->setAttribute ("appVersion",  "1.0.0");
+    root->setAttribute ("appVersion",  juce::String (ProjectInfo::versionString));
     root->setAttribute ("savedDate",   juce::Time::getCurrentTime().toString (true, true));
 
     for (int i = 0; i < PadManager::kMaxPads; ++i)

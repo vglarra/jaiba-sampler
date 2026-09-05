@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(JaibaSampler VERSION 0.1.0)
+project(JaibaSampler VERSION 1.0.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,20 +10,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_subdirectory(lib/JUCE)
 
 # Create your application
-juce_add_gui_app(MySampler
-    PRODUCT_NAME "jaibasampler"
-    COMPANY_NAME "YourCompany"
+juce_add_gui_app(JaibaSampler
+    PRODUCT_NAME "JaibaSampler"
+    COMPANY_NAME "Jaiba"
     VERSION ${PROJECT_VERSION}
 )
 
 # Embed binary resources (e.g. logo SVG) as BinaryData
-juce_add_binary_data(MySamplerBinaryData
+juce_add_binary_data(JaibaSamplerBinaryData
     SOURCES
         src/Resources/jaiba-sampler-logo.svg
 )
 
 # Add your source files
-target_sources(MySampler
+target_sources(JaibaSampler
     PRIVATE
         src/Main.cpp
         src/MainComponent.cpp
@@ -36,9 +36,9 @@ target_sources(MySampler
 )
 
 # Link required JUCE modules
-target_link_libraries(MySampler
+target_link_libraries(JaibaSampler
     PRIVATE
-        MySamplerBinaryData
+        JaibaSamplerBinaryData
         juce::juce_audio_basics
         juce::juce_audio_devices
         juce::juce_audio_formats
@@ -52,7 +52,7 @@ target_link_libraries(MySampler
 # JUCE enables JUCE_WEB_BROWSER / JUCE_USE_CURL by default on Linux, which would
 # pull in webkit2gtk/GTK headers and libcurl; disabling them keeps the Linux
 # build lean and portable. Harmless on other platforms (flags unused there).
-target_compile_definitions(MySampler
+target_compile_definitions(JaibaSampler
     PRIVATE
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
@@ -60,8 +60,8 @@ target_compile_definitions(MySampler
 
 # Add Windows-specific libraries HERE (after JUCE modules)
 if (WIN32)
-    target_link_libraries(MySampler PRIVATE vfw32.lib)
+    target_link_libraries(JaibaSampler PRIVATE vfw32.lib)
 endif()
 
 # Generate JUCE header
-juce_generate_juce_header(MySampler)
+juce_generate_juce_header(JaibaSampler)
