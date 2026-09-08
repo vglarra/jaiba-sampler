@@ -1174,6 +1174,10 @@ void MainComponent::showAudioDeviceSettings()
 
 void MainComponent::updateDeviceInfo()
 {
+    // MIDI restore retry: the saved device may only become enumerable after
+    // app startup, so try on each 500 ms tick while armed.
+    maybeRestoreMidiDevice();
+
     // ── Deferred diagnostic prints (written by audio thread, printed here on message thread) ─
     {
         const juce::int64 latUs = pad().lastMidiLatencyUs.exchange(-1, std::memory_order_relaxed);
@@ -5439,21 +5443,15 @@ void MainComponent::loadLastSession()
     // Only audio and MIDI device selections are restored (system-level settings).
 
     // ── Restore MIDI device ────────────────────────────────────────────────────────
+    // getAvailableDevices() can be empty this early in construction, so if the
+    // saved device isn't found yet we arm a retry (maybeRestoreMidiDevice, run on
+    // the 500 ms timer) instead of giving up.
     juce::String savedDevice = configManager->getMidiDevice();
-    if (savedDevice.isNotEmpty() && isValidMidiDevice(savedDevice))
+    if (savedDevice.isNotEmpty())
     {
-        currentMidiDeviceName = savedDevice;
-        auto devices = juce::MidiInput::getAvailableDevices();
-        for (auto& device : devices)
-        {
-            if (device.name == savedDevice)
-            {
-                midiInput = juce::MidiInput::openDevice(device.identifier, this);
-                if (midiInput != nullptr)
-                    midiInput->start();
-                break;
-            }
-        }
+        midiRestoreName = savedDevice;
+        midiRestoreAttempts = 0;
+        maybeRestoreMidiDevice();   // immediate first attempt
     }
 
     // Start with an empty untitled in-memory session — 16 banks, no files, no disk writes.
@@ -6166,8 +6164,45 @@ bool MainComponent::isValidMidiDevice(const juce::String& deviceName)
 
 void MainComponent::midiDeviceChanged(const juce::String& newDevice)
 {
+    // A manual selection (or disable) supersedes any pending auto-restore.
+    midiRestoreName.clear();
+    midiRestoreAttempts = 0;
     currentMidiDeviceName = newDevice;
     saveCurrentSession();
+    // Persist the MIDI device across restarts (saveCurrentSession() is a
+    // disk no-op by design). Also covers "MIDI disabled" (empty name).
+    configManager->saveMidiDevice(newDevice);
+}
+
+// Tries to open the saved MIDI device if it has become available. Called from
+// the 500 ms timer (via updateDeviceInfo) while midiRestoreName is armed, so a
+// device whose enumeration lags app startup still gets reconnected.
+void MainComponent::maybeRestoreMidiDevice()
+{
+    if (midiInput != nullptr || midiRestoreName.isEmpty())
+        return;
+
+    if (++midiRestoreAttempts > 40)   // ~20 s of 500 ms ticks, then give up
+    {
+        midiRestoreName.clear();
+        return;
+    }
+
+    auto devices = juce::MidiInput::getAvailableDevices();
+    for (auto& device : devices)
+    {
+        if (device.name == midiRestoreName)
+        {
+            midiInput = juce::MidiInput::openDevice(device.identifier, this);
+            if (midiInput != nullptr)
+            {
+                midiInput->start();
+                currentMidiDeviceName = midiRestoreName;
+                midiRestoreName.clear();
+            }
+            return;
+        }
+    }
 }
 
 

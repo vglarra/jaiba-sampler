@@ -456,6 +456,12 @@ private:
     juce::StringArray midiInputNames;
     juce::String currentMidiDeviceName;
     juce::CriticalSection midiLock;  // Thread safety for MIDI device management
+
+    // Saved-device restore: at construction time JUCE's MIDI device list may
+    // not be populated yet (getAvailableDevices() == 0), so keep retrying on
+    // the 500 ms timer until the saved device appears (or we give up).
+    juce::String midiRestoreName;
+    int midiRestoreAttempts = 0;
     
     // MIDI Learn mode
     bool isLearningMode = false;
@@ -697,6 +703,7 @@ private:
     void saveCurrentSession();
     bool isValidMidiDevice(const juce::String& deviceName);
     void midiDeviceChanged(const juce::String& newDevice);
+    void maybeRestoreMidiDevice();
 
     //==============================================================================
     // Recording engine

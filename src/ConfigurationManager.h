@@ -83,6 +83,16 @@ public:
         propertiesFile->setValue("midiDevice",  midiDevice);
     }
 
+    // Persist the chosen MIDI input device (by name) so it survives restarts.
+    // Device selection is a rare user action, so flush immediately -- matches
+    // the audio-device setters, and loadLastSession() reads "midiDevice" at
+    // startup to re-open the input.
+    void saveMidiDevice(const juce::String& midiDevice)
+    {
+        propertiesFile->setValue("midiDevice", midiDevice);
+        flush();
+    }
+
     void savePitchOffset(int pitchOffsetCents)
     {
         propertiesFile->setValue("pitchOffsetCents", pitchOffsetCents);
