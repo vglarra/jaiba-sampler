@@ -7,11 +7,11 @@ class FftVisualizerView : public juce::Component,
                           public juce::Timer
 {
 public:
-    enum class Style { Kaleidoscope, RingsParticles };
+    enum class Style { Spectrum, RingsParticles, Kaleidoscope };
 
     FftVisualizerView()
     {
-        styleButton.setButtonText ("RINGS");
+        styleButton.setButtonText ("SPECTRUM");
         styleButton.setColour (juce::TextButton::buttonColourId,
                                juce::Colour (0xFF1a1a2e));
         styleButton.setColour (juce::TextButton::textColourOffId,
@@ -100,10 +100,12 @@ public:
     void paint (juce::Graphics& g) override
     {
         g.fillAll (juce::Colour (0xFF050510));
-        if (currentStyle == Style::Kaleidoscope)
-            drawKaleidoscope (g);
-        else
-            drawRingsParticles (g);
+        switch (currentStyle)
+        {
+            case Style::Spectrum:      drawSpectrum (g);       break;
+            case Style::Kaleidoscope:  drawKaleidoscope (g);   break;
+            case Style::RingsParticles: drawRingsParticles (g); break;
+        }
     }
 
 private:
@@ -127,7 +129,7 @@ private:
     juce::SpinLock scopeLock;
 
     juce::TextButton styleButton;
-    Style currentStyle = Style::RingsParticles;
+    Style currentStyle = Style::Spectrum;
     float phase = 0.0f;
 
     // Sensitivity control — top-left of the visualizer. Scales FFT bin values
@@ -171,15 +173,20 @@ private:
 
     void toggleStyle()
     {
-        if (currentStyle == Style::Kaleidoscope)
+        switch (currentStyle)
         {
-            currentStyle = Style::RingsParticles;
-            styleButton.setButtonText ("RINGS");
-        }
-        else
-        {
-            currentStyle = Style::Kaleidoscope;
-            styleButton.setButtonText ("KALEIDO");
+            case Style::Spectrum:
+                currentStyle = Style::RingsParticles;
+                styleButton.setButtonText ("RINGS");
+                break;
+            case Style::RingsParticles:
+                currentStyle = Style::Kaleidoscope;
+                styleButton.setButtonText ("KALEIDO");
+                break;
+            case Style::Kaleidoscope:
+                currentStyle = Style::Spectrum;
+                styleButton.setButtonText ("SPECTRUM");
+                break;
         }
     }
 
@@ -230,6 +237,56 @@ private:
             phase -= juce::MathConstants<float>::twoPi;
 
         repaint();
+    }
+
+    // ── SPECTRUM ─────────────────────────────────────────────────
+    // Classic frequency analyzer: log-spaced bars across the display, driven
+    // by the FFT bin magnitudes in displayScope (smoothed on FftThread).
+    void drawSpectrum (juce::Graphics& g)
+    {
+        auto w = (float) getWidth();
+        auto h = (float) getHeight();
+
+        constexpr int kNumBars = 72;                 // visual bar count
+        constexpr float kMaxBinF = (float) numBins;  // bin indices 0..numBins-1
+        const float barW = w / (float) kNumBars;
+        const float baseY = h * 0.92f;               // baseline above the SENS UI
+
+        // Geometric bin spacing gives low frequencies (left) more resolution,
+        // like a real analyzer. binF goes ~1..numBins across the bar row.
+        for (int c = 0; c < kNumBars; ++c)
+        {
+            float t = (float) c / (float) (kNumBars - 1);
+            float binF = 1.0f + (kMaxBinF - 1.0f) * (t * t * (3.0f - 2.0f * t)); // smoothstep-ish: more low-freq detail
+            // Weighted average over a small band around binF for stable bars.
+            int binLo = juce::jlimit (0, numBins - 1, (int) (binF - 1.0f));
+            int binHi = juce::jlimit (0, numBins - 1, (int) (binF + 1.0f));
+            float val = 0.0f;
+            for (int b = binLo; b <= binHi; ++b) val += displayScope[b];
+            val /= (float) (binHi - binLo + 1);
+
+            // Brightness ramps with level; cap to keep the bars inside.
+            float mag = juce::jlimit (0.0f, 1.0f, val * 1.15f);
+            float barH = mag * (baseY - 14.0f);
+            float x = (float) c * barW;
+
+            // Colour sweeps blue -> violet -> magenta from low to high freq.
+            float hue = std::fmod (0.6f + t * 0.35f, 1.0f);
+            g.setColour (juce::Colour::fromHSV (hue, 0.85f,
+                                                0.35f + mag * 0.65f,
+                                                0.9f));
+            if (barH >= 1.0f)
+                g.fillRect (x + 0.5f, baseY - barH, barW - 1.0f, barH);
+
+            // Thin peak cap line so small signals stay visible.
+            g.setColour (juce::Colour::fromHSV (hue, 0.9f, 0.95f, 0.9f));
+            if (barH >= 2.0f)
+                g.fillRect (x + 0.5f, baseY - barH, barW - 1.0f, 2.0f);
+        }
+
+        // Baseline.
+        g.setColour (juce::Colour (0xFF22223A));
+        g.fillRect (0.0f, baseY, w, 2.0f);
     }
 
     // ── KALEIDOSCOPE ──────────────────────────────────────────────

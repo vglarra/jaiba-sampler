@@ -2,6 +2,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <atomic>
+#include <cmath>
 
 // Dual-channel segmented LED-block level meter (VU-meter style).
 // Two std::atomic<float> sources (L / R) are written by the audio thread each block.
@@ -33,9 +34,10 @@ public:
         const float W = (float)getWidth();
         const float H = (float)getHeight();
 
-        g.setColour(juce::Colour(0xFF111111));
+        // Dark navy canvas + hairline border — matches the FFT spectrum view.
+        g.setColour(juce::Colour(0xFF0A0A18));
         g.fillRoundedRectangle(0.0f, 0.0f, W, H, 3.0f);
-        g.setColour(juce::Colour(0xFF333333));
+        g.setColour(juce::Colour(0xFF2A2A4A));
         g.drawRoundedRectangle(0.5f, 0.5f, W - 1.0f, H - 1.0f, 3.0f, 1.0f);
 
         constexpr float kLabelW  = 18.0f;
@@ -54,7 +56,7 @@ public:
         drawLabels (g, 0.0f, meterTop, kLabelW, meterH, W);
 
         // "dB" label centred below the meter
-        g.setColour(juce::Colour(0xFFAAAAAA));
+        g.setColour(juce::Colour(0xFF8A8AC8));
         g.setFont(juce::Font(7.0f));
         g.drawText("dB", 0, (int)(H - kBotPad), (int)W, (int)kBotPad,
                    juce::Justification::centred, false);
@@ -91,21 +93,34 @@ private:
         return lb[i];
     }
 
-    // ── Colours ───────────────────────────────────────────────────────────────────
+    // ── Colours (FFT-spectrum palette) ───────────────────────────────────────────
+    // Same blue -> violet -> magenta sweep used by the spectrum bars, from the
+    // bottom (quiet) of the meter to the top (loud). dbToFrac maps a dB level
+    // to the 0..1 position so lit segments and the peak cap match that gradient.
+    static float hueForFrac(float t) noexcept
+    {
+        return std::fmod(0.6f + juce::jlimit(0.0f, 1.0f, t) * 0.35f, 1.0f);
+    }
+
+    static float dbToFrac(float db) noexcept
+    {
+        db = juce::jlimit(segDb(0), segDb(kN - 1), db);
+        for (int i = 0; i < kN - 1; ++i)
+            if (db <= segDb(i + 1))
+                return ((float)i + (db - segDb(i)) / (segDb(i + 1) - segDb(i))) / (float)(kN - 1);
+        return 1.0f;
+    }
+
     static juce::Colour litCol(int i) noexcept
     {
-        const float db = segDb(i);
-        if (db >= 8.f)  return juce::Colour(0xFFCC0000);  // deep red
-        if (db >= 2.f)  return juce::Colour(0xFFFF6600);  // orange
-        return               juce::Colour(0xFF00E5CC);    // cyan/teal
+        const float t = (float)i / (float)(kN - 1);
+        return juce::Colour::fromHSV(hueForFrac(t), 0.85f, 0.95f, 1.0f);
     }
 
     static juce::Colour unlitCol(int i) noexcept
     {
-        const float db = segDb(i);
-        if (db >= 8.f)  return juce::Colour(0xFF220000);  // dark red
-        if (db >= 2.f)  return juce::Colour(0xFF2E1A00);  // dark orange
-        return               juce::Colour(0xFF0A2E2A);    // dark teal
+        const float t = (float)i / (float)(kN - 1);
+        return juce::Colour::fromHSV(hueForFrac(t), 0.85f, 0.16f, 1.0f);
     }
 
     // ── Per-channel state ─────────────────────────────────────────────────────────
@@ -193,11 +208,12 @@ private:
             g.fillRoundedRectangle(x, top, w, h, 1.0f);
         }
 
-        // Peak-hold indicator — 2 px bright-white horizontal bar
+        // Peak-hold indicator — 2 px bright cap bar in the matching hue
         if (c.peakHold > 1e-4f)
         {
-            const float py = dbToY(toDb(c.peakHold), meterTop, meterH);
-            g.setColour(juce::Colours::white);
+            const float db = toDb(c.peakHold);
+            const float py = dbToY(db, meterTop, meterH);
+            g.setColour(juce::Colour::fromHSV(hueForFrac(dbToFrac(db)), 0.9f, 1.0f, 1.0f));
             g.fillRect(x, py - 1.0f, w, 2.0f);
         }
     }
@@ -207,7 +223,7 @@ private:
                     float meterH, float totalW) const
     {
         g.setFont(juce::Font(7.0f));
-        g.setColour(juce::Colour(0xFFAAAAAA));
+        g.setColour(juce::Colour(0xFF8A8AC8));   // dim lavender, matches "dB"
         const float rightX = totalW - labelW;
 
         for (int i = 0; i < kN; ++i)
