@@ -16,12 +16,6 @@ juce_add_gui_app(JaibaSampler
     VERSION ${PROJECT_VERSION}
 )
 
-# Embed binary resources (e.g. logo SVG) as BinaryData
-juce_add_binary_data(JaibaSamplerBinaryData
-    SOURCES
-        src/Resources/jaiba-sampler-logo.svg
-)
-
 # Add your source files
 target_sources(JaibaSampler
     PRIVATE
@@ -38,7 +32,6 @@ target_sources(JaibaSampler
 # Link required JUCE modules
 target_link_libraries(JaibaSampler
     PRIVATE
-        JaibaSamplerBinaryData
         juce::juce_audio_basics
         juce::juce_audio_devices
         juce::juce_audio_formats

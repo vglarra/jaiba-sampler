@@ -678,7 +678,9 @@ public:
         bankLabel.setJustificationType (juce::Justification::centred);
         bankLabel.setColour (juce::Label::backgroundColourId, juce::Colour (0xFF1E1E1E));
         bankLabel.setColour (juce::Label::textColourId,       juce::Colour (0xFF4BFF7A));
-        bankLabel.setFont (juce::Font (11.0f, juce::Font::bold));
+        bankLabel.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
+        // Long kit names shrink to fit instead of being clipped mid-word.
+        bankLabel.setMinimumHorizontalScale (0.6f);
         bankLabel.setInterceptsMouseClicks (false, false);
         addAndMakeVisible (bankLabel);
 
@@ -710,10 +712,12 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced (8, 0);
-        auto left = area.removeFromLeft (144);
+        // Keep this width in sync with MainComponent::resized(), which skips the
+        // same span before laying out the kit/session controls on this row.
+        auto left = area.removeFromLeft (260);
         bankDownBtn.setBounds (left.removeFromLeft (36).withSizeKeepingCentre (32, 20));
         left.removeFromLeft (4);
-        bankLabel.setBounds   (left.removeFromLeft (60).withSizeKeepingCentre (56, 20));
+        bankLabel.setBounds   (left.removeFromLeft (180).withSizeKeepingCentre (176, 20));
         left.removeFromLeft (4);
         bankUpBtn.setBounds   (left.removeFromLeft (36).withSizeKeepingCentre (32, 20));
         // Right area left for gjmStatusLabel (MainComponent child, overlaid on this row)
@@ -737,10 +741,12 @@ public:
         updateBank();
     }
 
-    // Override the label text (e.g. "GJM 3/16" or "No GJM").
-    void setBankLabelText (const juce::String& text)
+    // Kit name shown after the bank number, e.g. "Bank 3 : empty",
+    // "Bank 1 : no_name" or "Bank 2 : MyKit". Empty suffix = just "Bank N".
+    void setBankSuffix (const juce::String& suffix)
     {
-        bankLabel.setText (text, juce::dontSendNotification);
+        bankSuffix = suffix;
+        updateBank();
     }
 
     // Enable/disable both nav buttons (used while GJM is being parsed in background).
@@ -755,13 +761,17 @@ public:
 private:
     juce::TextButton bankUpBtn, bankDownBtn;
     juce::Label      bankLabel;
+    juce::String     bankSuffix;   // kit name / "no_name" / "empty" for the current bank
     int  currentBank = 1;
     int  maxBank     = 1;   // set to GjmManager::kNumBanks when a GJM is loaded
 
     void updateBank()
     {
-        bankLabel.setText ("Bank " + juce::String (currentBank),
-                           juce::dontSendNotification);
+        juce::String text = "Bank " + juce::String (currentBank);
+        if (bankSuffix.isNotEmpty())
+            text += " : " + bankSuffix;
+
+        bankLabel.setText (text, juce::dontSendNotification);
         bankDownBtn.setEnabled (currentBank > 1);
         bankUpBtn.setEnabled   (currentBank < maxBank);
     }

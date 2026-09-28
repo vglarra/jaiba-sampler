@@ -1,7 +1,6 @@
 #include "MainComponent.h"
 #include "UIComponents.h"
 #include "JuceHeader.h"
-#include "BinaryData.h"
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <string>
 #include <vector>
@@ -133,24 +132,12 @@ MainComponent::MainComponent()
             mf.ch     .store(settings.midiChannel,     std::memory_order_relaxed);
         }
 
-        // ── Step 3b: Push EQ state to the new engine's audio pipeline ─────────────
-        // updateUIFromSettings uses notifyListeners=false for EQ — the UI is updated
-        // but eqParamsChanged listener is NOT fired, so the engine's eqCoeffDB is stale.
-        // We must push the coefficients, filter modes, and pad gain manually here.
-        {
-            engine.eqActive.store(settings.eqEnabled);
-            engine.eqFilterModes[0] = settings.eq1Mode;
-            engine.eqFilterModes[1] = settings.eq2Mode;
-            engine.eqFilterModes[2] = settings.eq3Mode;
-            engine.padGain.store(juce::jlimit(0.0f, 2.0f, settings.padGain));
-
-            const double sr = engine.getSampleRate() > 0.0 ? engine.getSampleRate() : 44100.0;
-            PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
-            newCoeffs[0] = engine.computeEqCoeffs(settings.eq1Freq, settings.eq1Gain, settings.eq1Q, settings.eq1Mode, sr);
-            newCoeffs[1] = engine.computeEqCoeffs(settings.eq2Freq, settings.eq2Gain, settings.eq2Q, settings.eq2Mode, sr);
-            newCoeffs[2] = engine.computeEqCoeffs(settings.eq3Freq, settings.eq3Gain, settings.eq3Q, settings.eq3Mode, sr);
-            engine.eqCoeffDB.writeFromUI(newCoeffs);
-        }
+        // ── Step 3b: Push EQ + pad gain + normalize into the new engine ───────────
+        // updateUIFromSettings uses notifyListeners=false for EQ/norm, so the listeners
+        // that normally configure the engine never fire on a pad switch. Push the saved
+        // PadSettings manually — including normGain, which was previously left at 1.0
+        // and only took effect after the user toggled the norm button.
+        applyAudioSettingsToEngine (engine, settings);
 
 
         if (!engine.hasSampleLoaded())
@@ -494,10 +481,13 @@ MainComponent::MainComponent()
     // exactly which intervals the message thread is blocked during sample loads.
     heartbeatThread.startThread(juce::Thread::Priority::low);
 
-    if (auto xml = juce::XmlDocument::parse(
-            juce::String::fromUTF8(BinaryData::jaibasamplerlogo_svg,
-                                   BinaryData::jaibasamplerlogo_svgSize)))
-        logoDrawable = juce::Drawable::createFromSVG(*xml);
+    // First-row title — replaces the old SVG logo.
+    appTitleLabel.setText ("Jaiba - Sampler 1.0", juce::dontSendNotification);
+    appTitleLabel.setJustificationType (juce::Justification::centred);
+    appTitleLabel.setFont (juce::Font (juce::FontOptions (26.0f, juce::Font::bold)));
+    appTitleLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFCECECE));
+    appTitleLabel.setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (appTitleLabel);
 }
 
 MainComponent::~MainComponent()
@@ -781,23 +771,6 @@ void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xFF1E1E1E));
 
-    if (logoDrawable)
-    {
-        // Constrain to the space between the Menu button and the right-side
-        // controls (Reset/Hz/Master Vol) so the logo never overlaps them,
-        // then shrink by 30% for breathing room.
-        constexpr float kLogoLeftMargin  = 84.0f;  // margin(20) + menu(60) + gap(4)
-        constexpr float kLogoRightMargin = 378.0f; // right-side controls(358) + margin(20)
-        auto availableArea = juce::Rectangle<float>(
-            kLogoLeftMargin, 0.0f,
-            juce::jmax(0.0f, (float)getWidth() - kLogoLeftMargin - kLogoRightMargin), 90.0f);
-        auto logoArea = availableArea.withSizeKeepingCentre(
-            availableArea.getWidth() * 0.7f, availableArea.getHeight() * 0.7f);
-        logoDrawable->drawWithin(g, logoArea,
-            juce::RectanglePlacement::centred |
-            juce::RectanglePlacement::onlyReduceInSize, 1.0f);
-    }
-
     // Line above footer (footer is 50px from bottom)
     g.setColour(juce::Colour(0xFF404040));
     auto footerY = getHeight() - 55;
@@ -885,6 +858,9 @@ void MainComponent::resized()
         midiActivityLight.setBounds (rightSide.removeFromLeft (22).withSizeKeepingCentre (20, 20));
         rightSide.removeFromLeft (6);
         testToneButton.setBounds    (rightSide.removeFromLeft (62).withSizeKeepingCentre (58, 30));
+
+        // First-row title fills the gap between the Menu button and the right-side controls.
+        appTitleLabel.setBounds (topBar.reduced (8, 0));
     }
 
     // =========================================================
@@ -895,10 +871,10 @@ void MainComponent::resized()
         globalControlsBar.setBounds (globRow);
 
         // Kit button + name display: placed after bank controls in the same row.
-        // GlobalControlsBar uses reduced(8,0) internally; bank controls = 144px.
-        // We mirror that offset so kit controls align flush with bank buttons.
+        // GlobalControlsBar uses reduced(8,0) internally; bank controls = 260px
+        // (36 Down + 4 + 180 label + 4 + 36 Up). Keep in sync with its resized().
         auto kitArea = globRow.reduced (8, 0);
-        kitArea.removeFromLeft (144);      // skip bank controls
+        kitArea.removeFromLeft (260);      // skip bank controls
         kitArea.removeFromLeft (4);        // gap after bankDownBtn
         kitButton.setBounds    (kitArea.removeFromLeft (44).withSizeKeepingCentre (40, 20));
         kitArea.removeFromLeft (4);
@@ -1830,6 +1806,10 @@ void MainComponent::preloadPadEngineAsync(int padIdx, juce::File file, PadSettin
             engine.loopEnabled.store(settings.loopEnabled);
             engine.volumeGain.store(settings.volumeLevel);
 
+            // Restore the kit's EQ / pad gain / normalize for this pre-loaded pad so a
+            // MIDI trigger sounds right without having to select the pad first.
+            applyAudioSettingsToEngine(engine, settings);
+
             engine.muteOutput.store(false);
 
             // Update grid label with filename (in case it wasn't set yet).
@@ -1963,6 +1943,9 @@ void MainComponent::preloadGlobalPadEngineAsync(int globalPadIdx, juce::File fil
             engine.loopEnabled.store(settings.loopEnabled);
             engine.volumeGain.store(settings.volumeLevel);
 
+            // Restore this G pad's saved EQ / pad gain / normalize.
+            applyAudioSettingsToEngine(engine, settings);
+
             engine.muteOutput.store(false);
 
             // Update the column state now that audio is ready.
@@ -2083,8 +2066,11 @@ void MainComponent::showKitMenu()
     menu.addItem (4, "Load Session...");
     menu.addSeparator();
     menu.addSectionHeader ("Current Bank Kit");
-    menu.addItem (1, "Save Bank Kit...");
+    const bool bankHasKitFile = gjmManager.banks[gjmManager.activeBank].kitFilePath.isNotEmpty();
+    menu.addItem (1, bankHasKitFile ? "Save Bank Kit" : "Save Bank Kit...");
+    menu.addItem (9, "Save Bank Kit As...");
     menu.addItem (2, "Load Bank Kit...");
+    menu.addItem (7, "Clear Bank Kit...");
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&kitButton),
         [this] (int result)
@@ -2093,8 +2079,10 @@ void MainComponent::showKitMenu()
             else if (result == 3) saveSessionAction (false);
             else if (result == 6) saveSessionAction (true);
             else if (result == 4) loadSessionAction();
-            else if (result == 1) saveBankKitAction();
+            else if (result == 1) saveBankKitAction (false);
+            else if (result == 9) saveBankKitAction (true);
             else if (result == 2) loadBankKitAction();
+            else if (result == 7) clearBankKitAction();
         });
 }
 
@@ -2120,6 +2108,7 @@ void MainComponent::saveKitToFile (const juce::File& file)
     {
         currentKitFile = file;
         kitIsDirty = false;
+        gjmManager.banks[gjmManager.activeBank].isDirty = false;
         kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
         kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
         kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
@@ -2256,16 +2245,20 @@ void MainComponent::loadKitFromFile (const juce::File& file)
         for (int i = 0; i < PadManager::kMaxPads; ++i)
             activeB.pads[i] = padManager.padSettings[i];
         activeB.isReady = true;
+        activeB.isDirty = false;   // just loaded straight from disk
     }
 
     sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
+
+    // Refresh the bank label (kit name may have just changed).
+    updateGjmUI();
 }
 
 void MainComponent::newKitAction()
 {
     captureSampleCardToPadSettings (padManager.selectedPadIndex);
 
-    if (!gjmManager.isDirty && !kitIsDirty)
+    if (!gjmManager.isDirty && !kitIsDirty && !gjmManager.anyBankDirty())
     {
         clearAllPadsForNewKit();
         return;
@@ -2351,6 +2344,103 @@ void MainComponent::clearAllPadsForNewKit()
     sampleCard.showTrimToast ("New session started", false);
     printf ("[KIT] All pads cleared — new kit ready\n");
     fflush (stdout);
+}
+
+void MainComponent::clearBankKitAction()
+{
+    const int          bank1    = gjmManager.activeBank + 1;
+    const juce::String bankName = gjmManager.activeBankName();
+
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::AlertWindow::QuestionIcon)
+            .withTitle ("Clear Bank Kit")
+            .withMessage ("Clear the kit in Bank " + juce::String (bank1)
+                          + " (" + bankName + ")?\n\n"
+                          "All 16 pads in this bank will be emptied and reset to defaults.\n"
+                          "Other banks, the global loop pads and the session are not affected,\n"
+                          "and no files are deleted from disk.\n\n"
+                          "Are you sure? This cannot be undone.")
+            .withButton ("Clear Bank Kit")
+            .withButton ("Cancel"),
+        [this] (int r)
+        {
+            if (r != 1) return;    // 0 = dismissed, 2 = Cancel
+            clearCurrentBankKit();
+        });
+}
+
+void MainComponent::clearCurrentBankKit()
+{
+    const int bank1 = gjmManager.activeBank + 1;
+
+    // Stop and empty every kit-pad engine, then reset its settings to defaults.
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+    {
+        if (padManager.hasEngine (i))
+            clearEngineAudio (padManager.getEngine (i));
+
+        padManager.padSettings[i].resetToDefaults();
+        padMnFreeze[i].isActive.store (false, std::memory_order_relaxed);
+        padMnFreeze[i].enabled .store (false, std::memory_order_relaxed);
+        padGrid.setPadSampleName (i, {});
+    }
+
+    // Drop this bank's kit association so the clear survives a session save/load.
+    // The .jai file on disk is left untouched and can be reloaded with "Load Bank Kit...".
+    auto& bank = gjmManager.banks[gjmManager.activeBank];
+    bank.kitFilePath.clear();
+    bank.displayName.clear();
+    bank.isReady = true;
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+        bank.pads[i] = padManager.padSettings[i];
+
+    // Reset folder navigation so Prev/Next won't walk the cleared sample's folder.
+    currentFolder = juce::File{};
+    {
+        juce::ScopedWriteLock wlock (folderLock);
+        folderAudioFiles.clear();
+    }
+    currentFileIndex = -1;
+
+    // Refresh whatever the SampleCard is showing.  A displayed global pad must not be
+    // clobbered by the bank clear, so re-display it instead of the kit pad.
+    if (padSelectionSource == PadSelectionSource::Global && selectedGlobalPadIndex >= 0)
+    {
+        selectGlobalPad (selectedGlobalPadIndex);
+    }
+    else
+    {
+        sampleCard.updateUIFromSettings (padManager.getSettings (padManager.selectedPadIndex));
+        sampleCard.setEmptyState (true);
+    }
+
+    // The in-memory session now differs from what is on disk.  The bank itself is
+    // empty, so it has no kit content left to be "dirty" — the session flag carries it.
+    bank.isDirty        = false;
+    gjmManager.isDirty  = true;
+    kitIsDirty          = true;
+    updateGjmUI();
+
+    sampleCard.showTrimToast ("Bank " + juce::String (bank1) + " kit cleared", false);
+    printf ("[KIT] Bank %d kit cleared\n", bank1);
+    fflush (stdout);
+}
+
+void MainComponent::clearEngineAudio (PadAudioEngine& engine)
+{
+    engine.muteOutput.store (true);
+    engine.clearActiveSoundFlags();
+    engine.forceStopAllVoices();
+    engine.clearSoundsAndVoices();
+    engine.allNotesOff (0, false);
+    {
+        juce::ScopedLock lock (engine.sampleLock);
+        engine.samples.clear();
+        engine.selectedSampleIndex = 0;
+    }
+    engine.clearPeakCache();
+    engine.muteOutput.store (false);
 }
 
 void MainComponent::navigateKit (int direction)
@@ -2524,6 +2614,10 @@ void MainComponent::saveGjmToFile (const juce::File& file)
         gjmManager.isUntitled = false;
         gjmManager.isDirty    = false;
         kitIsDirty = false;
+
+        // Saving the session also writes every bank's .jai, so no bank is dirty now.
+        for (auto& b : gjmManager.banks)
+            b.isDirty = false;
 
         configManager->saveLastKitFolder (file.getParentDirectory().getFullPathName());
         sampleCard.showTrimToast ("Session saved: " + file.getFileName(), false);
@@ -2726,11 +2820,66 @@ void MainComponent::updateGjmUI()
     gjmStatusLabel.setColour (juce::Label::textColourId,
         untitled ? juce::Colour (0xFF3A5A7A) : juce::Colour (0xFFB8DEFF));
 
-    // Bank nav controls
-    globalControlsBar.setBankLabelText ("Bank " + juce::String (bank1));
+    // Bank nav controls — label reads "Bank N : <kit name>" where the suffix is:
+    //   • the kit's name, when this bank is backed by a named .jai kit
+    //   • "no_name", when the bank only lives in the session and holds samples
+    //   • "empty", when the bank holds no samples at all
+    globalControlsBar.setBankSuffix (activeBankNameSuffix());
     globalControlsBar.setBankIndex (bank1);
     globalControlsBar.setMaxBank (GjmManager::kNumBanks);
     globalControlsBar.setNavEnabled (!gjmParsing.load());
+}
+
+// Works out the kit-name suffix shown between the bank Down/Up buttons.
+// "Sounds" are read from padManager.padSettings because that array is the LIVE
+// working set for the active bank (gjmManager.banks[] is only refreshed on
+// bank switch / save, so it can be stale for the bank currently on screen).
+juce::String MainComponent::activeBankNameSuffix() const
+{
+    const int  bank1 = gjmManager.activeBank + 1;
+    const auto& bank = gjmManager.banks[gjmManager.activeBank];
+
+    bool hasSounds = false;
+    for (int i = 0; i < PadManager::kMaxPads; ++i)
+        if (padManager.padSettings[i].sampleFilePath.isNotEmpty()) { hasSounds = true; break; }
+
+    if (!hasSounds)
+        return bank.isDirty ? juce::String ("empty*") : juce::String ("empty");
+
+    juce::String kitName = bank.displayName;
+
+    // Placeholders that mean "this bank has no real kit name yet":
+    //   "Bank N"  — manifest entry with no stored name
+    //   "kit-00N" — auto-generated by saveGjmToFile() for a session-only bank
+    const juce::String placeholder = "Bank " + juce::String (bank1);
+    const juce::String autoKitName = "kit-" + juce::String (bank1).paddedLeft ('0', 3);
+    if (kitName == placeholder || kitName == autoKitName)
+        kitName.clear();
+
+    juce::String suffix = kitName.isNotEmpty() ? kitName : juce::String ("no_name");
+
+    // Unsaved edits to this bank's kit get an asterisk, e.g. "Bank 1 : Kick*".
+    if (bank.isDirty)
+        suffix += "*";
+
+    return suffix;
+}
+
+// Flags the active bank's kit as having unsaved edits and refreshes the bank
+// label so the asterisk ("Bank 1 : Kick*") appears.  Deliberately does NOT set
+// gjmManager.isDirty: editing pad settings changes the bank's .jai, not the
+// session manifest, so "Save Bank Kit" is enough to clear it.  Cheap when already
+// dirty, so it is safe to call from high-frequency listeners (slider drags).
+void MainComponent::markKitDirty()
+{
+    auto& bank = gjmManager.banks[gjmManager.activeBank];
+    const bool wasDirty = bank.isDirty;
+
+    bank.isDirty = true;
+    kitIsDirty   = true;
+
+    if (!wasDirty)
+        updateGjmUI();
 }
 
 void MainComponent::saveSessionAction (bool forceDialog)
@@ -2790,7 +2939,7 @@ void MainComponent::loadSessionAction()
         });
 }
 
-void MainComponent::saveBankKitAction()
+void MainComponent::saveBankKitAction (bool forceDialog)
 {
     captureSampleCardToPadSettings (padManager.selectedPadIndex);
 
@@ -2800,13 +2949,29 @@ void MainComponent::saveBankKitAction()
         activeB.pads[i] = padManager.padSettings[i];
     activeB.isReady = true;
 
+    // A named bank kit is overwritten in place — no dialog.  "Save Bank Kit As..."
+    // (forceDialog=true) always asks for a location, like "Save Session As...".
+    if (!forceDialog && activeB.kitFilePath.isNotEmpty())
+    {
+        juce::File existing (activeB.kitFilePath);
+        if (existing.existsAsFile())
+        {
+            saveKitToFile (existing);
+            if (!gjmManager.isUntitled && gjmManager.gjmFile.existsAsFile())
+                gjmManager.saveManifest (gjmManager.gjmFile);
+            updateGjmUI();
+            return;
+        }
+        // File vanished (moved/deleted) — fall through to the chooser.
+    }
+
     const juce::String savedFolder = configManager->getLastKitFolder();
     const juce::File startDir = savedFolder.isNotEmpty() && juce::File(savedFolder).isDirectory()
                                     ? juce::File(savedFolder)
                                     : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
 
     kitFileChooser = std::make_unique<juce::FileChooser> (
-        "Save Bank Kit", startDir, "*.jai");
+        forceDialog ? "Save Bank Kit As" : "Save Bank Kit", startDir, "*.jai");
 
     kitFileChooser->launchAsync (
         juce::FileBrowserComponent::saveMode |
@@ -2829,6 +2994,8 @@ void MainComponent::saveBankKitAction()
             // If session is saved, also update the manifest to record the new kit path
             if (!gjmManager.isUntitled && gjmManager.gjmFile.existsAsFile())
                 gjmManager.saveManifest (gjmManager.gjmFile);
+
+            updateGjmUI();
         });
 }
 
@@ -2893,6 +3060,37 @@ MainComponent::TrimSettingsSnapshot MainComponent::padSettingsToSnapshot (const 
     snap.startPointSeconds         = ps.startPointSeconds;
     snap.endPointSeconds           = ps.endPointSeconds;
     return snap;
+}
+
+//==============================================================================
+// Pushes the audio-side state of `ps` into `engine`:
+//   • EQ band modes + coefficients
+//   • pad gain
+//   • normalize gain — recomputed from the loaded audio because PadSettings only
+//     stores the target dB, not the resulting gain
+// Call this whenever a pad's sound is (re)installed or a pad becomes the active
+// one.  Kit/session loads restore PadSettings, but the audio engine holds its own
+// copies; without this the engine keeps the previous pad's EQ/norm and a saved
+// EQ/norm only becomes audible after the user toggles the button.
+void MainComponent::applyAudioSettingsToEngine (PadAudioEngine& engine, const PadSettings& ps)
+{
+    engine.eqActive.store (ps.eqEnabled);
+    engine.eqFilterModes[0] = ps.eq1Mode;
+    engine.eqFilterModes[1] = ps.eq2Mode;
+    engine.eqFilterModes[2] = ps.eq3Mode;
+    engine.padGain.store (juce::jlimit (0.0f, 2.0f, ps.padGain));
+
+    const double sr = engine.getSampleRate() > 0.0 ? engine.getSampleRate() : 44100.0;
+    PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
+    newCoeffs[0] = engine.computeEqCoeffs (ps.eq1Freq, ps.eq1Gain, ps.eq1Q, ps.eq1Mode, sr);
+    newCoeffs[1] = engine.computeEqCoeffs (ps.eq2Freq, ps.eq2Gain, ps.eq2Q, ps.eq2Mode, sr);
+    newCoeffs[2] = engine.computeEqCoeffs (ps.eq3Freq, ps.eq3Gain, ps.eq3Q, ps.eq3Mode, sr);
+    engine.eqCoeffDB.writeFromUI (newCoeffs);
+
+    // Only scan the audio when normalization is actually on — the peak scan walks
+    // the whole start..end range and preloading can touch all 16 pads.
+    engine.normGain.store (ps.normEnabled ? engine.computeNormGainFromAudio (ps.normTargetDb)
+                                          : 1.0f);
 }
 
 //==============================================================================
@@ -3494,14 +3692,10 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
         // No disk save — kit must be saved explicitly by the user.
         captureSampleCardToPadSettings(padManager.selectedPadIndex);
 
-        // Mark kit dirty only for user-initiated loads (autoPlay=true).
+        // Mark the bank's kit dirty only for user-initiated loads (autoPlay=true).
         // Kit/session restores (autoPlay=false) and pad-switch loads must not mark dirty.
         if (autoPlay)
-        {
-            kitIsDirty         = true;
-            gjmManager.isDirty = true;
-            updateGjmUI();
-        }
+            markKitDirty();
 
         // Part 2H — update the pad grid name for the currently selected pad.
         padManager.padSettings[padManager.selectedPadIndex].sampleFilePath =
@@ -3626,6 +3820,8 @@ void MainComponent::midiNoteChanged(int newNote)
 
     // Sync per-pad MIDI note atomic for MNFreeze intercept.
     padMnFreeze[padManager.selectedPadIndex].note.store(newNote, std::memory_order_relaxed);
+
+    markKitDirty();
 }
 
 void MainComponent::midiChannelChanged(int newChannel)
@@ -3646,6 +3842,8 @@ void MainComponent::midiChannelChanged(int newChannel)
 
     // Sync per-pad channel atomic for MNFreeze intercept.
     padMnFreeze[padManager.selectedPadIndex].ch.store(newChannel, std::memory_order_relaxed);
+
+    markKitDirty();
 }
 
 void MainComponent::learningModeChanged(bool isLearning)
@@ -3676,6 +3874,7 @@ void MainComponent::pitchOffsetChanged(int userPitchOffsetCents)
 
     // Keep in-memory pad settings in sync — no disk write.
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 
     juce::ignoreUnused(t0);
 }
@@ -3684,6 +3883,7 @@ void MainComponent::volumeChanged(float volume)
 {
     pad().volumeGain.store(volume);
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 }
 
 void MainComponent::startPointChanged(double startPointSeconds)
@@ -3716,6 +3916,7 @@ void MainComponent::startPointChanged(double startPointSeconds)
     }
 
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 
     const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
 }
@@ -3757,6 +3958,7 @@ void MainComponent::endPointChanged(double endPointSeconds)
     }
 
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 
     const juce::int64 elapsed = juce::Time::getMillisecondCounter() - t0;
 }
@@ -3771,12 +3973,14 @@ void MainComponent::loopEnabledChanged(bool isLooping)
             sound->loopEnabled.store(isLooping);
 
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 }
 
 void MainComponent::gridSnapChanged(bool isEnabled)
 {
     if (configManager != nullptr)
         configManager->saveGridSnapEnabled(isEnabled);
+    markKitDirty();
 }
 
 void MainComponent::gridResolutionChanged(int index)
@@ -3788,10 +3992,13 @@ void MainComponent::gridResolutionChanged(int index)
         const double ms = sampleCard.getGridInterval() * 1000.0;
         configManager->saveGridResolutionMs(ms);
     }
+    markKitDirty();
 }
 
 void MainComponent::detectedNoteChanged(const juce::String& noteName, double freqHz)
 {
+    // Deliberately NOT dirty-marking: this fires automatically from transient
+    // detection, not from a user edit.
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
 }
 
@@ -3799,12 +4006,14 @@ void MainComponent::transientDetectionEnabledChanged(bool enabled)
 {
     if (configManager != nullptr)
         configManager->saveTransientDetectionEnabled(enabled);
+    markKitDirty();
 }
 
 void MainComponent::pitchStepCentsChanged(int cents)
 {
     if (configManager != nullptr)
         configManager->savePitchStepCents(cents);
+    markKitDirty();
 }
 
 void MainComponent::adsrParamsChanged(bool enabled, float attackMs, float decayMs, float sustain, float releaseMs)
@@ -3822,6 +4031,7 @@ void MainComponent::adsrParamsChanged(bool enabled, float attackMs, float decayM
         }
     double elapsed = juce::Time::getMillisecondCounterHiRes() - t0;
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 }
 
 void MainComponent::activeTabChanged(int tabIndex)
@@ -3856,6 +4066,7 @@ void MainComponent::eqParamsChanged(bool enabled,
     // resetEqState() is intentionally NOT called here.
 
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 }
 
 void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
@@ -3883,6 +4094,7 @@ void MainComponent::eqFilterModesChanged(int mode1, int mode2, int mode3)
     // NO updateSamplerSounds() — coefficients written atomically above.
 
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 }
 
 // computeNormGainFromAudio is defined in PadAudioEngine.h and forwarded
@@ -3895,6 +4107,7 @@ void MainComponent::normChanged(bool enabled, float targetDb)
         pad().normGain.store(1.0f);
         sampleCard.setNormGainDisplay(0.0f);
         captureSampleCardToPadSettings(padManager.selectedPadIndex);
+        markKitDirty();
         return;
     }
 
@@ -3916,6 +4129,7 @@ void MainComponent::normChanged(bool enabled, float targetDb)
         const float gainDb = (gain > 0.0f) ? 20.0f * std::log10(gain) : 0.0f;
         sampleCard.setNormGainDisplay(gainDb);
         captureSampleCardToPadSettings(padManager.selectedPadIndex);
+        markKitDirty();
     }
     else
     {
@@ -3933,6 +4147,7 @@ void MainComponent::normChanged(bool enabled, float targetDb)
                 pad().normGain.store(gain);
                 sampleCard.setNormGainDisplay(gainDb);
                 captureSampleCardToPadSettings(padManager.selectedPadIndex);
+                markKitDirty();
             });
         });
     }
@@ -3943,6 +4158,7 @@ void MainComponent::padGainChanged(float gain)
     const float g = juce::jlimit(0.0f, 2.0f, gain);
     pad().padGain.store(g);
     captureSampleCardToPadSettings(padManager.selectedPadIndex);
+    markKitDirty();
 }
 
 void MainComponent::oneShotEnabledChanged(bool enabled)
@@ -3963,6 +4179,7 @@ void MainComponent::oneShotEnabledChanged(bool enabled)
     if (configManager != nullptr)
         configManager->saveOneShotEnabled(enabled);
 
+    markKitDirty();
 }
 
 void MainComponent::reverseEnabledChanged(bool enabled)
@@ -3998,6 +4215,7 @@ void MainComponent::reverseEnabledChanged(bool enabled)
     if (configManager != nullptr)
         configManager->saveReverseEnabled(enabled);
 
+    markKitDirty();
 }
 
 void MainComponent::bounceEnabledChanged(bool enabled)
@@ -4010,6 +4228,7 @@ void MainComponent::bounceEnabledChanged(bool enabled)
     if (configManager != nullptr)
         configManager->saveBounceEnabled(enabled);
 
+    markKitDirty();
 }
 
 
@@ -4031,6 +4250,7 @@ void MainComponent::mnFreezeEnabledChanged(bool enabled)
     }
 
     captureSampleCardToPadSettings(pi);
+    markKitDirty();
 }
 
 void MainComponent::checkOneShotTailDone()
@@ -4920,6 +5140,9 @@ void MainComponent::executeDropPad(int padIdx)
     printf ("[DROP] Pad %d cleared — MIDI note %d / ch %d preserved\n",
             padIdx + 1, settings.midiNote, settings.midiChannel);
     fflush (stdout);
+
+    // This pad may have been the bank's last sound — refresh the bank label.
+    updateGjmUI();
 }
 
 void MainComponent::dropTargetPadWithCallback (int padIndex, std::function<void()> onDropComplete)
@@ -5523,18 +5746,8 @@ void MainComponent::selectGlobalPad (int slotIdx)
             sampleCard.setEndPoint (gs.endPointSeconds);
         sampleCard.restoreZoomAndScroll (gs.zoomLevel, gs.zoomScrollPosition);
 
-        // Push EQ to engine
-        engine.eqActive.store (gs.eqEnabled);
-        engine.eqFilterModes[0] = gs.eq1Mode;
-        engine.eqFilterModes[1] = gs.eq2Mode;
-        engine.eqFilterModes[2] = gs.eq3Mode;
-        engine.padGain.store (juce::jlimit (0.0f, 2.0f, gs.padGain));
-        const double sr = engine.getSampleRate() > 0.0 ? engine.getSampleRate() : 44100.0;
-        PadAudioEngine::EqCoeffDoubleBuffer::Coeffs newCoeffs[3];
-        newCoeffs[0] = engine.computeEqCoeffs (gs.eq1Freq, gs.eq1Gain, gs.eq1Q, gs.eq1Mode, sr);
-        newCoeffs[1] = engine.computeEqCoeffs (gs.eq2Freq, gs.eq2Gain, gs.eq2Q, gs.eq2Mode, sr);
-        newCoeffs[2] = engine.computeEqCoeffs (gs.eq3Freq, gs.eq3Gain, gs.eq3Q, gs.eq3Mode, sr);
-        engine.eqCoeffDB.writeFromUI (newCoeffs);
+        // Push EQ + pad gain + normalize to engine
+        applyAudioSettingsToEngine (engine, gs);
     }
     else
     {
@@ -5946,6 +6159,9 @@ void MainComponent::transferKitPadToGlobal(int kitPadIdx, int globalPadIdx)
     {
         sampleCard.setEmptyState (true);
     }
+
+    // The source pad may have been the bank's last sound — refresh the bank label.
+    updateGjmUI();
 }
 
 void MainComponent::dropGlobalPad(int globalPadIdx)
@@ -6116,7 +6332,7 @@ bool MainComponent::hasAnySamplesLoaded() const
 
 void MainComponent::requestQuit()
 {
-    if (!gjmManager.isDirty && !kitIsDirty)
+    if (!gjmManager.isDirty && !kitIsDirty && !gjmManager.anyBankDirty())
     {
         juce::JUCEApplication::getInstance()->systemRequestedQuit();
         return;

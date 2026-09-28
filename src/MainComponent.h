@@ -228,6 +228,9 @@ private:
     void showSettingsMenu();
     void showKitMenu();
     void newKitAction();
+    void clearBankKitAction();       // confirm + wipe only the current bank's kit
+    void clearCurrentBankKit();      // worker for clearBankKitAction() — no confirmation
+    void clearEngineAudio (PadAudioEngine& engine);   // stop + empty one pad engine
     void clearAllPadsForNewKit();
     void saveKitToFile   (const juce::File& file);
     void loadKitFromFile (const juce::File& file);
@@ -239,11 +242,19 @@ private:
     void switchGjmBank    (int bankIdx);   // 0-based; instant swap + async audio pre-warm
     void finishGjmLoad    ();             // called on message thread after background parse
     void updateGjmUI      ();
+    juce::String activeBankNameSuffix() const;   // "kit name" / "no_name" / "empty" for the active bank
+    void markKitDirty ();                        // flag unsaved edits to the active bank's kit + refresh UI
     void saveSessionAction (bool forceDialog);
     void loadSessionAction ();
-    void saveBankKitAction ();
+    void saveBankKitAction (bool forceDialog);   // false = overwrite the bank's .jai, true = pick a new one
     void loadBankKitAction ();
     TrimSettingsSnapshot padSettingsToSnapshot (const PadSettings& ps) const;
+
+    // Push EQ coefficients, pad gain and normalize gain from `ps` into `engine`.
+    // Must be called whenever a pad's sound is (re)installed or the pad becomes the
+    // active one — otherwise the engine keeps the previous pad's EQ/norm and the
+    // saved values only "appear" after the user toggles the EQ/norm button.
+    void applyAudioSettingsToEngine (PadAudioEngine& engine, const PadSettings& ps);
     void scanCurrentFolderForAudioFiles();
     void navigateToFile(int index);
     void loadNextSample();
@@ -473,7 +484,7 @@ private:
     std::atomic<float> outputPeakLevelL { 0.0f };  // left-channel peak, written each block
     std::atomic<float> outputPeakLevelR { 0.0f };  // right-channel peak, written each block
     LevelMeter         levelMeter;
-    std::unique_ptr<juce::Drawable> logoDrawable;
+    juce::Label        appTitleLabel;   // first-row title (replaces the SVG logo)
 
     //==============================================================================
     // Fullscreen FFT audio visualizer — toggled via vizToggleButton in the footer.

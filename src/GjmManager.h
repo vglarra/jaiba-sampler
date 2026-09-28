@@ -13,6 +13,7 @@ struct GjmBank
     juce::String               displayName;   // short name for UI (file stem by default)
     std::array<PadSettings, 16> pads;         // cached pad settings populated after parse
     bool                        isReady = false;
+    bool                        isDirty = false;  // unsaved edits to this bank's kit (not persisted)
 
     GjmBank()
     {
@@ -27,6 +28,7 @@ struct GjmBank
         kitFilePath.clear();
         displayName.clear();
         isReady = false;
+        isDirty = false;
         for (int i = 0; i < 16; ++i) { pads[i] = PadSettings{}; pads[i].padIndex = i; }
     }
 };
@@ -254,6 +256,13 @@ public:
         int n = 0;
         for (auto& b : banks) if (b.hasFile()) ++n;
         return n;
+    }
+
+    // True when any bank's kit has unsaved edits (cleared by Save Bank Kit / Save Session).
+    bool anyBankDirty() const
+    {
+        for (const auto& b : banks) if (b.isDirty) return true;
+        return false;
     }
 
     juce::String activeBankName() const
