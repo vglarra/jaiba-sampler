@@ -115,6 +115,7 @@ private:
 
         // Volume
         float volumeLevel  = 1.0f;
+        float metronomeVolume = 0.5f;   // per-pad Rec-tab metronome level
 
         // Normalize
         bool  normEnabled  = false;

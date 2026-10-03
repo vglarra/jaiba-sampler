@@ -2377,6 +2377,9 @@ juce::TextButton::ConnectedOnRight);
         // Volume
         setVolume (s.volumeLevel);
 
+        // Metronome volume (per-pad; silent so it doesn't echo back as an edit)
+        setMetronomeVolume (s.metronomeVolume);
+
         // Normalize (silent — no listener, no disk write)
         setNormParams (s.normEnabled, s.normTargetDb, /*notifyListeners=*/false);
 
@@ -4699,6 +4702,15 @@ void adjustPitchUp()
         double getQuantBeats() const { return 0.0; }
         bool   isMetronomeOn() const { return metronomeButton.getToggleState(); }
 
+        // Per-pad metronome beep level (0–1).  The programmatic set is silent so
+        // restoring a saved value never fires metronomeVolumeChanged back.
+        float  getMetronomeVolume() const { return (float)metronomeVolumeSlider.getValue(); }
+        void   setMetronomeVolume(float v)
+        {
+            metronomeVolumeSlider.setValue (juce::jlimit (0.0, 1.0, (double)v),
+                                            juce::dontSendNotification);
+        }
+
         // Called by MainComponent when a G pad is selected / deselected.
         // In G pad mode: hides Record, shows Transfer, adjustTargetPad shows kit pad source.
         void setGlobalPadMode(bool enabled, int gPadIdx = -1)
@@ -5257,6 +5269,18 @@ public:
     {
         if (recContent != nullptr)
             recContent->setStatus(msg);
+    }
+
+    // Per-pad metronome volume shown in the Rec tab (0–1).  setXxx is silent, so
+    // restoring a saved value does not fire metronomeVolumeChanged.
+    float getMetronomeVolume() const
+    {
+        return recContent != nullptr ? recContent->getMetronomeVolume() : 0.5f;
+    }
+    void setMetronomeVolume(float v)
+    {
+        if (recContent != nullptr)
+            recContent->setMetronomeVolume(v);
     }
 
     // Restore saved zoom level and scroll position after a sample load.

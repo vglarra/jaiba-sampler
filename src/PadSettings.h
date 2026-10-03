@@ -59,6 +59,9 @@ struct PadSettings
     //==========================================================================
     // Volume / normalize
     float volumeLevel  = 1.0f;
+    // Metronome beep level for this pad (0–1), edited in the Rec tab.  Per-pad so
+    // it round-trips through both the kit (.jai) and the session (.gjm).
+    float metronomeVolume = 0.5f;
     bool  normEnabled  = false;
     float normTargetDb = -6.0f;
 
@@ -162,6 +165,7 @@ struct PadSettings
         mnFreezeEnabled = false;
 
         volumeLevel  = 1.0f;
+        metronomeVolume = 0.5f;
         normEnabled  = false;
         normTargetDb = -6.0f;
 
@@ -214,6 +218,7 @@ struct PadSettings
         el.setAttribute ("bounce",      bounceEnabled  ? 1 : 0);
         el.setAttribute ("mnFreeze",    mnFreezeEnabled ? 1 : 0);
         el.setAttribute ("vol",         (double)volumeLevel);
+        el.setAttribute ("metVol",      (double)metronomeVolume);
         el.setAttribute ("normEn",      normEnabled  ? 1 : 0);
         el.setAttribute ("normTarget",  (double)normTargetDb);
         el.setAttribute ("adsrEn",      adsrEnabled  ? 1 : 0);
@@ -272,6 +277,7 @@ struct PadSettings
         bounceEnabled    = el.getIntAttribute    ("bounce",      0) != 0;
         mnFreezeEnabled  = el.getIntAttribute    ("mnFreeze",    0) != 0;
         volumeLevel      = (float)el.getDoubleAttribute ("vol",        1.0);
+        metronomeVolume  = (float)el.getDoubleAttribute ("metVol",     0.5);
         normEnabled      = el.getIntAttribute    ("normEn",      0) != 0;
         normTargetDb     = (float)el.getDoubleAttribute ("normTarget", -6.0);
         adsrEnabled      = el.getIntAttribute    ("adsrEn",      0) != 0;
@@ -342,6 +348,7 @@ struct PadSettings
         props->setValue(p + "mnFreeze",      mnFreezeEnabled);
 
         props->setValue(p + "vol",           (double)volumeLevel);
+        props->setValue(p + "metVol",        (double)metronomeVolume);
         props->setValue(p + "normEn",        normEnabled);
         props->setValue(p + "normTarget",    (double)normTargetDb);
 
@@ -410,6 +417,7 @@ struct PadSettings
         mnFreezeEnabled = props->getBoolValue   (p + "mnFreeze",    false);
 
         volumeLevel  = (float)props->getDoubleValue(p + "vol",        1.0);
+        metronomeVolume = (float)props->getDoubleValue(p + "metVol",  0.5);
         normEnabled  =        props->getBoolValue  (p + "normEn",     false);
         normTargetDb = (float)props->getDoubleValue(p + "normTarget", -6.0);
 

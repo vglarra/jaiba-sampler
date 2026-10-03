@@ -139,6 +139,10 @@ MainComponent::MainComponent()
         // and only took effect after the user toggled the norm button.
         applyAudioSettingsToEngine (engine, settings);
 
+        // Metronome beep level follows the selected pad's saved value.
+        metronomeVolume.store (juce::jlimit (0.0f, 1.0f, settings.metronomeVolume),
+                               std::memory_order_relaxed);
+
 
         if (!engine.hasSampleLoaded())
         {
@@ -3039,6 +3043,7 @@ MainComponent::TrimSettingsSnapshot MainComponent::padSettingsToSnapshot (const 
     snap.reverseEnabled           = ps.reverseEnabled;
     snap.bounceEnabled            = ps.bounceEnabled;
     snap.volumeLevel              = ps.volumeLevel;
+    snap.metronomeVolume          = ps.metronomeVolume;
     snap.normEnabled              = ps.normEnabled;
     snap.normTargetDb             = ps.normTargetDb;
     snap.adsrEnabled              = ps.adsrEnabled;
@@ -3527,6 +3532,12 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
 
             // Pad gain
             applyPadGain(trimSnapshot.padGain);
+
+            // Metronome level for this pad (Rec tab).  The atomic is what the audio
+            // thread reads for the beep, so a kit/bank load must refresh it too.
+            sampleCard.setMetronomeVolume(trimSnapshot.metronomeVolume);
+            metronomeVolume.store (juce::jlimit (0.0f, 1.0f, trimSnapshot.metronomeVolume),
+                                   std::memory_order_relaxed);
 
         }
         else if (configManager != nullptr)
@@ -4787,7 +4798,31 @@ void MainComponent::metronomeStandaloneChanged (bool on, double bpm)
 
 void MainComponent::metronomeVolumeChanged (float vol)
 {
-    metronomeVolume.store (juce::jlimit (0.0f, 1.0f, vol), std::memory_order_relaxed);
+    const float v = juce::jlimit (0.0f, 1.0f, vol);
+    metronomeVolume.store (v, std::memory_order_relaxed);
+
+    // Persist the level on the pad currently shown in the Rec tab.  PadSettings is
+    // what gets written to the kit (.jai) and to the session (.gjm), so nothing
+    // extra is needed in the save paths.
+    if (padSelectionSource == PadSelectionSource::Global && selectedGlobalPadIndex >= 0)
+    {
+        auto& gs = padManager.globalSettings[selectedGlobalPadIndex];
+        if (gs.metronomeVolume != v)
+        {
+            gs.metronomeVolume = v;
+            gjmManager.isDirty = true;   // global pads live in the session manifest
+            updateGjmUI();
+        }
+    }
+    else
+    {
+        auto& ps = padManager.padSettings[padManager.selectedPadIndex];
+        if (ps.metronomeVolume != v)
+        {
+            ps.metronomeVolume = v;
+            markKitDirty();
+        }
+    }
 }
 
 void MainComponent::playbackQuantisedEvents()
@@ -5729,6 +5764,10 @@ void MainComponent::selectGlobalPad (int slotIdx)
     sampleCard.updateUIFromSettings (gs);
     baseTuningLabel.setHz (gs.baseTuningHz);
 
+    // Metronome beep level follows the displayed G pad too.
+    metronomeVolume.store (juce::jlimit (0.0f, 1.0f, gs.metronomeVolume),
+                           std::memory_order_relaxed);
+
     if (engine.hasSampleLoaded())
     {
         sampleCard.setEmptyState (false);
@@ -5864,6 +5903,7 @@ void MainComponent::captureGlobalPadFromSampleCard (int slotIdx)
     gs.bounceEnabled  = sampleCard.isBounceEnabled();
 
     gs.volumeLevel  = sampleCard.getVolume();
+    gs.metronomeVolume = sampleCard.getMetronomeVolume();
     gs.normEnabled  = sampleCard.isNormEnabled();
     gs.normTargetDb = sampleCard.getNormTargetDb();
 
@@ -6257,6 +6297,7 @@ void MainComponent::captureSampleCardToPadSettings(int padIdx)
 
     // Volume + normalize
     ps.volumeLevel  = sampleCard.getVolume();
+    ps.metronomeVolume = sampleCard.getMetronomeVolume();
     ps.normEnabled  = sampleCard.isNormEnabled();
     ps.normTargetDb = sampleCard.getNormTargetDb();
 
