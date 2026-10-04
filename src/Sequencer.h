@@ -78,6 +78,46 @@ namespace TempoSourceDefaults
 }
 
 //==============================================================================
+// Grid modes (D5 / section 3.5).
+//
+//   Live     plays; pads play live but the pattern is read-only
+//   Record   capture incoming hits into the matching track (Phase 3c)
+//   Arrange  full mouse editing; the pattern can be reshaped freely
+//
+// Lock is orthogonal: it forces read-only regardless of mode, so an approved
+// take cannot be disturbed during a performance.
+enum class SeqMode { Live = 0, Record = 1, Arrange = 2 };
+
+inline const char* seqModeName (SeqMode m)
+{
+    switch (m)
+    {
+        case SeqMode::Record:  return "Record";
+        case SeqMode::Arrange: return "Arrange";
+        case SeqMode::Live:
+        default:               return "Live";
+    }
+}
+
+//==============================================================================
+// Hit velocities.
+namespace SequencerVelocity
+{
+    constexpr float kMin     = 0.05f;   // below this a hit is effectively silent
+    constexpr float kDefault = 0.8f;    // what a new hit gets, and what a reset restores
+
+    /** Velocity after dragging `dyPixels` up from `startVel`.
+        `fullRangePx` of travel spans the whole range; shift = quarter rate. */
+    inline float fromDrag (float startVel, int dyPixels, bool fine, int fullRangePx = 150)
+    {
+        const float span = (float) juce::jmax (1, fullRangePx);
+        const float rate = fine ? 0.25f : 1.0f;
+
+        return juce::jlimit (kMin, 1.0f, startVel + ((float) dyPixels / span) * rate);
+    }
+}
+
+//==============================================================================
 // Grid layout helpers.
 namespace SequencerLayout
 {
@@ -295,12 +335,18 @@ struct SeqPattern
     double  bpm         = 120.0;  // this kit's own tempo — used when the session's
                                   // tempo source for the bank is "Kit" (tempoGroup == -1)
     float   clickVolume = 0.5f;   // bank-level metronome level
-    bool    liveMode    = true;   // Live (read-only) vs Arrange
+    // Arrange by default: editing is the normal state, and Live/Record are
+    // deliberate choices for performing.  (Before Phase 3 the "Live" flag never
+    // actually gated editing, so making it the default would lock people out.)
+    SeqMode mode        = SeqMode::Arrange;
     bool    locked      = false;
 
     std::array<SeqTrack, kTracks> tracks;
 
     //==========================================================================
+    /** True when the grid may be edited: Arrange mode and not locked. */
+    bool isEditable() const { return mode == SeqMode::Arrange && ! locked; }
+
     int ticksPerStep() const { return ppq / juce::jmax (1, seqGridStepsPerBeat (snap)); }
 
     /** Steps in one bar of THIS signature.  A bar holds (num*4/den) quarter notes
@@ -375,7 +421,7 @@ struct SeqPattern
         el.setAttribute ("ppq",      ppq);
         el.setAttribute ("bpm",      bpm);
         el.setAttribute ("clickVol", (double) clickVolume);
-        el.setAttribute ("live",     liveMode ? 1 : 0);
+        el.setAttribute ("mode",     (int) mode);
         el.setAttribute ("locked",   locked   ? 1 : 0);
 
         for (int i = 0; i < kTracks; ++i)
@@ -404,7 +450,11 @@ struct SeqPattern
         ppq         = juce::jmax (24, el.getIntAttribute ("ppq", 960));
         bpm         = juce::jlimit (20.0, 300.0, el.getDoubleAttribute ("bpm", 120.0));
         clickVolume = juce::jlimit (0.0f, 1.0f, (float) el.getDoubleAttribute ("clickVol", 0.5));
-        liveMode    = el.getIntAttribute ("live", 1) != 0;
+        // `mode` is current.  The pre-Phase-3 `live` boolean never gated editing,
+        // so a pattern saved with it loads as Arrange -- still editable, exactly as
+        // it behaved before.
+        mode = (SeqMode) juce::jlimit (0, 2,
+                                       el.getIntAttribute ("mode", (int) SeqMode::Arrange));
         locked      = el.getIntAttribute ("locked", 0) != 0;
 
         for (auto* child : el.getChildIterator())

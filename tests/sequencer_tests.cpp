@@ -176,6 +176,99 @@ int main()
     }
 
     //==========================================================================
+    // Grid modes (Live / Record / Arrange) + Lock
+    //==========================================================================
+    {
+        // A fresh pattern must be editable, or the grid would look broken.
+        SeqPattern fresh;
+        check (fresh.mode == SeqMode::Arrange, "a new pattern starts in Arrange");
+        check (fresh.isEditable(), "a new pattern is editable out of the box");
+
+        SeqPattern live;
+        live.mode = SeqMode::Live;
+        check (! live.isEditable(), "Live mode is read-only");
+
+        SeqPattern rec;
+        rec.mode = SeqMode::Record;
+        check (! rec.isEditable(), "Record mode is not mouse-editable");
+
+        SeqPattern arr;
+        arr.mode = SeqMode::Arrange;
+        check (arr.isEditable(), "Arrange mode is editable");
+
+        arr.locked = true;
+        check (! arr.isEditable(), "Lock forces read-only even in Arrange");
+        arr.locked = false;
+
+        // All three modes survive a save/load.
+        for (auto m : { SeqMode::Live, SeqMode::Record, SeqMode::Arrange })
+        {
+            SeqPattern a;
+            a.mode = m;
+            juce::XmlElement x ("Sequencer");
+            a.saveToXml (x);
+
+            SeqPattern b;
+            b.loadFromXml (x);
+            check (b.mode == m, "each mode round-trips through the kit file");
+            check (b.isEditable() == (m == SeqMode::Arrange),
+                   "editability follows the restored mode");
+        }
+
+        // A pre-Phase-3 pattern (only the old `live` flag) must stay editable.
+        {
+            juce::XmlElement legacy ("Sequencer");
+            legacy.setAttribute ("snap", 3);
+            legacy.setAttribute ("bars", 1);
+            legacy.setAttribute ("live", 1);     // the old "Live" default
+
+            SeqPattern p;
+            p.loadFromXml (legacy);
+            check (p.mode == SeqMode::Arrange,
+                   "an old pattern saved as Live loads as editable Arrange");
+
+            juce::XmlElement legacy2 ("Sequencer");
+            legacy2.setAttribute ("live", 0);
+            SeqPattern p2;
+            p2.loadFromXml (legacy2);
+            check (p2.mode == SeqMode::Arrange, "and so does an old Arrange pattern");
+        }
+
+        check (juce::String (seqModeName (SeqMode::Live)) == "Live"
+               && juce::String (seqModeName (SeqMode::Record)) == "Record"
+               && juce::String (seqModeName (SeqMode::Arrange)) == "Arrange",
+               "mode names are as shown on the button");
+    }
+
+    //==========================================================================
+    // Velocity drag editing
+    //==========================================================================
+    {
+        check (near ((double) SequencerVelocity::kDefault, 0.8),
+               "a new hit and a velocity reset both land on 0.8");
+
+        // 150 px of travel spans the full range.
+        check (near ((double) SequencerVelocity::fromDrag (0.5f, 0, false), 0.5, 1e-4),
+               "no drag leaves the velocity alone");
+        check (near ((double) SequencerVelocity::fromDrag (0.5f, 15, false), 0.6, 1e-4),
+               "dragging up raises the velocity");
+        check (near ((double) SequencerVelocity::fromDrag (0.5f, -15, false), 0.4, 1e-4),
+               "dragging down lowers the velocity");
+
+        check (near ((double) SequencerVelocity::fromDrag (0.5f, 15, true), 0.525, 1e-4),
+               "shift drag is quarter-rate");
+
+        // Clamped at both ends, never silent and never above full scale.
+        check (near ((double) SequencerVelocity::fromDrag (0.5f, 100000, false), 1.0, 1e-4),
+               "velocity clamps at full scale");
+        check (near ((double) SequencerVelocity::fromDrag (0.5f, -100000, false),
+                     (double) SequencerVelocity::kMin, 1e-4),
+               "velocity clamps above silence");
+        check (SequencerVelocity::fromDrag (0.0f, -100000, false) > 0.0f,
+               "a hit can never be dragged to zero");
+    }
+
+    //==========================================================================
     // Grid layout: 16 tracks fill the available height
     //==========================================================================
     {
@@ -298,7 +391,7 @@ int main()
         p.ppq  = 960;
         p.bpm  = 137.0;
         p.clickVolume = 0.33f;
-        p.liveMode = false;
+        p.mode = SeqMode::Arrange;
 
         p.tracks[0].volume = 0.75f;
         p.tracks[0].mute   = true;
@@ -330,7 +423,7 @@ int main()
         check (q.sigNum == 7 && q.sigDen == 8, "time signature round-trips with the kit");
         check (near (q.bpm, 137.0), "kit tempo round-trips");
         check (near ((double) q.clickVolume, 0.33), "click volume round-trips");
-        check (q.liveMode == false, "mode round-trips");
+        check (q.mode == SeqMode::Arrange, "mode round-trips");
         check (near ((double) q.tracks[0].volume, 0.75), "track volume round-trips");
         check (q.tracks[0].mute, "track mute round-trips");
         check (q.tracks[0].hits.size() == 2, "track hits round-trip");

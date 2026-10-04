@@ -87,6 +87,8 @@ public:
     void setTransportState (bool nowPlaying);
     /** Session options: click sync + the sequencer's master level. */
     void setSeqOptions (bool syncClick, float seqVolume);
+    /** Re-read mode + lock from the pattern and apply them to the controls. */
+    void refreshMode();
     /** Metronome accent grouping. */
     void setTimeSig (int numerator, int denominator);
 
@@ -111,15 +113,20 @@ private:
 
     //==========================================================================
     // The scrolling grid of steps.
-    class GridCanvas : public juce::Component
+    class GridCanvas : public juce::Component,
+                       private juce::Timer
     {
     public:
         SeqPattern* pattern = nullptr;
         int rowH = kRowHDefault;      // set by SeqControlPanel::resized()
+        bool editable = true;         // Arrange mode and unlocked
         std::function<void()> onEdited;
 
         void paint (juce::Graphics& g) override;
         void mouseDown (const juce::MouseEvent& e) override;
+        void mouseDrag (const juce::MouseEvent& e) override;
+        void mouseUp (const juce::MouseEvent& e) override;
+        void mouseDoubleClick (const juce::MouseEvent& e) override;
 
         /** Step column under an x position, or -1. */
         int stepAt (int x) const;
@@ -142,6 +149,22 @@ private:
 
     private:
         int playheadColumn = -1;
+
+        // Velocity drag state.
+        int   pressRow    = -1;
+        int   pressTick   = -1;
+        float pressVel    = SequencerVelocity::kDefault;
+        int   pressY      = 0;
+        bool  velDragging = false;
+
+        // Click-to-erase is deferred by the double-click window, because JUCE
+        // delivers mouseDoubleClick *after* mouseUp: erasing on mouseUp would
+        // destroy the hit before a double-click could reset its velocity.
+        int pendingRemoveRow  = -1;
+        int pendingRemoveTick = -1;
+
+        void timerCallback() override;
+        std::vector<SeqHit>::iterator findHit (int row, int tick);
     };
 
     //==========================================================================
@@ -429,11 +452,15 @@ inline SeqControlPanel::SeqControlPanel()
     modeButton.setClickingTogglesState (true);
     modeButton.setTooltip ("Live (read-only) / Arrange (editable)");
     styleBtn (modeButton, juce::Colour (0xFF3A6A9A));
+    modeButton.setClickingTogglesState (false);
+    modeButton.setTooltip ("Live (plays, grid read-only) -> Record (capture) -> "
+                           "Arrange (edit)");
     modeButton.onClick = [this]
     {
         if (pattern == nullptr) return;
-        pattern->liveMode = modeButton.getToggleState();
-        modeButton.setButtonText (pattern->liveMode ? "Live" : "Arrange");
+
+        pattern->mode = (SeqMode) (((int) pattern->mode + 1) % 3);
+        refreshMode();
         notifyEdited();
     };
     addAndMakeVisible (modeButton);
@@ -445,6 +472,7 @@ inline SeqControlPanel::SeqControlPanel()
     {
         if (pattern == nullptr) return;
         pattern->locked = lockButton.getToggleState();
+        refreshMode();
         notifyEdited();
     };
     addAndMakeVisible (lockButton);
@@ -634,6 +662,38 @@ inline void SeqControlPanel::setTempoInfo (const TempoInfo& info)
     songMenuButton.setEnabled (! info.locked);
 }
 
+// Mode + Lock together decide whether the grid can be edited; the per-track
+// faders stay live in every mode (D8), so only the pattern controls are gated.
+inline void SeqControlPanel::refreshMode()
+{
+    if (pattern == nullptr) return;
+
+    const bool editable = pattern->isEditable();
+
+    modeButton.setButtonText (seqModeName (pattern->mode));
+
+    juce::Colour modeCol (0xFF2A5A8A);   // Live
+    if (pattern->locked)                       modeCol = juce::Colour (0xFF6A5000);
+    else if (pattern->mode == SeqMode::Record) modeCol = juce::Colour (0xFF9E2B2B);
+    else if (pattern->mode == SeqMode::Arrange) modeCol = juce::Colour (0xFF2F6B4F);
+
+    modeButton.setColour (juce::TextButton::buttonColourId,  modeCol);
+    modeButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+
+    lockButton.setToggleState (pattern->locked, juce::dontSendNotification);
+
+    snapBox.setEnabled (editable);
+    barsBox.setEnabled (editable);
+    sigBox .setEnabled (editable);
+
+    gridCanvas.editable = editable;
+    gridCanvas.repaint();
+
+    modeButton.setTooltip (juce::String (seqModeName (pattern->mode))
+                           + (pattern->locked ? " (locked)" : "")
+                           + " - click to cycle: Live / Record / Arrange");
+}
+
 inline void SeqControlPanel::setTransportState (bool nowPlaying)
 {
     playButton.setEnabled (! nowPlaying);
@@ -732,12 +792,7 @@ inline void SeqControlPanel::rebuild()
         // The BPM label is driven by setMetronomeBpm (the live/shared tempo), not
         // by pattern->bpm, so the Rec and Seq tabs can never disagree.
 
-        modeButton.setToggleState (pattern->liveMode, juce::dontSendNotification);
-        modeButton.setButtonText (pattern->liveMode ? "Live" : "Arrange");
-        lockButton.setToggleState (pattern->locked, juce::dontSendNotification);
-
-        // Live implies locked-looking read-only editing in Phase 1 (editing is
-        // still allowed; Phase 3 wires the modes properly).
+        refreshMode();
     }
 
     resized();
@@ -964,17 +1019,134 @@ inline void SeqControlPanel::GridCanvas::mouseDown (const juce::MouseEvent& e)
     auto it = std::find_if (hits.begin(), hits.end(), [tick0, tps] (const SeqHit& h)
                             { return h.tick >= tick0 && h.tick < tick0 + tps; });
 
-    if (e.mods.isPopupMenu() || it != hits.end())
+    if (! editable) return;   // Live mode, or Locked: the pattern is read-only
+
+    if (e.mods.isPopupMenu())
     {
+        // Right-click deletes outright -- no deferral, since a double right-click
+        // means nothing here.
         if (it != hits.end())
             hits.erase (it);
+        repaint();
+        if (onEdited) onEdited();
+        return;
     }
-    else
+
+    if (it != hits.end())
     {
-        hits.push_back ({ tick0, 0.8f });
-        std::sort (hits.begin(), hits.end(),
-                   [] (const SeqHit& a, const SeqHit& b) { return a.tick < b.tick; });
+        // Pressing an existing hit arms a velocity drag.  It is only erased if the
+        // press turns out to be a plain click (see mouseUp).
+        pressRow    = row;
+        pressTick   = it->tick;
+        pressVel    = it->velocity;
+        pressY      = e.getPosition().y;
+        velDragging = false;
+        return;
     }
+
+    hits.push_back ({ tick0, SequencerVelocity::kDefault });
+    std::sort (hits.begin(), hits.end(),
+               [] (const SeqHit& a, const SeqHit& b) { return a.tick < b.tick; });
+
+    repaint();
+    if (onEdited) onEdited();
+}
+
+//==============================================================================
+inline std::vector<SeqHit>::iterator SeqControlPanel::GridCanvas::findHit (int row, int tick)
+{
+    auto& hits = pattern->tracks[row].hits;
+    return std::find_if (hits.begin(), hits.end(),
+                         [tick] (const SeqHit& h) { return h.tick == tick; });
+}
+
+inline void SeqControlPanel::GridCanvas::mouseDrag (const juce::MouseEvent& e)
+{
+    if (pattern == nullptr || pressRow < 0 || ! editable) return;
+
+    const int dy = pressY - e.getPosition().y;
+
+    // A few pixels of slack, so the wobble inside a double-click is not a drag.
+    if (! velDragging && std::abs (dy) < 3) return;
+    velDragging = true;
+
+    // Cancel any pending erase: this press is an edit, not a click.
+    pendingRemoveRow = -1;
+
+    auto it = findHit (pressRow, pressTick);
+    if (it == pattern->tracks[pressRow].hits.end()) return;
+
+    it->velocity = SequencerVelocity::fromDrag (pressVel, dy, e.mods.isShiftDown());
+
+    repaint();
+    if (onEdited) onEdited();
+}
+
+inline void SeqControlPanel::GridCanvas::mouseUp (const juce::MouseEvent& e)
+{
+    juce::ignoreUnused (e);
+
+    if (pattern == nullptr || pressRow < 0)
+    {
+        pressRow = -1;
+        return;
+    }
+
+    if (! velDragging)
+    {
+        // Plain click on a hit: erase it, but only after the double-click window
+        // has passed, so a double-click can still reset the velocity instead.
+        pendingRemoveRow  = pressRow;
+        pendingRemoveTick = pressTick;
+
+        startTimer (juce::jmax (120, juce::MouseEvent::getDoubleClickTimeout()));
+    }
+
+    pressRow    = -1;
+    velDragging = false;
+}
+
+inline void SeqControlPanel::GridCanvas::timerCallback()
+{
+    stopTimer();
+
+    if (pattern == nullptr || pendingRemoveRow < 0) return;
+
+    auto it = findHit (pendingRemoveRow, pendingRemoveTick);
+    if (it != pattern->tracks[pendingRemoveRow].hits.end())
+    {
+        pattern->tracks[pendingRemoveRow].hits.erase (it);
+        repaint();
+        if (onEdited) onEdited();
+    }
+
+    pendingRemoveRow  = -1;
+    pendingRemoveTick = -1;
+}
+
+inline void SeqControlPanel::GridCanvas::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (pattern == nullptr || ! editable) return;
+
+    // The first click queued an erase; this press was a double-click, so cancel it
+    // and treat the gesture as "reset this hit's velocity" instead.
+    stopTimer();
+    pendingRemoveRow  = -1;
+    pendingRemoveTick = -1;
+
+    const int row  = rowAt (e.y);
+    const int step = stepAt (e.x);
+    if (row < 0 || step < 0) return;
+
+    const int tps   = juce::jmax (1, pattern->ticksPerStep());
+    const int tick0 = step * tps;
+
+    auto& hits = pattern->tracks[row].hits;
+    auto it = std::find_if (hits.begin(), hits.end(), [tick0, tps] (const SeqHit& h)
+                            { return h.tick >= tick0 && h.tick < tick0 + tps; });
+    if (it == hits.end()) return;
+
+    it->velocity = SequencerVelocity::kDefault;
 
     repaint();
     if (onEdited) onEdited();
