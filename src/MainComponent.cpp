@@ -533,6 +533,7 @@ MainComponent::MainComponent()
     sampleCard.onSyncClickToggled = [this] (bool on) { setSeqSyncEnabled (on); };
     sampleCard.onSeqVolumeChanged = [this] (float v) { setSeqMasterVolume (v); };
     sampleCard.onSeqTimeSigChanged = [this] (int num, int den) { setClickTimeSig (num, den); };
+    sampleCard.onSeqEraseRequested = [this] { eraseSequencerHitsAction(); };
     sampleCard.onSeqClearRequested = [this] { clearSequencerAction(); };
 
     publishSeqPattern();
@@ -5488,6 +5489,44 @@ void MainComponent::applyClickSettings()
 // Changing the signature only re-derives the bar length: hits are stored in ticks
 // and are never re-quantised or dropped, so switching back to the original
 // signature restores the pattern exactly, hits past the shorter loop included.
+// Erase the recorded steps but keep the musical setup (tempo, bars, signature,
+// snap, track levels, captured sounds).  If the transport was running it goes back
+// to the top and plays again, so a bad take can be scrapped and retaken in one
+// click without losing the groove you set up.
+void MainComponent::eraseSequencerHitsAction()
+{
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::AlertWindow::QuestionIcon)
+            .withTitle ("Erase recording")
+            .withMessage ("Erase every recorded step?\n\n"
+                          "Tempo, bars, time signature, track levels and the captured "
+                          "sounds are all kept - only the steps go.")
+            .withButton ("Erase")
+            .withButton ("Cancel"),
+        [this] (int r)
+        {
+            if (r == 1) eraseSequencerHits();
+        });
+}
+
+void MainComponent::eraseSequencerHits()
+{
+    const bool wasPlaying = seqEngine.isPlaying();
+
+    stopSequencer();          // rewind to the top...
+    seqPattern.clearHits();
+
+    sampleCard.refreshSequencer();
+    publishSeqPattern();
+    markKitDirty();
+
+    if (wasPlaying)
+        startSequencer();     // ...and straight back into a fresh take
+
+    sampleCard.showTrimToast ("Steps erased - tempo, bars and signature kept", false);
+}
+
 // Wipe the pattern back to a blank slate: no steps, 1 bar of 4/4, snap 1/16 and
 // 120 BPM.  Destructive, so it always confirms first.
 void MainComponent::clearSequencerAction()
@@ -5495,10 +5534,11 @@ void MainComponent::clearSequencerAction()
     juce::AlertWindow::showAsync (
         juce::MessageBoxOptions()
             .withIconType (juce::AlertWindow::QuestionIcon)
-            .withTitle ("Clear sequencer")
-            .withMessage ("Remove every step from all 16 tracks?\n\n"
+            .withTitle ("Reset sequencer")
+            .withMessage ("Remove every step from all 16 tracks AND reset the setup?\n\n"
                           "Snap returns to 1/16, Bars to 1, the signature to 4/4 and "
-                          "the tempo to 120 BPM.  This cannot be undone.")
+                          "the tempo to 120 BPM.  This cannot be undone.\n\n"
+                          "(Use Erase instead to keep the setup and only drop the steps.)")
             .withButton ("Clear")
             .withButton ("Cancel"),
         [this] (int r)

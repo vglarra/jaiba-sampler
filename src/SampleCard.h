@@ -1295,6 +1295,10 @@ juce::TextButton::ConnectedOnRight);
         {
             if (onSeqTimeSigChanged) onSeqTimeSigChanged (num, den);
         };
+        seqContent->onEraseRequested = [this]
+        {
+            if (onSeqEraseRequested) onSeqEraseRequested();
+        };
         seqContent->onClearRequested = [this]
         {
             if (onSeqClearRequested) onSeqClearRequested();
@@ -5442,6 +5446,7 @@ public:
     std::function<void(bool)>  onSyncClickToggled;
     std::function<void(float)> onSeqVolumeChanged;
     std::function<void(int,int)> onSeqTimeSigChanged;
+    std::function<void()>        onSeqEraseRequested;
     std::function<void()>        onSeqClearRequested;
 
     void setSeqTransport (bool playing)

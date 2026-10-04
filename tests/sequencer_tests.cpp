@@ -211,6 +211,39 @@ int main()
     }
 
     //==========================================================================
+    // Erase: steps go, the musical setup stays
+    //==========================================================================
+    {
+        SeqPattern p;
+        p.bpm = 137.0;
+        p.bars = 3;
+        p.sigNum = 7;
+        p.sigDen = 8;
+        p.snap = SeqSnap::ThirtySecond;
+        p.tracks[0].volume = 0.4f;
+        p.tracks[0].mute = true;
+        p.tracks[0].hits.push_back ({ 0, 0.9f });
+        p.tracks[1].hits.push_back ({ 240, 0.5f });
+        p.tracks[2].sound.hasSound = true;
+        p.tracks[2].sound.settings.sampleFilePath = "/tmp/kick.wav";
+        p.tracks[2].hits.push_back ({ 480, 0.7f });
+
+        p.clearHits();
+
+        check (! p.hasAnyHits(), "erase removes every step");
+        check (p.bpm == 137.0, "erase keeps the tempo");
+        check (p.bars == 3, "erase keeps the bar count");
+        check (p.sigNum == 7 && p.sigDen == 8, "erase keeps the time signature");
+        check (p.snap == SeqSnap::ThirtySecond, "erase keeps the snap");
+        check (p.tracks[0].volume == 0.4f && p.tracks[0].mute,
+               "erase keeps track levels and mutes");
+        check (p.tracks[2].sound.hasSound
+               && p.tracks[2].sound.settings.sampleFilePath == "/tmp/kick.wav",
+               "erase keeps the captured sounds");
+        check (p.tracks[2].hits.empty(), "erase clears hits on tracks that had sounds");
+    }
+
+    //==========================================================================
     // Live capture (Record mode): note-on -> tick -> step
     //==========================================================================
     {

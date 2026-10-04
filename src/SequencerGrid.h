@@ -64,7 +64,8 @@ public:
     std::function<void (bool)>  onSyncClickToggled;   // lock the click to the sequencer
     std::function<void (float)> onSeqVolumeChanged;   // master level for the pool
     std::function<void (int, int)> onTimeSigChanged;  // accent grouping (num, den)
-    std::function<void ()>      onClearRequested;     // wipe the pattern
+    std::function<void ()>      onEraseRequested;     // steps only
+    std::function<void ()>      onClearRequested;     // steps + settings
 
     SeqControlPanel();
     ~SeqControlPanel() override = default;
@@ -300,8 +301,10 @@ private:
     // Metronome accent grouping.
     juce::ComboBox   sigBox { "Sig" };
 
-    // Wipe the pattern back to a blank 120 BPM 4/4 bar (confirmed by the owner).
-    juce::TextButton clearButton { "Clear" };
+    // Two destructive actions, deliberately distinct: Erase keeps the musical
+    // setup and only removes the steps; Reset wipes the setup too.
+    juce::TextButton eraseButton { "Erase" };
+    juce::TextButton clearButton { "Reset" };
 
     /** The time signatures offered, in menu order. */
     static juce::StringArray timeSigChoices()
@@ -595,9 +598,16 @@ inline SeqControlPanel::SeqControlPanel()
     };
     addAndMakeVisible (sigBox);
 
+    eraseButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xFF4A3A1A));
+    eraseButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFFE0D0B0));
+    eraseButton.setTooltip ("Erase the recorded steps - keeps tempo, bars, signature, "
+                            "levels and sounds");
+    eraseButton.onClick = [this] { if (onEraseRequested) onEraseRequested(); };
+    addAndMakeVisible (eraseButton);
+
     clearButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xFF5A2A2A));
     clearButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFFE0C0C0));
-    clearButton.setTooltip ("Clear the sequencer: blank pattern, 1 bar, 4/4, 120 BPM");
+    clearButton.setTooltip ("Reset the whole sequencer: steps gone, 1 bar, 4/4, 120 BPM");
     clearButton.onClick = [this] { if (onClearRequested) onClearRequested(); };
     addAndMakeVisible (clearButton);
 
@@ -860,7 +870,9 @@ inline void SeqControlPanel::resized()
         seqVolumeSlider.setBounds (bar.removeFromLeft (90).reduced (0, 3));
         bar.removeFromLeft (8);
         sigBox.setBounds (bar.removeFromLeft (66).reduced (1, 0));
-        clearButton.setBounds (bar.removeFromRight (54).reduced (1));
+        clearButton.setBounds (bar.removeFromRight (52).reduced (1));
+        bar.removeFromRight (4);
+        eraseButton.setBounds (bar.removeFromRight (52).reduced (1));
     }
 
     // ---- Row 2: pattern + song ----

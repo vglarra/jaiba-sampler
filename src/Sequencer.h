@@ -390,6 +390,15 @@ struct SeqPattern
     /** True when the grid may be edited: Arrange mode and not locked. */
     bool isEditable() const { return mode == SeqMode::Arrange && ! locked; }
 
+    /** Erase every recorded step but keep the musical setup: tempo, bars, time
+        signature, snap, track levels and the captured sounds all survive.  This is
+        "scrap the take", not "start over". */
+    void clearHits()
+    {
+        for (auto& t : tracks)
+            t.hits.clear();
+    }
+
     /** Recording is a live activity, not a stored state: a kit that was saved
         while armed comes back in Arrange rather than recording on load. */
     SeqMode safeRestoreMode() const
