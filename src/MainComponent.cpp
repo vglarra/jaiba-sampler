@@ -2585,6 +2585,17 @@ void MainComponent::clearCurrentBankKit()
     for (int i = 0; i < PadManager::kMaxPads; ++i)
         bank.pads[i] = padManager.padSettings[i];
 
+    // The sequence belongs to the kit -- it is saved per bank in the .jai -- so a
+    // bank clear has to clear it too.  Otherwise the pads are empty while the grid
+    // still holds the old pattern, which is how this was reported.
+    stopSequencer();
+    seqPattern = SeqPattern{};
+    bank.sequence = SeqPattern{};   // the bank's cache, so a switch back is empty too
+    sampleCard.refreshSequencer();
+    applyClickSettings();
+    applyActiveTempo();             // a Kit-tempo bank falls back to the pattern's 120
+    publishSeqPattern();
+
     // Reset folder navigation so Prev/Next won't walk the cleared sample's folder.
     currentFolder = juce::File{};
     {
@@ -2612,7 +2623,8 @@ void MainComponent::clearCurrentBankKit()
     kitIsDirty          = true;
     updateGjmUI();
 
-    sampleCard.showTrimToast ("Bank " + juce::String (bank1) + " kit cleared", false);
+    sampleCard.showTrimToast ("Bank " + juce::String (bank1)
+                              + " kit and sequence cleared", false);
     printf ("[KIT] Bank %d kit cleared\n", bank1);
     fflush (stdout);
 }
