@@ -176,6 +176,72 @@ int main()
     }
 
     //==========================================================================
+    // Live capture (Record mode): note-on -> tick -> step
+    //==========================================================================
+    {
+        // At 120 BPM / 960 PPQ / 48 kHz a sample is 0.04 ticks, and the pool has
+        // advanced its playhead to the END of the block when capture runs.
+        const double tps   = 0.04;
+        const int    total = 3840;   // one 4/4 bar
+
+        check (SequencerCapture::tickFor (960.0, 0, tps, total) == 960,
+               "an event on the last sample of the block is the block's end tick");
+        check (SequencerCapture::tickFor (960.0, 500, tps, total) == 940,
+               "an event 500 samples earlier is 20 ticks earlier");
+        check (SequencerCapture::tickFor (960.0, 250, tps, total) == 950,
+               "an event mid-block lands proportionally earlier");
+
+        // Captured across the loop point: wraps instead of going negative.
+        check (SequencerCapture::tickFor (10.0, 500, tps, total) == total - 10,
+               "a hit captured across the loop point wraps to the end of the bar");
+
+        // Degenerate inputs must not loop forever or divide by zero.
+        check (SequencerCapture::tickFor (100.0, 10, 0.0, total) == 0,
+               "a zero tick rate yields tick 0 instead of spinning");
+        check (SequencerCapture::tickFor (100.0, 10, tps, 0) == 0,
+               "a zero-length pattern yields tick 0 instead of spinning");
+    }
+
+    {
+        // Overdubbing a step replaces its velocity rather than stacking hits.
+        std::vector<SeqHit> hits;
+
+        check (SequencerCapture::addOrUpdateHit (hits, 480, 0.9f), "a new hit is recorded");
+        check (hits.size() == 1 && hits[0].tick == 480, "the hit is stored");
+
+        check (SequencerCapture::addOrUpdateHit (hits, 0, 0.5f), "an earlier hit is recorded");
+        check (hits.size() == 2, "both hits are kept");
+        check (hits[0].tick == 0 && hits[1].tick == 480, "hits stay sorted by tick");
+
+        check (SequencerCapture::addOrUpdateHit (hits, 480, 0.25f),
+               "re-recording a step updates its velocity");
+        check (hits.size() == 2, "re-recording a step does not duplicate it");
+        check (near ((double) hits[1].velocity, 0.25, 1e-4), "the new velocity is stored");
+
+        check (! SequencerCapture::addOrUpdateHit (hits, 480, 0.25f),
+               "recording an identical value reports no change");
+    }
+
+    {
+        // Snap decides where a captured tick lands; Free records it as played.
+        SeqPattern p;
+        p.ppq = 960;
+
+        p.snap = SeqSnap::Sixteenth;   // 240 ticks per step
+        check (p.snapTick (250) == 240, "a 1/16 grid quantises a captured tick down");
+        check (p.snapTick (130) == 240, "and rounds to the nearest step, not the floor");
+
+        p.snap = SeqSnap::Free;
+        check (p.snapTick (250) == 250, "Free mode records the tick as played");
+
+        // Recording is a live activity, never a restored state.
+        SeqPattern rec;
+        rec.mode = SeqMode::Record;
+        check (rec.safeRestoreMode() == SeqMode::Arrange,
+               "a kit saved while armed comes back in Arrange, not recording");
+    }
+
+    //==========================================================================
     // Grid modes (Live / Record / Arrange) + Lock
     //==========================================================================
     {

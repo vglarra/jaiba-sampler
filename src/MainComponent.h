@@ -271,6 +271,33 @@ private:
     void setClickTimeSig (int num, int den);     // pattern's signature (grid + accent)
     void applyClickSettings ();                  // push the active pattern's signature out
 
+    // ---- Live capture (Record mode, Phase 3c) --------------------------------
+    // The audio thread timestamps incoming note-ons into a lock-free ring; the
+    // message thread maps note -> pad and writes them into the pattern.  Keeping
+    // the pad lookup off the audio thread avoids racing padSettings.
+    struct SeqCaptureEvent { int note; int channel; int tick; float velocity; };
+
+    static constexpr int kCaptureCapacity = 256;
+    std::array<SeqCaptureEvent, kCaptureCapacity> captureRing {};
+    std::atomic<int> captureWrite { 0 };
+    std::atomic<int> captureRead  { 0 };
+
+    void pushSeqCapture (const SeqCaptureEvent& e) noexcept;   // audio thread
+    bool popSeqCapture  (SeqCaptureEvent& out) noexcept;       // message thread
+    void drainSeqCapture ();
+    void applySeqMode ();                        // react to Live/Record/Arrange changes
+
+    class CaptureDrainTimer : public juce::Timer
+    {
+    public:
+        explicit CaptureDrainTimer (MainComponent& o) : owner (o) {}
+        void timerCallback() override { owner.drainSeqCapture(); }
+    private:
+        MainComponent& owner;
+    };
+    CaptureDrainTimer captureTimer { *this };
+    bool seqRecordingActive = false;
+
     void saveSessionAction (bool forceDialog);
     void loadSessionAction ();
     void saveBankKitAction (bool forceDialog);   // false = overwrite the bank's .jai, true = pick a new one
@@ -769,6 +796,7 @@ private:
     std::atomic<bool>    seqStartPending     { false };  // armed: start on the next click beat
     std::atomic<int>     clickBeatsPerBar    { 4 };      // metronome accent grouping
     std::atomic<int>     clickDenominator    { 4 };      // metronome accent grouping
+    std::atomic<bool>    seqRecording        { false };  // Record mode + unlocked
     std::atomic<int64_t> recBeatSampleOffset { 0 };      // WAV samples before beat 0
 
     // Message-thread-only parameters (written before arming)

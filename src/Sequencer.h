@@ -2,6 +2,7 @@
 
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
@@ -320,6 +321,48 @@ struct SeqTrack
 };
 
 //==============================================================================
+// Live capture (Record mode).  The audio thread turns an incoming note-on into a
+// tick; the message thread maps it to a pad and writes it into the pattern.
+namespace SequencerCapture
+{
+    /** Tick for a MIDI event that arrived `samplesBeforeEnd` samples before the end
+        of an audio block whose playhead finished at `endTick`.  Wrapped into
+        [0, totalTicks) so a hit captured across the loop point lands correctly. */
+    inline int tickFor (double endTick, int samplesBeforeEnd, double ticksPerSample,
+                        int totalTicks)
+    {
+        if (! (ticksPerSample > 0.0) || totalTicks <= 0)
+            return 0;
+
+        double t = endTick - (double) juce::jmax (0, samplesBeforeEnd) * ticksPerSample;
+
+        while (t < 0.0)                  t += (double) totalTicks;
+        while (t >= (double) totalTicks) t -= (double) totalTicks;
+
+        return (int) std::llround (t);
+    }
+
+    /** Record a hit: replaces the velocity of the hit already on that step, so
+        overdubbing a step does not stack duplicates.  Returns true if it changed. */
+    inline bool addOrUpdateHit (std::vector<SeqHit>& hits, int tick, float velocity)
+    {
+        for (auto& h : hits)
+        {
+            if (h.tick != tick) continue;
+
+            if (std::abs (h.velocity - velocity) < 1e-4f) return false;
+            h.velocity = velocity;
+            return true;
+        }
+
+        hits.push_back ({ tick, velocity });
+        std::sort (hits.begin(), hits.end(),
+                   [] (const SeqHit& a, const SeqHit& b) { return a.tick < b.tick; });
+        return true;
+    }
+}
+
+//==============================================================================
 // SeqPattern — one per bank/kit.  Serialised into the bank's .jai as
 // <Sequencer>, so a kit carries its groove as well as its sounds.
 //==============================================================================
@@ -346,6 +389,13 @@ struct SeqPattern
     //==========================================================================
     /** True when the grid may be edited: Arrange mode and not locked. */
     bool isEditable() const { return mode == SeqMode::Arrange && ! locked; }
+
+    /** Recording is a live activity, not a stored state: a kit that was saved
+        while armed comes back in Arrange rather than recording on load. */
+    SeqMode safeRestoreMode() const
+    {
+        return mode == SeqMode::Record ? SeqMode::Arrange : mode;
+    }
 
     int ticksPerStep() const { return ppq / juce::jmax (1, seqGridStepsPerBeat (snap)); }
 

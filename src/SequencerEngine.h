@@ -54,6 +54,9 @@ public:
     /** PPQ of the currently published pattern (for the metronome's beat maths). */
     int patternPpq() const { return ppqAtomic.load (std::memory_order_relaxed); }
 
+    /** Loop length of the published pattern, in ticks (for capture's wrap maths). */
+    int patternTotalTicks() const { return totalTicksAtomic.load (std::memory_order_relaxed); }
+
     void start();
     void stop();
 
@@ -99,6 +102,7 @@ private:
     std::atomic<bool>   playing    { false };
     std::atomic<double> playheadUI { 0.0 };   // ticks, for the playhead column
     std::atomic<int>    ppqAtomic  { 960 };   // mirrors the published pattern's PPQ
+    std::atomic<int>    totalTicksAtomic { 3840 };
     std::atomic<float>  masterVolume { 1.0f };
 
     double sampleRate    = 44100.0;
@@ -336,6 +340,8 @@ inline void SequencerEngine::setPattern (std::shared_ptr<const SeqPattern> p)
     // Mirror the PPQ so the metronome can convert the playhead to beats without
     // touching the message-thread pattern.
     ppqAtomic.store (p != nullptr && p->ppq > 0 ? p->ppq : 960, std::memory_order_relaxed);
+    totalTicksAtomic.store (p != nullptr ? juce::jmax (1, p->totalTicks()) : 3840,
+                            std::memory_order_relaxed);
     std::atomic_store (&pattern, std::move (p));
 }
 

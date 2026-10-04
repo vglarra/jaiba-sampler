@@ -89,6 +89,13 @@ public:
     void setSeqOptions (bool syncClick, float seqVolume);
     /** Re-read mode + lock from the pattern and apply them to the controls. */
     void refreshMode();
+    /** Repaint just the grid, for live capture writing hits as you play. */
+    void repaintGrid()
+    {
+        gridCanvas.repaint();
+        headerCanvas.repaint();
+        ruler.repaint();
+    }
     /** Metronome accent grouping. */
     void setTimeSig (int numerator, int denominator);
 
@@ -343,10 +350,22 @@ inline SeqControlPanel::SeqControlPanel()
 
     // Phase 1 built the shell; playback is live now, recording is Phase 3.
     stopButton.setEnabled (false);   // enabled while playing
-    recButton .setEnabled (false);
     playButton.setTooltip ("Play the pattern");
     stopButton.setTooltip ("Stop the pattern");
-    recButton .setTooltip ("Step recording arrives in Phase 3");
+
+    // Rec arms Record mode: playing pads then writes steps into the grid.
+    recButton.setClickingTogglesState (true);
+    recButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xFF9E2B2B));
+    recButton.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
+    recButton.setTooltip ("Arm Record - pads you play are written into the grid");
+    recButton.onClick = [this]
+    {
+        if (pattern == nullptr) return;
+
+        pattern->mode = recButton.getToggleState() ? SeqMode::Record : SeqMode::Arrange;
+        refreshMode();
+        notifyEdited();
+    };
 
     playButton.onClick   = [this] { if (onPlayRequested) onPlayRequested(); };
     stopButton.onClick   = [this] { if (onStopRequested) onStopRequested(); };
@@ -681,6 +700,7 @@ inline void SeqControlPanel::refreshMode()
     modeButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
 
     lockButton.setToggleState (pattern->locked, juce::dontSendNotification);
+    recButton .setToggleState (pattern->mode == SeqMode::Record, juce::dontSendNotification);
 
     snapBox.setEnabled (editable);
     barsBox.setEnabled (editable);

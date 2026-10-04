@@ -497,7 +497,12 @@ MainComponent::MainComponent()
     // The tab edits the live per-bank pattern directly; every edit marks the
     // bank's kit dirty so the unsaved-changes asterisk appears.
     sampleCard.setSequencerData (&seqPattern, padManager.padSettings);
-    sampleCard.onSequenceEdited = [this] { markKitDirty(); publishSeqPattern(); };
+    sampleCard.onSequenceEdited = [this]
+    {
+        markKitDirty();
+        publishSeqPattern();
+        applySeqMode();
+    };
 
     // The Seq tab's Metro button needs the current tempo (recBpmAtomic for now;
     // Phase 2 promotes the tempo to the bank pattern).  Seed both tabs' metronome
@@ -782,6 +787,42 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                             *bufferToFill.buffer,
                             recBpmAtomic.load (std::memory_order_relaxed),
                             padManager.getMasterVolume());
+
+    // ── Live capture (Record mode) ────────────────────────────────────────────
+    // Sample-accurate: the pool has already advanced its playhead to the end of
+    // this block, so an event at offset i is (numSamples - i) samples back from it.
+    // Only the timestamp is computed here; note -> pad happens on the message
+    // thread, which keeps padSettings out of the audio thread.
+    if (seqRecording.load (std::memory_order_relaxed) && seqEngine.isPlaying())
+    {
+        const double sr = pad().getSampleRate();
+
+        if (sr > 0.0)
+        {
+            const int    ppq   = juce::jmax (1, seqEngine.patternPpq());
+            const double bpm   = juce::jlimit (20.0, 300.0,
+                                   recBpmAtomic.load (std::memory_order_relaxed));
+            const double tps   = bpm / 60.0 * (double) ppq / sr;
+            const double endT  = seqEngine.playheadTicks();
+            const int    total = juce::jmax (1, seqEngine.patternTotalTicks());
+
+            for (const auto meta : midiMessages)
+            {
+                const auto msg = meta.getMessage();
+                if (! msg.isNoteOn()) continue;
+
+                SeqCaptureEvent ev;
+                ev.note     = msg.getNoteNumber();
+                ev.channel  = msg.getChannel();
+                ev.velocity = msg.getFloatVelocity();
+                ev.tick     = SequencerCapture::tickFor (
+                                  endT, bufferToFill.numSamples - meta.samplePosition,
+                                  tps, total);
+
+                pushSeqCapture (ev);
+            }
+        }
+    }
 
     if (sineWaveActive)
     {
@@ -2376,10 +2417,13 @@ void MainComponent::loadKitFromFile (const juce::File& file)
 
     sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
     sampleCard.refreshSequencer();   // show the freshly-loaded pattern on the Seq tab
+    seqPattern.mode = seqPattern.safeRestoreMode();
     applyActiveTempo();              // the kit's own tempo may have changed
     refreshSeqTempoUI();
     applyClickSettings();            // ...and its meter, which lives in the pattern
     publishSeqPattern();
+    sampleCard.refreshSequencer();
+    applySeqMode();
 
     // Refresh the bank label (kit name may have just changed).
     updateGjmUI();
@@ -2815,9 +2859,12 @@ void MainComponent::switchGjmBank (int bankIdx)
     for (int i = 0; i < PadManager::kMaxPads; ++i)
         padManager.padSettings[i] = incoming.pads[i];
 
-    // Swap in the target bank's step pattern and show it on the Seq tab.
+    // Swap in the target bank's step pattern and show it on the Seq tab.  A kit
+    // saved while armed must not start recording just because it was loaded.
     seqPattern = incoming.sequence;
+    seqPattern.mode = seqPattern.safeRestoreMode();
     sampleCard.refreshSequencer();
+    applySeqMode();
 
     // The new bank may follow a different tempo source (D4/D9) and its own meter.
     applyActiveTempo();
@@ -5207,6 +5254,91 @@ void MainComponent::promptDeleteSong()
             applyActiveTempo();
             refreshSeqTempoUI();
         });
+}
+
+//==============================================================================
+// Live capture (Record mode, Phase 3c)
+//==============================================================================
+
+// Single-producer / single-consumer ring.  The audio thread only ever writes the
+// tail index, the message thread only ever writes the head, and both are release/
+// acquire paired -- no locks, no allocation, and a full ring drops events rather
+// than blocking the audio thread.
+void MainComponent::pushSeqCapture (const SeqCaptureEvent& e) noexcept
+{
+    const int w    = captureWrite.load (std::memory_order_relaxed);
+    const int next = (w + 1) % kCaptureCapacity;
+
+    if (next == captureRead.load (std::memory_order_acquire))
+        return;
+
+    captureRing[(size_t) w] = e;
+    captureWrite.store (next, std::memory_order_release);
+}
+
+bool MainComponent::popSeqCapture (SeqCaptureEvent& out) noexcept
+{
+    const int r = captureRead.load (std::memory_order_relaxed);
+
+    if (r == captureWrite.load (std::memory_order_acquire))
+        return false;
+
+    out = captureRing[(size_t) r];
+    captureRead.store ((r + 1) % kCaptureCapacity, std::memory_order_release);
+    return true;
+}
+
+void MainComponent::drainSeqCapture()
+{
+    SeqCaptureEvent ev;
+    bool changed = false;
+
+    while (popSeqCapture (ev))
+    {
+        const int pad = padManager.findPadForMidiNote (ev.note, ev.channel);
+        if (pad < 0 || pad >= SeqPattern::kTracks) continue;   // not a kit pad
+
+        const int tick = seqPattern.snapTick (ev.tick);
+
+        if (SequencerCapture::addOrUpdateHit (seqPattern.tracks[(size_t) pad].hits, tick,
+                                              juce::jlimit (SequencerVelocity::kMin, 1.0f,
+                                                            ev.velocity)))
+            changed = true;
+    }
+
+    if (changed)
+    {
+        markKitDirty();
+        publishSeqPattern();
+        sampleCard.repaintSeqGrid();   // show the captured hits without a full rebuild
+    }
+}
+
+// Record mode is the arm: entering it starts the transport (there is no timeline
+// otherwise) and turns on the drain timer; leaving it flushes whatever is queued.
+void MainComponent::applySeqMode()
+{
+    const bool rec = seqPattern.mode == SeqMode::Record && ! seqPattern.locked;
+
+    seqRecording.store (rec, std::memory_order_relaxed);
+
+    if (rec == seqRecordingActive) return;   // only act on an actual transition
+    seqRecordingActive = rec;
+
+    if (rec)
+    {
+        captureTimer.startTimerHz (30);
+
+        if (! seqEngine.isPlaying())
+            startSequencer();
+
+        sampleCard.showTrimToast ("Record armed - playing pads now writes steps", false);
+    }
+    else
+    {
+        captureTimer.stopTimer();
+        drainSeqCapture();
+    }
 }
 
 //==============================================================================

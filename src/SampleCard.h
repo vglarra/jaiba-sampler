@@ -5454,6 +5454,12 @@ public:
         if (seqContent != nullptr) seqContent->setTimeSig (numerator, denominator);
     }
 
+    /** Light repaint for live capture: hits appear without rebuilding the panel. */
+    void repaintSeqGrid()
+    {
+        if (seqContent != nullptr) seqContent->repaintGrid();
+    }
+
     // Switch Rec tab to G-pad transfer mode (or back to normal recording mode).
     // Forwarded to RecControlPanel so MainComponent doesn't need to access the inner class.
     void setRecGlobalPadMode(bool enabled, int gPadIdx = -1)
