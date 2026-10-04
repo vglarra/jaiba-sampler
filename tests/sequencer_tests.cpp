@@ -66,6 +66,31 @@ int main()
     }
 
     //==========================================================================
+    // Tempo field: drag to set, double-click to reset
+    //==========================================================================
+    {
+        check (near (SequencerTempo::kResetBpm, 120.0), "double-click reset lands on 120");
+
+        // Dragging up is faster, down is slower.
+        check (near (SequencerTempo::bpmFromDrag (120.0, 10, false), 130.0),
+               "dragging up 10 px adds 10 BPM");
+        check (near (SequencerTempo::bpmFromDrag (120.0, -10, false), 110.0),
+               "dragging down 10 px subtracts 10 BPM");
+        check (near (SequencerTempo::bpmFromDrag (120.0, 0, false), 120.0),
+               "no drag leaves the tempo alone");
+
+        // Shift is fine-grained.
+        check (near (SequencerTempo::bpmFromDrag (120.0, 10, true), 122.5),
+               "shift drag is quarter-rate");
+
+        // Clamped to the supported range in both directions.
+        check (near (SequencerTempo::bpmFromDrag (120.0, 100000, false), 300.0),
+               "drag clamps at the top of the range");
+        check (near (SequencerTempo::bpmFromDrag (120.0, -100000, false), 20.0),
+               "drag clamps at the bottom of the range");
+    }
+
+    //==========================================================================
     // Session tempo sources ("songs") and transport/mix options
     //==========================================================================
     {

@@ -131,7 +131,8 @@ private:
 
     //==========================================================================
     // Fixed row header: number, sample name, volume (drag), mute.
-    class HeaderCanvas : public juce::Component
+    class HeaderCanvas : public juce::Component,
+                         public juce::SettableTooltipClient
     {
     public:
         SeqPattern* pattern = nullptr;
@@ -140,6 +141,7 @@ private:
         int scrollY = 0;
 
         void paint (juce::Graphics& g) override;
+        void mouseMove (const juce::MouseEvent& e) override;
         void mouseDown (const juce::MouseEvent& e) override;
         void mouseDrag (const juce::MouseEvent& e) override;
         void mouseUp   (const juce::MouseEvent& e) override;
@@ -149,6 +151,7 @@ private:
         int   dragRow      = -1;
         float dragStartVol = 1.0f;
         int   dragStartY   = 0;
+        bool  dragging     = false;
 
         int rowAt (int y) const;
     };
@@ -176,7 +179,67 @@ private:
     juce::TextButton recButton  { "Rec" };
     juce::ComboBox   snapBox;
     juce::ComboBox   barsBox;
-    juce::Label      bpmLabel;
+    /** The BPM readout.  Drag up/down to set the tempo (shift = fine), or
+        double-click to snap back to 120 — no tapping required. */
+    class TempoLabel : public juce::Label
+    {
+    public:
+        std::function<void (double)> onTempoDragged;
+        std::function<void ()>       onTempoReset;
+
+        void setBpm (double b)
+        {
+            bpm = b;
+            setText (juce::String (b, 1) + " BPM", juce::dontSendNotification);
+        }
+
+        void mouseMove (const juce::MouseEvent&) override
+        {
+            setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+        }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            dragStartBpm = bpm;
+            dragStartY   = e.getPosition().y;
+            dragging     = false;
+        }
+
+        void mouseDrag (const juce::MouseEvent& e) override
+        {
+            const int dy = dragStartY - e.getPosition().y;
+
+            // Ignore the first pixel or two so a double-click cannot nudge the tempo.
+            if (! dragging && std::abs (dy) < 3) return;
+            dragging = true;
+
+            const double next = SequencerTempo::bpmFromDrag (dragStartBpm, dy,
+                                                             e.mods.isShiftDown());
+
+            if (onTempoDragged) onTempoDragged (next);
+        }
+
+        void mouseUp (const juce::MouseEvent&) override { dragging = false; }
+
+        void mouseDoubleClick (const juce::MouseEvent&) override
+        {
+            if (onTempoReset) onTempoReset();
+        }
+
+        /** The value the double-click reset lands on. */
+        static constexpr double resetBpm()
+        {
+            return SequencerTempo::kResetBpm;
+        }
+
+    private:
+        double bpm          = 120.0;
+        double dragStartBpm = 120.0;
+        int    dragStartY   = 0;
+        bool   dragging     = false;
+    };
+
+    TempoLabel       bpmLabel;
     juce::ComboBox   tempoCombo;              // tempo source ("song") for this bank
     juce::TextButton songMenuButton { "..." }; // rename / delete the current song
     juce::TextButton modeButton { "Live" };
@@ -292,7 +355,13 @@ inline SeqControlPanel::SeqControlPanel()
     bpmLabel.setJustificationType (juce::Justification::centredLeft);
     bpmLabel.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
     bpmLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFCECECE));
-    bpmLabel.setTooltip ("Tempo — shared with the metronome");
+    bpmLabel.setTooltip ("Drag up/down to set the tempo (shift = fine), "
+                         "double-click for 120");
+    bpmLabel.onTempoDragged = [this] (double bpm) { if (onTempoChanged) onTempoChanged (bpm); };
+    bpmLabel.onTempoReset   = [this]
+    {
+        if (onTempoChanged) onTempoChanged (TempoLabel::resetBpm());
+    };
     addAndMakeVisible (bpmLabel);
 
     // ---- Tempo source ("song") for this bank ----
@@ -466,6 +535,8 @@ inline SeqControlPanel::SeqControlPanel()
     gridCanvas.onEdited = [this] { notifyEdited(); };
 
     headerCanvas.onEdited = [this] { notifyEdited(); };
+    headerCanvas.setTooltip ("Drag the % up/down to set the track level, "
+                             "double-click to reset it to 100%");
 
     gridViewport.setViewedComponent (&gridCanvas, false);
     gridViewport.setScrollBarsShown (true, true);
@@ -520,7 +591,7 @@ inline void SeqControlPanel::setMetronomeVolume (float volume)
 
 inline void SeqControlPanel::setMetronomeBpm (double bpm)
 {
-    bpmLabel.setText (juce::String (bpm, 1) + " BPM", juce::dontSendNotification);
+    bpmLabel.setBpm (bpm);
 }
 
 inline void SeqControlPanel::setTempoInfo (const TempoInfo& info)
@@ -945,12 +1016,31 @@ inline void SeqControlPanel::HeaderCanvas::mouseDown (const juce::MouseEvent& e)
     }
 }
 
+inline void SeqControlPanel::HeaderCanvas::mouseMove (const juce::MouseEvent& e)
+{
+    const int w = getWidth();
+
+    if (e.x >= w - kMuteW)
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    else if (e.x >= w - kVolW - kMuteW)
+        setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+    else
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+}
+
 inline void SeqControlPanel::HeaderCanvas::mouseDrag (const juce::MouseEvent& e)
 {
     if (pattern == nullptr || dragRow < 0) return;
 
+    const int dy = dragStartY - e.getPosition().y;
+
+    // Ignore the first pixel or two, so the wobble inside a double-click cannot
+    // drag the level before the reset lands.
+    if (! dragging && std::abs (dy) < 3) return;
+    dragging = true;
+
     // Vertical drag: up = louder.  200 px of travel spans the full range.
-    const float delta = (float) (dragStartY - e.getPosition().y) / 200.0f;
+    const float delta = (float) dy / 200.0f;
     pattern->tracks[dragRow].volume = juce::jlimit (0.0f, 1.0f, dragStartVol + delta);
     repaint();
     if (onEdited) onEdited();
@@ -958,7 +1048,8 @@ inline void SeqControlPanel::HeaderCanvas::mouseDrag (const juce::MouseEvent& e)
 
 inline void SeqControlPanel::HeaderCanvas::mouseUp (const juce::MouseEvent&)
 {
-    dragRow = -1;
+    dragRow  = -1;
+    dragging = false;
 }
 
 inline void SeqControlPanel::HeaderCanvas::mouseDoubleClick (const juce::MouseEvent& e)

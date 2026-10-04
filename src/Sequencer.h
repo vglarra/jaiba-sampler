@@ -78,6 +78,23 @@ namespace TempoSourceDefaults
 }
 
 //==============================================================================
+// Tempo field interaction: drag to set, double-click to reset.
+namespace SequencerTempo
+{
+    constexpr double kResetBpm = 120.0;
+    constexpr double kMinBpm   = 20.0;
+    constexpr double kMaxBpm   = 300.0;
+
+    /** BPM after dragging `dyPixels` up from `startBpm` (positive dy = faster).
+        `fine` (shift) quarters the rate for precision work. */
+    inline double bpmFromDrag (double startBpm, int dyPixels, bool fine)
+    {
+        const double step = fine ? 0.25 : 1.0;
+        return juce::jlimit (kMinBpm, kMaxBpm, startBpm + (double) dyPixels * step);
+    }
+}
+
+//==============================================================================
 // Metronome accent grouping, driven by the time signature.
 namespace SeqClick
 {

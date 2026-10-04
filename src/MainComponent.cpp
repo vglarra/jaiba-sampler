@@ -4927,7 +4927,11 @@ void MainComponent::endRecording()
 
 void MainComponent::metronomeStandaloneChanged (bool on, double bpm)
 {
-    printf ("[METRO] Standalone metronome: %s  BPM=%.1f\n", on ? "ON" : "OFF", bpm);
+    // Only log the on/off transition: the tempo can now be dragged, which would
+    // otherwise print on every mouse move.
+    if (metronomeStandalone.load (std::memory_order_relaxed) != on)
+        printf ("[METRO] Standalone metronome: %s  BPM=%.1f\n", on ? "ON" : "OFF", bpm);
+
     metronomeStandalone.store (on, std::memory_order_relaxed);
     recBpmAtomic.store (bpm, std::memory_order_relaxed);
     recMetronomeOn.store (on, std::memory_order_relaxed);
