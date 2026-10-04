@@ -1972,6 +1972,9 @@ void MainComponent::preloadPadEngineAsync(int padIdx, juce::File file, PadSettin
 
             engine.muteOutput.store(false);
 
+            // The sequencer may have been waiting on exactly this buffer.
+            retrySeqTrackCapture (padIdx);
+
             // Update grid label with filename (in case it wasn't set yet).
             padGrid.setPadSampleName(padIdx, file.getFileName());
 
@@ -5373,18 +5376,60 @@ void MainComponent::applySeqMode()
 // never block it.  Track sounds live in resident engines outside the bank swap.
 //==============================================================================
 
+// Give a track its sound if the pad can supply it yet.
+//
+// This has to be retryable.  A track's sound is captured from the pad's DECODED
+// buffer, and after a kit load those buffers arrive on a background thread well
+// after the pattern itself has been swapped in -- so the first attempt fails and
+// the track is silent until something retries.  That was the bug: a freshly loaded
+// kit's sequence did not sound until the pads happened to be triggered.
+bool MainComponent::ensureSeqTrackSound (int trackIdx)
+{
+    if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return false;
+
+    auto& tr = seqPattern.tracks[(size_t) trackIdx];
+
+    if (tr.sound.audio != nullptr) return false;   // already has its audio
+    if (! tr.sound.hasSound && tr.hits.empty()) return false;   // track not in use
+    if (padManager.padSettings[trackIdx].sampleFilePath.isEmpty()) return false;
+
+    // Never captured (or the capture failed): take the pad's sound wholesale.
+    if (! tr.sound.hasSound)
+        return captureTrackFromPad (trackIdx);
+
+    // Captured, or restored from a kit with a stored path but no buffer: adopt the
+    // pad's decoded buffer when it is the same file, which avoids re-reading disk.
+    auto& padEngine = padManager.getEngine (trackIdx);
+    auto  audio     = padEngine.getSelectedAudioData();
+
+    if (audio == nullptr
+        || padManager.padSettings[trackIdx].sampleFilePath != tr.sound.settings.sampleFilePath)
+        return false;
+
+    tr.sound.audio      = std::move (audio);
+    tr.sound.sampleRate = padEngine.getSelectedSampleRate();
+    seqEngine.setTrackSound (trackIdx, tr.sound);
+    return true;
+}
+
+// A pad's sample has just been decoded: any track waiting on it can start now.
+void MainComponent::retrySeqTrackCapture (int padIdx)
+{
+    if (padIdx < 0 || padIdx >= SeqPattern::kTracks) return;
+
+    if (ensureSeqTrackSound (padIdx))
+    {
+        sampleCard.refreshSequencer();
+        publishSeqPattern();
+    }
+}
+
 void MainComponent::publishSeqPattern()
 {
-    // A track with steps but no sound yet captures its pad on first use (D7:
-    // tracks own their sound).  Skipped for pads with nothing loaded, so an edit
-    // never force-creates engines for empty pads.
+    // Every publish is also a retry: a track whose pad was not decoded yet when it
+    // was first used picks its sound up as soon as the pad can supply it.
     for (int t = 0; t < SeqPattern::kTracks; ++t)
-    {
-        auto& tr = seqPattern.tracks[(size_t) t];
-        if (! tr.hits.empty() && ! tr.sound.hasSound
-            && padManager.padSettings[t].sampleFilePath.isNotEmpty())
-            captureTrackFromPad (t);
-    }
+        ensureSeqTrackSound (t);
 
     // Copy the live pattern into an immutable snapshot for the audio thread, and
     // push the per-track mixer levels alongside it.
@@ -5436,25 +5481,17 @@ void MainComponent::reconcileTrackSounds()
     for (int t = 0; t < SeqPattern::kTracks; ++t)
     {
         auto& tr = seqPattern.tracks[(size_t) t];
-        if (! tr.sound.hasSound)
-            continue;
 
-        if (tr.sound.audio != nullptr)
+        // Already captured in this session: just make sure the pool has it.
+        if (tr.sound.hasSound && tr.sound.audio != nullptr)
         {
-            seqEngine.setTrackSound (t, tr.sound);   // already captured this session
-            continue;
-        }
-
-        auto& padEngine = padManager.getEngine (t);
-        auto  audio     = padEngine.getSelectedAudioData();
-
-        if (audio != nullptr
-            && padManager.padSettings[t].sampleFilePath == tr.sound.settings.sampleFilePath)
-        {
-            tr.sound.audio      = std::move (audio);
-            tr.sound.sampleRate = padEngine.getSelectedSampleRate();
             seqEngine.setTrackSound (t, tr.sound);
+            continue;
         }
+
+        // Otherwise try to get it now -- including a track whose first capture
+        // failed because its pad had not been decoded yet.
+        ensureSeqTrackSound (t);
     }
 }
 

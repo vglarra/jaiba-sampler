@@ -270,6 +270,8 @@ private:
     void setSeqMasterVolume (float volume);
     void setClickTimeSig (int num, int den);     // pattern's signature (grid + accent)
     void refreshSeqTracksFromPad (int padIndex);   // LINKED tracks captured from a pad follow it
+    bool ensureSeqTrackSound (int trackIdx);       // capture/adopt a track's sound if it can
+    void retrySeqTrackCapture (int padIdx);        // called once a pad's sample is decoded
     void handleSeqTrackAction (int trackIdx, SeqTrackAction action);
     void loadSampleIntoTrack (int trackIdx);
     void pushTrackToPad (int trackIdx, int padIdx);
