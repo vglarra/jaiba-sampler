@@ -4174,10 +4174,6 @@ void MainComponent::endPointChanged(double endPointSeconds)
 
 void MainComponent::loopEnabledChanged(bool isLooping)
 {
-    refreshSeqTrackGateFlags (padManager.selectedPadIndex,
-                              padManager.padSettings[padManager.selectedPadIndex].oneShotEnabled,
-                              isLooping);
-
     pad().loopEnabled.store(isLooping);
 
     // Update the flag on all currently loaded sounds — no rebuild needed
@@ -4381,9 +4377,6 @@ void MainComponent::oneShotEnabledChanged(bool enabled)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->oneShotEnabled.store(enabled);
 
-    refreshSeqTrackGateFlags (padManager.selectedPadIndex, enabled,
-                              padManager.padSettings[padManager.selectedPadIndex].loopEnabled);
-
     // If oneshot is being turned off, cancel any running tail poll.
     if (!enabled && isOneShotTailPlaying)
     {
@@ -4394,6 +4387,11 @@ void MainComponent::oneShotEnabledChanged(bool enabled)
 
     if (configManager != nullptr)
         configManager->saveOneShotEnabled(enabled);
+
+    // OneShot was only ever pushed to the live sounds, never into padSettings, so
+    // it was stale for anything reading the settings (a kit save, a sequencer
+    // capture).  The funnel writes it and refreshes the sequencer tracks.
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
 
     markKitDirty();
 }
@@ -5504,11 +5502,12 @@ void MainComponent::applyClickSettings()
 // sample should be played, so a sequencer track captured from that pad follows
 // them live -- otherwise a track would keep behaving the way it was configured
 // when it was first recorded.
-void MainComponent::refreshSeqTrackGateFlags (int padIndex, bool oneShot, bool loop)
+void MainComponent::refreshSeqTracksFromPad (int padIndex)
 {
     if (padIndex < 0 || padIndex >= SeqPattern::kTracks) return;
 
-    const juce::String padFile = padManager.padSettings[padIndex].sampleFilePath;
+    const auto& ps     = padManager.padSettings[padIndex];
+    const auto  padFile = ps.sampleFilePath;
 
     for (int t = 0; t < SeqPattern::kTracks; ++t)
     {
@@ -5523,9 +5522,16 @@ void MainComponent::refreshSeqTrackGateFlags (int padIndex, bool oneShot, bool l
 
         if (! fromThisPad) continue;
 
-        tr.sound.settings.oneShotEnabled = oneShot;
-        tr.sound.settings.loopEnabled    = loop;
-        seqEngine.setTrackGateFlags (t, oneShot, loop);
+        // The track's sound follows the pad it came from, so a Loop, OneShot or
+        // start/end edit reaches the sequencer without re-recording the step.
+        tr.sound.settings = ps;
+        tr.sound.settings.savedPatterns.clear();
+        tr.sound.settings.midiDevice.clear();
+        tr.sound.settings.zoomLevel          = 1.0;
+        tr.sound.settings.zoomScrollPosition = 0.0f;
+        tr.sound.settings.activeTab          = 0;
+
+        seqEngine.updateTrackFromPad (t, ps);
     }
 }
 
@@ -7170,6 +7176,10 @@ void MainComponent::captureSampleCardToPadSettings(int padIdx)
 
     // Active tab
     ps.activeTab = sampleCard.getActiveTabIndex();
+
+    // Anything captured into the sequencer from this pad follows it, so Loop,
+    // OneShot and the start/end trim reach the tracks without re-recording.
+    refreshSeqTracksFromPad (padIdx);
 }
 
 void MainComponent::saveCurrentSession()

@@ -99,6 +99,28 @@ int main()
         return -1;
     };
 
+    // Is there audio in an absolute sample window?  Asserting on a window rather
+    // than "the last audible frame" keeps this independent of release tails.
+    auto audibleBetween = [&] (int blocks, long long from, long long to) -> bool
+    {
+        juce::AudioBuffer<float> m (2, block);
+        long long pos = 0;
+
+        for (int b = 0; b < blocks; ++b)
+        {
+            m.clear();
+            seq.processBlock (block, m, 120.0, 1.0);
+
+            for (int i = 0; i < block; ++i)
+                if (pos + i >= from && pos + i < to
+                    && std::abs (m.getSample (0, i)) > 0.001f)
+                    return true;
+
+            pos += block;
+        }
+        return false;
+    };
+
     //==========================================================================
     // Basic scheduling
     //==========================================================================
@@ -312,28 +334,6 @@ int main()
     // Loop: a looping sample fills its step instead of playing once
     //==========================================================================
     {
-        // Is there audio in an absolute sample window?  Asserting on a window rather
-        // than "the last audible frame" keeps this independent of release tails.
-        auto audibleBetween = [&] (int blocks, long long from, long long to) -> bool
-        {
-            juce::AudioBuffer<float> m (2, block);
-            long long pos = 0;
-
-            for (int b = 0; b < blocks; ++b)
-            {
-                m.clear();
-                seq.processBlock (block, m, 120.0, 1.0);
-
-                for (int i = 0; i < block; ++i)
-                    if (pos + i >= from && pos + i < to
-                        && std::abs (m.getSample (0, i)) > 0.001f)
-                        return true;
-
-                pos += block;
-            }
-            return false;
-        };
-
         // shortBuf is 2000 samples (~41 ms) while a 1/16 step is 6000 samples, so
         // the window at 3000..5000 is past the sample's own length: only a loop can
         // still be sounding there.
@@ -362,6 +362,38 @@ int main()
         seq.start();
         check (! audibleBetween (60, 13000, 16000),
                "the loop is released at the end of its step, not left running");
+    }
+
+    //==========================================================================
+    // A short start/end region plus Loop, applied AFTER the track was captured
+    //==========================================================================
+    {
+        // Trim the 1-second sample to 0.10-0.15 s: a 2400-sample region starting at
+        // buffer sample 4800.  Loop off, so only the region plays.
+        auto trimmed = makeSound (longBuf, sr, /*oneShot=*/false);
+        trimmed.settings.loopEnabled       = false;
+        trimmed.settings.startPointSeconds = 0.10;
+        trimmed.settings.endPointSeconds   = 0.15;
+
+        seq.stop();
+        seq.setTrackSound (0, trimmed);
+        seq.setPattern (makePattern ({ 0 }));
+        seq.start();
+        check (! audibleBetween (12, 3000, 5000),
+               "a trimmed, unlooped region stops at its end point");
+
+        // Now the Control panel edit happens while the pattern already exists: the
+        // same region, but Loop switched on.  updateTrackFromPad is what the panel
+        // path calls, so this is the reported scenario.
+        trimmed.settings.loopEnabled = true;
+        seq.updateTrackFromPad (0, trimmed.settings);
+
+        seq.stop();
+        seq.start();
+        check (audibleBetween (12, 3000, 5000),
+               "Loop + a short region repeats it for the length of the note");
+        check (! audibleBetween (60, 13000, 16000),
+               "and that loop is still released at the end of the step");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",

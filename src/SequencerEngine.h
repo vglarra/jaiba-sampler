@@ -47,25 +47,25 @@ public:
     /** Live per-track mixer level (0-1), layered over the captured volume. */
     void setTrackVolume (int trackIdx, float volume);
 
-    /** Live-update an installed track's gate flags from the Control panel's
-        OneShot / Loop toggles, without rebuilding the sound.  A one-shot voice
-        ignores the note-off the step gate emits, so the sample rings past its step;
-        everything else is released at the end of the step. */
-    void setTrackGateFlags (int trackIdx, bool oneShot, bool loop)
+    /** Push a pad's current settings onto an already-installed track sound, live
+        and without rebuilding it.  This is what keeps a track in step with the
+        Control panel: Loop / OneShot, the start-end trim the loop runs between,
+        pitch, envelope and the mix.  A one-shot voice ignores the note-off the step
+        gate emits, so the sample rings past its step; everything else is released
+        at the end of the step, and a looped sample repeats for the note's length. */
+    void updateTrackFromPad (int trackIdx, const PadSettings& ps)
     {
         if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return;
 
         auto& slot = trackEngines[(size_t) trackIdx];
         if (slot == nullptr) return;
 
-        if (auto* snd = dynamic_cast<LoopingSamplerSound*> (
-                            slot->getSynthesiser().getSound (0).get()))
-        {
-            snd->oneShotEnabled.store (oneShot);
-            snd->loopEnabled.store (loop);
-        }
+        auto* snd = dynamic_cast<LoopingSamplerSound*> (
+                        slot->getSynthesiser().getSound (0).get());
+        if (snd == nullptr) return;
 
-        slot->loopEnabled.store (loop);
+        applyShape (trackIdx, ps, *snd);
+        applyMix (trackIdx, ps);
     }
 
     /** Master level for the whole pool (0-1), for balancing Seq against the pads. */
@@ -103,6 +103,8 @@ public:
                        double bpm, double masterGain);
 
 private:
+    void applyShape (int trackIdx, const PadSettings& ps, LoopingSamplerSound& snd);
+    void applyMix   (int trackIdx, const PadSettings& ps);
     PadAudioEngine& getOrCreateEngine (int trackIdx);
     void triggerTrack (int trackIdx, int offset, float velocity,
                        int gateSamples, int numSamples);
@@ -123,6 +125,7 @@ private:
     std::array<int,   SeqPattern::kTracks> gateNote      {};
     std::array<float, SeqPattern::kTracks> trackLevel {};   // mixer fader
     std::array<float, SeqPattern::kTracks> soundLevel {};   // captured settings' volume
+    std::array<double, SeqPattern::kTracks> trackRate {};   // sample rate of the installed sample
 
     // Pattern snapshot.  The audio thread loads it once per block; the message
     // thread publishes a fresh immutable copy on every edit.
@@ -153,6 +156,7 @@ inline void SequencerEngine::prepareToPlay (double newSampleRate, int blockSize)
     trackNote .fill (60);
     trackLevel.fill (1.0f);
     soundLevel.fill (1.0f);
+    trackRate .fill (44100.0);
 
     poolBuffer.setSize (2, juce::jmax (64, blockSize), false, true, true);
 
@@ -207,6 +211,7 @@ inline void SequencerEngine::setTrackSound (int trackIdx, const SeqSound& sound)
 
     trackNote[(size_t) trackIdx]  = note;
     activeNote[(size_t) trackIdx] = -1;
+    trackRate[(size_t) trackIdx]  = sr;
     soundLevel[(size_t) trackIdx] = juce::jlimit (0.0f, 1.0f, ps.volumeLevel);
 
     auto& engine = getOrCreateEngine (trackIdx);
@@ -292,25 +297,71 @@ inline void SequencerEngine::setTrackSound (int trackIdx, const SeqSound& sound)
                                              dummy, noteRange,
                                              note, 0.01, 0.1, 10.0);
         snd->fullAudioData = sound.audio;
-        snd->startSampleAtomic.store (startSmp);
-        snd->endSampleAtomic.store (endSmp);
-        snd->loopEnabled.store (ps.loopEnabled);
-        snd->pitchOffsetAtomic.store (ps.pitchCents);
-        snd->oneShotEnabled.store (ps.oneShotEnabled);
         snd->baseTuningRatioAtomic.store (1.0f);
-        snd->customAdsrEnabled.store (ps.adsrEnabled);
-        snd->customAdsrAttackMs.store (ps.adsrAttackMs);
-        snd->customAdsrDecayMs.store (ps.adsrDecayMs);
-        snd->customAdsrSustain.store (ps.adsrSustain);
-        snd->customAdsrReleaseMs.store (ps.adsrReleaseMs);
-        snd->reverseEnabled.store (ps.reverseEnabled);
-        snd->bounceEnabled.store (ps.bounceEnabled);
+
+        trackRate[(size_t) trackIdx] = sr;
+
+        // Loop / OneShot / trim / pitch / envelope all come from the pad settings,
+        // in one place so a later Control panel edit can reapply exactly the same.
+        applyShape (trackIdx, ps, *snd);
+
         engine.getSynthesiser().addSound (snd);
     }
 
-    engine.loopEnabled.store (ps.loopEnabled);
+    applyMix (trackIdx, ps);
 
-    // ---- EQ / pad gain / normalize, then the mixer level on top ----
+    engine.muteOutput.store (false);
+}
+
+//==============================================================================
+// The shape of the sound: what plays, and between which samples it loops.
+inline void SequencerEngine::applyShape (int trackIdx, const PadSettings& ps,
+                                         LoopingSamplerSound& snd)
+{
+    snd.loopEnabled.store (ps.loopEnabled);
+    snd.oneShotEnabled.store (ps.oneShotEnabled);
+    snd.pitchOffsetAtomic.store (ps.pitchCents);
+    snd.customAdsrEnabled.store (ps.adsrEnabled);
+    snd.customAdsrAttackMs.store (ps.adsrAttackMs);
+    snd.customAdsrDecayMs.store (ps.adsrDecayMs);
+    snd.customAdsrSustain.store (ps.adsrSustain);
+    snd.customAdsrReleaseMs.store (ps.adsrReleaseMs);
+    snd.reverseEnabled.store (ps.reverseEnabled);
+    snd.bounceEnabled.store (ps.bounceEnabled);
+
+    // The trim region is what a loop repeats between, so it has to be recomputed
+    // whenever the Control panel's start/end points move -- otherwise a short
+    // region set after the track was captured would simply be ignored.
+    if (snd.fullAudioData != nullptr)
+    {
+        const juce::int64 bufTotal = snd.fullAudioData->getNumSamples();
+        const double sr = trackRate[(size_t) trackIdx] > 0.0
+                              ? trackRate[(size_t) trackIdx] : 44100.0;
+
+        juce::int64 startSmp = 0;
+        juce::int64 endSmp   = juce::jmax ((juce::int64) 1, bufTotal - 1);
+
+        if (ps.startPointSeconds > 0.0 && bufTotal > 1)
+            startSmp = juce::jlimit ((juce::int64) 0, endSmp - 1,
+                                     (juce::int64) (ps.startPointSeconds * sr));
+        if (ps.endPointSeconds > 0.0 && bufTotal > 1)
+            endSmp = juce::jlimit (startSmp + 1, bufTotal - 1,
+                                   (juce::int64) (ps.endPointSeconds * sr));
+
+        snd.startSampleAtomic.store (startSmp);
+        snd.endSampleAtomic.store (endSmp);
+    }
+
+    if (auto& slot = trackEngines[(size_t) trackIdx])
+        slot->loopEnabled.store (ps.loopEnabled);
+}
+
+//==============================================================================
+// The mix: EQ, pad gain, normalize, then the per-track fader on top.
+inline void SequencerEngine::applyMix (int trackIdx, const PadSettings& ps)
+{
+    auto& engine = getOrCreateEngine (trackIdx);
+
     engine.eqActive.store (ps.eqEnabled);
     engine.eqFilterModes[0] = ps.eq1Mode;
     engine.eqFilterModes[1] = ps.eq2Mode;
@@ -318,7 +369,8 @@ inline void SequencerEngine::setTrackSound (int trackIdx, const SeqSound& sound)
     engine.padGain.store (juce::jlimit (0.0f, 2.0f, ps.padGain));
 
     {
-        const double eqSr = engine.getSampleRate() > 0.0 ? engine.getSampleRate() : sr;
+        const double eqSr = engine.getSampleRate() > 0.0 ? engine.getSampleRate()
+                                                         : juce::jmax (1.0, trackRate[(size_t) trackIdx]);
         PadAudioEngine::EqCoeffDoubleBuffer::Coeffs c[3];
         c[0] = engine.computeEqCoeffs (ps.eq1Freq, ps.eq1Gain, ps.eq1Q, ps.eq1Mode, eqSr);
         c[1] = engine.computeEqCoeffs (ps.eq2Freq, ps.eq2Gain, ps.eq2Q, ps.eq2Mode, eqSr);
@@ -329,9 +381,8 @@ inline void SequencerEngine::setTrackSound (int trackIdx, const SeqSound& sound)
     engine.normGain.store (ps.normEnabled ? engine.computeNormGainFromAudio (ps.normTargetDb)
                                           : 1.0f);
 
+    soundLevel[(size_t) trackIdx] = juce::jlimit (0.0f, 1.0f, ps.volumeLevel);
     updateTrackGain (trackIdx);
-
-    engine.muteOutput.store (false);
 }
 
 inline void SequencerEngine::clearTrackSound (int trackIdx)

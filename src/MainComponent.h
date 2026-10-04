@@ -269,7 +269,7 @@ private:
     void setSeqSyncEnabled (bool on);
     void setSeqMasterVolume (float volume);
     void setClickTimeSig (int num, int den);     // pattern's signature (grid + accent)
-    void refreshSeqTrackGateFlags (int padIndex, bool oneShot, bool loop);
+    void refreshSeqTracksFromPad (int padIndex);   // tracks captured from a pad follow it
     void eraseSequencerHitsAction ();            // confirm, then drop the steps only
     void eraseSequencerHits ();
     void clearSequencerAction ();                // confirm, then wipe the pattern
