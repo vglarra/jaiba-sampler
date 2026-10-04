@@ -204,7 +204,9 @@ The Revision 3 plan extended `PadManager::renderNextBlock` with per-pad event bu
 
 ## 5. Layout
 
-Tab content is ≈80 px today because the waveform takes 175 px. Reclaiming the waveform gives ≈340 px: 16 rows × 18 px = 288 px, plus ~24 px toolbar and ~16 px ruler ≈ 328 px. **It fits**, with vertical scrolling as a safety net for smaller windows. Horizontal scrolling handles long patterns (one 4/4 bar at 16ths = 16 steps, which fits ~720 px).
+At the default 900×815 window the card is ~720×375 and the tab content area is only **~80 px**, because the waveform takes 175 px. The Seq tab therefore **drops the waveform entirely** while it is active, which lifts the content area to **~269 px**.
+
+As built in Phase 1: a 20 px toolbar + 12 px ruler leaves ~237 px of grid, and 16 rows at **14 px** = 224 px — so all 16 tracks fit at the default window size, with the horizontal scrollbar (present only at fine resolutions) still leaving room. Vertical scrolling is implemented anyway and covers smaller windows; horizontal scrolling handles long patterns (a 4/4 bar at 1/16 = 16 steps × 20 px = 320 px inside ~550 px of grid width, so no scroll is needed at the default resolution).
 
 ---
 
