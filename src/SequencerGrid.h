@@ -64,6 +64,7 @@ public:
     std::function<void (bool)>  onSyncClickToggled;   // lock the click to the sequencer
     std::function<void (float)> onSeqVolumeChanged;   // master level for the pool
     std::function<void (int, int)> onTimeSigChanged;  // accent grouping (num, den)
+    std::function<void (int, SeqTrackAction)> onTrackAction;   // from a row's menu
     std::function<void ()>      onEraseRequested;     // steps only
     std::function<void ()>      onClearRequested;     // steps + settings
 
@@ -91,6 +92,8 @@ public:
     void setSeqOptions (bool syncClick, float seqVolume);
     /** Re-read mode + lock from the pattern and apply them to the controls. */
     void refreshMode();
+    /** Row-header context menu: detach/re-link, update, load, clear. */
+    void showTrackMenu (int row, int screenX, int screenY);
     /** Repaint just the grid, for live capture writing hits as you play. */
     void repaintGrid()
     {
@@ -186,6 +189,7 @@ private:
         const PadSettings* pads = nullptr;
         int rowH = kRowHDefault;      // kept in step with GridCanvas
         std::function<void()> onEdited;
+        std::function<void (int, int, int)> onTrackMenu;   // row, screenX, screenY
         int scrollY = 0;
 
         void paint (juce::Graphics& g) override;
@@ -626,6 +630,7 @@ inline SeqControlPanel::SeqControlPanel()
     headerCanvas.onEdited = [this] { notifyEdited(); };
     headerCanvas.setTooltip ("Drag the % up/down to set the track level, "
                              "double-click to reset it to 100%");
+    headerCanvas.onTrackMenu = [this] (int row, int sx, int sy) { showTrackMenu (row, sx, sy); };
 
     gridViewport.setViewedComponent (&gridCanvas, false);
     gridViewport.setScrollBarsShown (true, true);
@@ -703,6 +708,55 @@ inline void SeqControlPanel::setTempoInfo (const TempoInfo& info)
 
 // Mode + Lock together decide whether the grid can be edited; the per-track
 // faders stay live in every mode (D8), so only the pattern controls are gated.
+inline void SeqControlPanel::showTrackMenu (int row, int screenX, int screenY)
+{
+    if (pattern == nullptr || row < 0 || row >= SeqPattern::kTracks) return;
+
+    const auto& tr = pattern->tracks[(size_t) row];
+
+    juce::PopupMenu m;
+    m.addSectionHeader ("Track " + juce::String (row + 1)
+                        + (tr.sound.name().isEmpty() ? juce::String{}
+                                                     : " - " + tr.sound.name()));
+
+    m.addItem (1, tr.sound.hasSound
+                     ? (tr.sound.linked ? "Detach from pad" : "Re-link to pad")
+                     : "Re-link to pad",
+               true);
+    m.addItem (2, "Update from pad");
+
+    if (tr.sound.hasSound)
+    {
+        m.addItem (5, "Loop", true, tr.sound.settings.loopEnabled);
+        m.addItem (6, "One Shot", true, tr.sound.settings.oneShotEnabled);
+    }
+
+    m.addSeparator();
+    m.addItem (3, "Load sample into track...");
+    m.addSeparator();
+    m.addItem (4, "Clear this track");
+
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
+                         juce::Rectangle<int> (screenX, screenY, 1, 1)),
+        [this, row] (int r)
+        {
+            SeqTrackAction a;
+
+            switch (r)
+            {
+                case 1:  a = SeqTrackAction::ToggleLink;    break;
+                case 2:  a = SeqTrackAction::UpdateFromPad; break;
+                case 3:  a = SeqTrackAction::LoadSample;    break;
+                case 4:  a = SeqTrackAction::ClearTrack;    break;
+                case 5:  a = SeqTrackAction::ToggleLoop;    break;
+                case 6:  a = SeqTrackAction::ToggleOneShot; break;
+                default: return;
+            }
+
+            if (onTrackAction) onTrackAction (row, a);
+        });
+}
+
 inline void SeqControlPanel::refreshMode()
 {
     if (pattern == nullptr) return;
@@ -1240,7 +1294,18 @@ inline void SeqControlPanel::HeaderCanvas::paint (juce::Graphics& g)
                        : juce::File (pads[r].sampleFilePath).getFileName();
 
         const int nameW = w - kNumW - kVolW - kMuteW;
-        g.setColour (captured ? juce::Colour (0xFFCFCFCF) : juce::Colour (0xFF6E6E6E));
+
+        // A detached track owns its sound, so show it as no longer tied to a pad.
+        const bool detached = captured && ! tr.sound.linked;
+
+        if (detached)
+        {
+            g.setColour (juce::Colour (0xFF8A6A20));
+            g.fillRect (kNumW - 3, y + 2, 2, rowH - 4);
+        }
+
+        g.setColour (detached ? juce::Colour (0xFFD8C090)
+                              : (captured ? juce::Colour (0xFFCFCFCF) : juce::Colour (0xFF6E6E6E)));
         g.setFont (nameFont);
         g.drawText (name.isEmpty() ? juce::String ("-") : name,
                     juce::Rectangle<int> (kNumW, y, nameW - 2, rowH),
@@ -1280,6 +1345,13 @@ inline void SeqControlPanel::HeaderCanvas::mouseDown (const juce::MouseEvent& e)
     const int w = getWidth();
     const int volX  = w - kVolW - kMuteW;
     const int muteX = w - kMuteW;
+
+    // Right-click anywhere on the row: detach, re-link, update, load, clear.
+    if (e.mods.isPopupMenu())
+    {
+        if (onTrackMenu) onTrackMenu (row, e.getScreenX(), e.getScreenY());
+        return;
+    }
 
     if (e.x >= muteX)
     {

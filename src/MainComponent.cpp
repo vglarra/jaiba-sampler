@@ -533,6 +533,10 @@ MainComponent::MainComponent()
     sampleCard.onSyncClickToggled = [this] (bool on) { setSeqSyncEnabled (on); };
     sampleCard.onSeqVolumeChanged = [this] (float v) { setSeqMasterVolume (v); };
     sampleCard.onSeqTimeSigChanged = [this] (int num, int den) { setClickTimeSig (num, den); };
+    sampleCard.onSeqTrackAction = [this] (int track, SeqTrackAction a)
+    {
+        handleSeqTrackAction (track, a);
+    };
     sampleCard.onSeqEraseRequested = [this] { eraseSequencerHitsAction(); };
     sampleCard.onSeqClearRequested = [this] { clearSequencerAction(); };
 
@@ -5514,6 +5518,9 @@ void MainComponent::refreshSeqTracksFromPad (int padIndex)
         auto& tr = seqPattern.tracks[(size_t) t];
         if (! tr.sound.hasSound) continue;
 
+        // Detached tracks own their sound: the pad no longer reaches them.
+        if (! tr.sound.linked) continue;
+
         // Usually the track's own pad.  Matching the file as well keeps this
         // working after a kit reload, where the stored source pad may be stale.
         const bool fromThisPad = (tr.sound.sourcePad == padIndex)
@@ -5533,6 +5540,146 @@ void MainComponent::refreshSeqTracksFromPad (int padIndex)
 
         seqEngine.updateTrackFromPad (t, ps);
     }
+}
+
+// Row-header menu on a track: detach/re-link, re-capture from the pad, load a
+// sample of its own, or clear it.
+void MainComponent::handleSeqTrackAction (int trackIdx, SeqTrackAction action)
+{
+    if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return;
+
+    auto& tr = seqPattern.tracks[(size_t) trackIdx];
+
+    switch (action)
+    {
+        case SeqTrackAction::ToggleLink:
+        {
+            tr.sound.linked = ! tr.sound.linked;
+
+            if (tr.sound.linked)
+            {
+                // Re-linking: pick the pad's sound straight back up.
+                refreshSeqTracksFromPad (trackIdx);
+                sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
+                                          + " linked to pad", false);
+            }
+            else
+            {
+                sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
+                                          + " detached - it now owns its sound", false);
+            }
+            break;
+        }
+
+        case SeqTrackAction::UpdateFromPad:
+        {
+            // Explicit re-capture, for when the pad has been re-sampled.
+            if (! captureTrackFromPad (trackIdx))
+            {
+                sampleCard.showTrimToast ("Nothing loaded on pad "
+                                          + juce::String (trackIdx + 1), true);
+                return;
+            }
+            sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
+                                      + " updated from its pad", false);
+            break;
+        }
+
+        case SeqTrackAction::LoadSample:
+            loadSampleIntoTrack (trackIdx);
+            return;   // the chooser reports its own result
+
+        case SeqTrackAction::ClearTrack:
+        {
+            tr.hits.clear();
+            tr.sound = SeqSound{};
+            tr.sound.sourcePad = trackIdx;
+            seqEngine.clearTrackSound (trackIdx);
+            sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1) + " cleared",
+                                      false);
+            break;
+        }
+
+        case SeqTrackAction::ToggleLoop:
+        case SeqTrackAction::ToggleOneShot:
+        {
+            // These edit the track's OWN sound, so the track must own it.
+            tr.sound.linked = false;
+            tr.sound.hasSound = tr.sound.hasSound || tr.sound.audio != nullptr;
+
+            if (action == SeqTrackAction::ToggleLoop)
+                tr.sound.settings.loopEnabled = ! tr.sound.settings.loopEnabled;
+            else
+                tr.sound.settings.oneShotEnabled = ! tr.sound.settings.oneShotEnabled;
+
+            seqEngine.updateTrackFromPad (trackIdx, tr.sound.settings);
+            break;
+        }
+    }
+
+    sampleCard.refreshSequencer();
+    publishSeqPattern();
+    markKitDirty();
+}
+
+// Load a sample straight into a track, independent of any pad.  Detaches as a
+// matter of course: a track holding its own file no longer corresponds to a pad.
+void MainComponent::loadSampleIntoTrack (int trackIdx)
+{
+    if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return;
+
+    auto chooser = std::make_shared<juce::FileChooser> ("Load a sample into track "
+                                                        + juce::String (trackIdx + 1),
+                                                        juce::File{},
+                                                        formatManager.getWildcardForAllFormats());
+
+    chooser->launchAsync (juce::FileBrowserComponent::openMode
+                              | juce::FileBrowserComponent::canSelectFiles,
+        [this, trackIdx, chooser] (const juce::FileChooser& fc)
+        {
+            const auto file = fc.getResult();
+            if (file == juce::File{} || ! file.existsAsFile()) return;
+
+            // Decode off the message thread: a long file would stall the UI.
+            backgroundThreads.addJob ([this, trackIdx, file]
+            {
+                std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
+                if (reader == nullptr) return;
+
+                auto buf = std::make_shared<juce::AudioBuffer<float>> (
+                               (int) reader->numChannels, (int) reader->lengthInSamples);
+
+                if (! reader->read (buf.get(), 0, (int) reader->lengthInSamples, 0, true, true))
+                    return;
+
+                const double sr = reader->sampleRate;
+
+                juce::MessageManager::callAsync ([this, trackIdx, file, buf, sr]
+                {
+                    auto& tr = seqPattern.tracks[(size_t) trackIdx];
+
+                    tr.sound = SeqSound{};
+                    tr.sound.hasSound   = true;
+                    tr.sound.linked     = false;          // owns its sound from now on
+                    tr.sound.sourcePad  = trackIdx;
+                    tr.sound.sampleRate = sr;
+                    tr.sound.audio      = buf;
+                    tr.sound.settings.padIndex = trackIdx;
+                    tr.sound.settings.sampleFilePath = file.getFullPathName();
+                    tr.sound.settings.volumeLevel    = 1.0f;
+                    tr.sound.settings.oneShotEnabled = true;   // hear the whole sample
+                    tr.sound.settings.loopEnabled    = false;
+
+                    seqEngine.setTrackSound (trackIdx, tr.sound);
+                    sampleCard.refreshSequencer();
+                    publishSeqPattern();
+                    markKitDirty();
+
+                    sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
+                                              + ": " + file.getFileName(), false);
+                });
+            });
+        });
 }
 
 void MainComponent::eraseSequencerHitsAction()

@@ -257,6 +257,42 @@ int main()
     }
 
     //==========================================================================
+    // Link state: detached tracks own their sound
+    //==========================================================================
+    {
+        SeqSound fresh;
+        check (fresh.linked, "a captured track starts linked to its pad");
+
+        SeqPattern p;
+        p.tracks[2].sound.hasSound = true;
+        p.tracks[2].sound.linked   = false;
+        p.tracks[2].sound.settings.sampleFilePath = "/tmp/track-only.wav";
+
+        juce::XmlElement x ("Sequencer");
+        p.saveToXml (x);
+
+        SeqPattern q;
+        q.loadFromXml (x);
+        check (! q.tracks[2].sound.linked, "a detached track stays detached in the kit");
+        check (q.tracks[2].sound.settings.sampleFilePath == "/tmp/track-only.wav",
+               "and keeps its own sample reference");
+
+        // A kit written before detaching existed has no `linked` attribute, and
+        // those tracks behaved as linked -- so they must still come back linked.
+        juce::XmlElement legacy ("Sequencer");
+        auto* te = legacy.createNewChildElement ("Track");
+        te->setAttribute ("index", 0);
+        auto* se = te->createNewChildElement ("Sound");
+        se->setAttribute ("pad", 0);
+        se->setAttribute ("samplePath", "/tmp/old.wav");
+
+        SeqPattern old;
+        old.loadFromXml (legacy);
+        check (old.tracks[0].sound.hasSound && old.tracks[0].sound.linked,
+               "a track from an older kit loads linked, as it behaved before");
+    }
+
+    //==========================================================================
     // Erase: steps go, the musical setup stays
     //==========================================================================
     {

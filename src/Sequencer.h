@@ -241,9 +241,17 @@ struct SeqHit
 //
 // `audio` is runtime-only (never serialised) and shares the pad engine's decoded
 // buffer, so detaching costs no duplicate sample RAM.
+// What a track's row-header menu can ask for.
+enum class SeqTrackAction { ToggleLink = 0, UpdateFromPad, LoadSample, ClearTrack,
+                            ToggleLoop, ToggleOneShot };
+
 struct SeqSound
 {
     bool        hasSound  = false;
+    // Linked tracks mirror their pad's sound (Loop/OneShot/trim/pitch/mix), which is
+    // what you want while designing.  Detaching freezes the snapshot so the track
+    // owns its sound and can hold a sample no pad has.
+    bool        linked    = true;
     int         sourcePad = 0;    // pad it came from — label/default only
     PadSettings settings;         // includes sampleFilePath; sound-relevant fields only
     double      sampleRate = 44100.0;   // of the captured audio (runtime; rebuilt on load)
@@ -259,12 +267,14 @@ struct SeqSound
     void saveToXml (juce::XmlElement& el) const
     {
         el.setAttribute ("pad", sourcePad);
+        el.setAttribute ("linked", linked ? 1 : 0);
         settings.saveToXml (el);   // same attribute names as <Pad>
     }
 
     void loadFromXml (const juce::XmlElement& el)
     {
         sourcePad = el.getIntAttribute ("pad", 0);
+        linked    = el.getIntAttribute ("linked", 1) != 0;
         settings.loadFromXml (el);
         hasSound = settings.sampleFilePath.isNotEmpty();
     }
