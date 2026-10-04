@@ -243,7 +243,7 @@ struct SeqHit
 // buffer, so detaching costs no duplicate sample RAM.
 // What a track's row-header menu can ask for.
 enum class SeqTrackAction { ToggleLink = 0, UpdateFromPad, LoadSample, ClearTrack,
-                            ToggleLoop, ToggleOneShot };
+                            ToggleLoop, ToggleOneShot, PushToPad };
 
 struct SeqSound
 {

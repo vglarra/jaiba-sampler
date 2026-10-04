@@ -272,6 +272,7 @@ private:
     void refreshSeqTracksFromPad (int padIndex);   // LINKED tracks captured from a pad follow it
     void handleSeqTrackAction (int trackIdx, SeqTrackAction action);
     void loadSampleIntoTrack (int trackIdx);
+    void pushTrackToPad (int trackIdx, int padIdx);
     void eraseSequencerHitsAction ();            // confirm, then drop the steps only
     void eraseSequencerHits ();
     void clearSequencerAction ();                // confirm, then wipe the pattern

@@ -733,6 +733,7 @@ inline void SeqControlPanel::showTrackMenu (int row, int screenX, int screenY)
 
     m.addSeparator();
     m.addItem (3, "Load sample into track...");
+    m.addItem (7, "Edit in pad " + juce::String (row + 1) + " (dumps that pad)");
     m.addSeparator();
     m.addItem (4, "Clear this track");
 
@@ -750,6 +751,7 @@ inline void SeqControlPanel::showTrackMenu (int row, int screenX, int screenY)
                 case 4:  a = SeqTrackAction::ClearTrack;    break;
                 case 5:  a = SeqTrackAction::ToggleLoop;    break;
                 case 6:  a = SeqTrackAction::ToggleOneShot; break;
+                case 7:  a = SeqTrackAction::PushToPad;     break;
                 default: return;
             }
 

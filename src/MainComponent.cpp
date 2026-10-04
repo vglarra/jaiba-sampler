@@ -5602,6 +5602,10 @@ void MainComponent::handleSeqTrackAction (int trackIdx, SeqTrackAction action)
             loadSampleIntoTrack (trackIdx);
             return;   // the chooser reports its own result
 
+        case SeqTrackAction::PushToPad:
+            pushTrackToPad (trackIdx, trackIdx);   // track N <-> pad N
+            return;
+
         case SeqTrackAction::ClearTrack:
         {
             tr.hits.clear();
@@ -5692,6 +5696,65 @@ void MainComponent::loadSampleIntoTrack (int trackIdx)
                                               + ": " + file.getFileName(), false);
                 });
             });
+        });
+}
+
+// The other direction: put a track's own sound into its pad, so the Control panel
+// (which edits the selected pad) can trim, loop and EQ it, then detach again to
+// freeze the result.  Destructive to the pad, so it always confirms.
+void MainComponent::pushTrackToPad (int trackIdx, int padIdx)
+{
+    if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return;
+    if (padIdx < 0 || padIdx >= PadManager::kMaxPads) return;
+
+    const auto& tr = seqPattern.tracks[(size_t) trackIdx];
+    const auto  ps = tr.sound.settings;
+    const juce::File file (ps.sampleFilePath);
+
+    if (! tr.sound.hasSound || ps.sampleFilePath.isEmpty() || ! file.existsAsFile())
+    {
+        sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
+                                  + " has no sample file to push", true);
+        return;
+    }
+
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::AlertWindow::QuestionIcon)
+            .withTitle ("Edit track " + juce::String (trackIdx + 1)
+                        + " in pad " + juce::String (padIdx + 1))
+            .withMessage ("Load this track's sound into pad " + juce::String (padIdx + 1)
+                          + "?\n\n"
+                          "The pad's current sound is replaced.  The track is then linked "
+                          "to the pad, so your edits come back to it -- detach again when "
+                          "you are done to freeze the result.")
+            .withButton ("Load into pad")
+            .withButton ("Cancel"),
+        [this, trackIdx, padIdx, file, ps] (int r)
+        {
+            if (r != 1) return;
+
+            // Reuse the app's normal pad-loading path: settings first, then the
+            // engine, then the SampleCard display so the Control panel can edit it.
+            padManager.padSettings[padIdx] = ps;
+            padManager.padSettings[padIdx].padIndex = padIdx;
+            padManager.selectPad (padIdx);
+
+            preloadPadEngineAsync (padIdx, file, padManager.padSettings[padIdx]);
+            loadSampleFileAsync (file, /*autoPlay=*/false, /*resetZoom=*/true,
+                                 /*deferTransients=*/false,
+                                 padSettingsToSnapshot (padManager.padSettings[padIdx]));
+
+            // Linked, so the edits made on the pad flow straight back to the track.
+            seqPattern.tracks[(size_t) trackIdx].sound.linked = true;
+
+            refreshSeqTempoUI ();          // keep the Seq tab's views consistent
+            sampleCard.refreshSequencer();
+            markKitDirty();
+
+            sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
+                                      + " is now editable in pad " + juce::String (padIdx + 1)
+                                      + " - detach when done", false);
         });
 }
 
