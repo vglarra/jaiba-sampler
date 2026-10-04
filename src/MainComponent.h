@@ -245,6 +245,18 @@ private:
     void updateGjmUI      ();
     juce::String activeBankNameSuffix() const;   // "kit name" / "no_name" / "empty" for the active bank
     void markKitDirty ();                        // flag unsaved edits to the active bank's kit + refresh UI
+
+    // ---- Session tempo sources ("songs", D4/D9) --------------------------------
+    void markSessionDirty ();                    // flag a session-level change + refresh UI
+    double activeBankTempo() const;              // BPM for the active bank's tempo source
+    void applyActiveTempo ();                    // resolve + push it into the live clock
+    void refreshSeqTempoUI ();                   // rebuild the Seq tab's tempo-source selector
+    void setActiveBankTempoGroup (int group);    // kKitTempo, or a tempoSources index
+    void addTempoSource (const juce::String& name);
+    juce::String nextSongName() const;
+    void promptForNewSong ();
+    void promptRenameSong ();
+    void promptDeleteSong ();
     void saveSessionAction (bool forceDialog);
     void loadSessionAction ();
     void saveBankKitAction (bool forceDialog);   // false = overwrite the bank's .jai, true = pick a new one

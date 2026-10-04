@@ -1,9 +1,20 @@
 #pragma once
 
 #include <array>
+#include <vector>
 #include <juce_core/juce_core.h>
 #include "PadSettings.h"
 #include "Sequencer.h"
+
+//==============================================================================
+// A named, portable tempo owned by the session — i.e. a "song".  Banks point at
+// one through GjmBank::tempoGroup; several banks sharing a source are tied to
+// the same tempo, which is what makes them one composition.
+struct TempoSource
+{
+    juce::String name = "Song 1";
+    double       bpm  = 120.0;
+};
 
 //==============================================================================
 // GjmBank — one slot in a 16-bank Global Jaiba Map
@@ -14,6 +25,7 @@ struct GjmBank
     juce::String               displayName;   // short name for UI (file stem by default)
     std::array<PadSettings, 16> pads;         // cached pad settings populated after parse
     SeqPattern                  sequence;     // per-bank step pattern (from <Sequencer>)
+    int                         tempoGroup = 0;   // index into tempoSources; kKitTempo = the kit's own
     bool                        isReady = false;
     bool                        isDirty = false;  // unsaved edits to this bank's kit (not persisted)
 
@@ -31,6 +43,7 @@ struct GjmBank
         displayName.clear();
         isReady = false;
         isDirty = false;
+        tempoGroup = TempoSourceDefaults::kDefaultIndex;
         sequence = SeqPattern{};
         for (int i = 0; i < 16; ++i) { pads[i] = PadSettings{}; pads[i].padIndex = i; }
     }
@@ -79,6 +92,11 @@ public:
     std::array<GjmBank, kNumBanks> banks;
     PadSettings globalPads[kNumGlobalPads];    // saved/loaded from <GlobalLoopPads> section
 
+    // Session tempos ("songs").  Always holds at least one entry: index 0 is the
+    // default every bank starts on, which is what makes a session behave as one
+    // global tempo until songs are created deliberately.
+    std::vector<TempoSource> tempoSources;
+
     juce::File gjmFile;
     int  activeBank = 0;   // 0-based
     bool isLoaded   = false;
@@ -90,6 +108,8 @@ public:
     void reset()
     {
         for (auto& b : banks) b.reset();
+        tempoSources.clear();
+        tempoSources.push_back (TempoSource{ "Song 1", 120.0 });
         for (int i = 0; i < kNumGlobalPads; ++i)
         {
             globalPads[i] = PadSettings{};
@@ -104,6 +124,39 @@ public:
         isLoaded   = true;
         isUntitled = true;
         isDirty    = false;
+    }
+
+    //==========================================================================
+    // Tempo resolution: a bank's BPM follows its tempo source.
+    // `kitBpmOverride` supplies the live pattern tempo for the ACTIVE bank, whose
+    // cached banks[].sequence may be one edit behind (seqPattern is the live copy).
+    double tempoForBank (int bankIdx, double kitBpmOverride = -1.0) const
+    {
+        if (bankIdx < 0 || bankIdx >= kNumBanks) return 120.0;
+
+        const auto& b = banks[bankIdx];
+
+        if (b.tempoGroup == TempoSourceDefaults::kKitTempo)
+            return kitBpmOverride > 0.0 ? kitBpmOverride : b.sequence.bpm;
+
+        if (b.tempoGroup >= 0 && b.tempoGroup < (int) tempoSources.size())
+            return tempoSources[(size_t) b.tempoGroup].bpm;
+
+        return tempoSources.empty() ? 120.0 : tempoSources.front().bpm;
+    }
+
+    /** "Kit" or the source's name, for the UI. */
+    juce::String tempoSourceName (int bankIdx) const
+    {
+        if (bankIdx < 0 || bankIdx >= kNumBanks) return {};
+
+        const int g = banks[bankIdx].tempoGroup;
+        if (g == TempoSourceDefaults::kKitTempo) return "Kit";
+
+        if (g >= 0 && g < (int) tempoSources.size())
+            return tempoSources[(size_t) g].name;
+
+        return tempoSources.empty() ? juce::String{} : tempoSources.front().name;
     }
 
     //==========================================================================
@@ -153,6 +206,10 @@ public:
         for (auto& b : banks)
             b.reset();
 
+        // Default tempo source; replaced below if the session defines <Tempos>.
+        tempoSources.clear();
+        tempoSources.push_back (TempoSource{ "Song 1", 120.0 });
+
         // Reset global pads to MIDI-disabled before loading so any pad absent from
         // the XML does not accidentally inherit the PadSettings default of midiNote=60.
         for (int i = 0; i < kNumGlobalPads; ++i)
@@ -172,6 +229,23 @@ public:
                 banks[idx].kitFilePath = resolveKitPath (bankEl->getStringAttribute ("kitPath"), file).getFullPathName();
                 banks[idx].displayName = bankEl->getStringAttribute (
                     "name", "Bank " + juce::String (idx + 1));
+                banks[idx].tempoGroup = bankEl->getIntAttribute (
+                    "tempoGroup", TempoSourceDefaults::kDefaultIndex);
+            }
+            else if (bankEl->getTagName() == "Tempos")
+            {
+                std::vector<TempoSource> loaded;
+                for (auto* t : bankEl->getChildIterator())
+                {
+                    if (t->getTagName() != "Tempo") continue;
+                    TempoSource src;
+                    src.name = t->getStringAttribute (
+                        "name", "Song " + juce::String ((int) loaded.size() + 1));
+                    src.bpm  = juce::jlimit (20.0, 300.0, t->getDoubleAttribute ("bpm", 120.0));
+                    loaded.push_back (src);
+                }
+                if (! loaded.empty())
+                    tempoSources = std::move (loaded);
             }
             else if (bankEl->getTagName() == "GlobalLoopPads")
             {
@@ -223,12 +297,26 @@ public:
         root->setAttribute ("version",   1);
         root->setAttribute ("savedDate", juce::Time::getCurrentTime().toString (true, true));
 
+        // Session tempos ("songs"), referenced by each bank's tempoGroup.
+        {
+            auto* temposEl = root->createNewChildElement ("Tempos");
+            temposEl->setAttribute ("default", TempoSourceDefaults::kDefaultIndex);
+            for (size_t t = 0; t < tempoSources.size(); ++t)
+            {
+                auto* tempoEl = temposEl->createNewChildElement ("Tempo");
+                tempoEl->setAttribute ("index", (int) t);
+                tempoEl->setAttribute ("name",  tempoSources[t].name);
+                tempoEl->setAttribute ("bpm",   tempoSources[t].bpm);
+            }
+        }
+
         for (int i = 0; i < kNumBanks; ++i)
         {
             auto* bankEl = root->createNewChildElement ("Bank");
-            bankEl->setAttribute ("index",   i);
-            bankEl->setAttribute ("kitPath", storeKitPath (juce::File (banks[i].kitFilePath), file));
-            bankEl->setAttribute ("name",    banks[i].displayName);
+            bankEl->setAttribute ("index",      i);
+            bankEl->setAttribute ("kitPath",    storeKitPath (juce::File (banks[i].kitFilePath), file));
+            bankEl->setAttribute ("name",       banks[i].displayName);
+            bankEl->setAttribute ("tempoGroup", banks[i].tempoGroup);
         }
 
         auto* globalEl = root->createNewChildElement ("GlobalLoopPads");
@@ -306,11 +394,13 @@ private:
     static juce::File resolveKitPath (const juce::String& stored, const juce::File& gjmFileSrc)
     {
         if (stored.isEmpty()) return {};
-        juce::File f (stored);
-        if (f.existsAsFile()) return f;
-        juce::File rel = gjmFileSrc.getParentDirectory().getChildFile (stored);
-        if (rel.existsAsFile()) return rel;
-        return juce::File (stored);   // keep as-is even if currently missing
+
+        // Kit paths are stored relative to the .gjm when possible (see storeKitPath),
+        // so resolve them against its folder.  getChildFile() returns an absolute
+        // path verbatim, so absolute stored paths work too -- and unlike constructing
+        // juce::File from a bare relative string, it does not trip the debug
+        // assertion that raw File paths must be absolute.
+        return gjmFileSrc.getParentDirectory().getChildFile (stored);
     }
 
     static juce::String storeKitPath (const juce::File& kitFile, const juce::File& gjmFileDest)

@@ -1267,6 +1267,14 @@ juce::TextButton::ConnectedOnRight);
             const bool on = getMetronomeOn ? getMetronomeOn() : false;
             listeners.call([on, bpm](Listener& l) { l.metronomeStandaloneChanged(on, bpm); });
         };
+        // Tempo source ("song") selection and management on the Seq tab.
+        seqContent->onTempoSourceChosen   = [this](int group)
+        {
+            if (onTempoSourceChosen) onTempoSourceChosen (group);
+        };
+        seqContent->onNewSongRequested    = [this] { if (onNewSongRequested)    onNewSongRequested(); };
+        seqContent->onRenameSongRequested = [this] { if (onRenameSongRequested) onRenameSongRequested(); };
+        seqContent->onDeleteSongRequested = [this] { if (onDeleteSongRequested) onDeleteSongRequested(); };
         seqContent->setVisible(false);
         addAndMakeVisible(*seqContent);
 
@@ -5387,6 +5395,18 @@ public:
     {
         if (seqContent != nullptr)
             seqContent->refresh();
+    }
+
+    // ---- Session tempo sources on the Seq tab (D4/D9) ----
+    std::function<void(int)> onTempoSourceChosen;    // -1 = Kit, >= 0 = source index
+    std::function<void()>    onNewSongRequested;
+    std::function<void()>    onRenameSongRequested;
+    std::function<void()>    onDeleteSongRequested;
+
+    void setSeqTempoInfo (const juce::StringArray& names, int currentGroup, bool locked)
+    {
+        if (seqContent != nullptr)
+            seqContent->setTempoInfo ({ names, currentGroup, locked });
     }
 
     // Switch Rec tab to G-pad transfer mode (or back to normal recording mode).

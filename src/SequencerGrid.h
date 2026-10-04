@@ -39,6 +39,18 @@ public:
     std::function<void (float)> onMetronomeVolumeChanged;
     std::function<void (double)> onTempoChanged;   // tap tempo
 
+    // Tempo source ("song") for the current bank — D4/D9.
+    struct TempoInfo
+    {
+        juce::StringArray names;      // one per tempo source, in index order
+        int  currentGroup = 0;        // -1 = Kit, else a tempoSources index
+        bool locked       = false;    // true while a take is armed
+    };
+    std::function<void (int)> onTempoSourceChosen;   // -1 = Kit, >= 0 = source index
+    std::function<void ()>    onNewSongRequested;
+    std::function<void ()>    onRenameSongRequested;
+    std::function<void ()>    onDeleteSongRequested;
+
     SeqControlPanel();
     ~SeqControlPanel() override = default;
 
@@ -55,6 +67,8 @@ public:
     void setMetronomeVolume (float volume);
     /** Tempo display — the live tempo, shared with the Rec tab. */
     void setMetronomeBpm (double bpm);
+    /** Which tempo source this bank follows, and the names to offer. */
+    void setTempoInfo (const TempoInfo& info);
 
     void resized() override;
     void paint (juce::Graphics& g) override;
@@ -140,8 +154,12 @@ private:
     juce::ComboBox   snapBox;
     juce::ComboBox   barsBox;
     juce::Label      bpmLabel;
+    juce::ComboBox   tempoCombo;              // tempo source ("song") for this bank
+    juce::TextButton songMenuButton { "..." }; // rename / delete the current song
     juce::TextButton modeButton { "Live" };
     juce::TextButton lockButton { "Lock" };
+
+    static constexpr int kNewSongId = 1000;
 
     // Metronome — same controls as the Rec tab.
     juce::TextButton metronomeButton { "Metro" };
@@ -233,8 +251,47 @@ inline SeqControlPanel::SeqControlPanel()
     bpmLabel.setJustificationType (juce::Justification::centredLeft);
     bpmLabel.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
     bpmLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFCECECE));
-    bpmLabel.setTooltip ("Bank tempo — shared with the metronome");
+    bpmLabel.setTooltip ("Tempo — shared with the metronome");
     addAndMakeVisible (bpmLabel);
+
+    // ---- Tempo source ("song") for this bank ----
+    tempoCombo.setTooltip ("Which tempo this bank follows: a song, or its own kit tempo");
+    tempoCombo.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xFF2A2A2A));
+    tempoCombo.setColour (juce::ComboBox::textColourId,       juce::Colour (0xFFCECECE));
+    tempoCombo.setColour (juce::ComboBox::outlineColourId,    juce::Colour (0xFF555555));
+    tempoCombo.setColour (juce::ComboBox::arrowColourId,      juce::Colour (0xFF888888));
+    tempoCombo.onChange = [this]
+    {
+        const int id = tempoCombo.getSelectedId();
+
+        if (id == kNewSongId)
+        {
+            if (onNewSongRequested) onNewSongRequested();
+            return;
+        }
+
+        const int group = (id == 1) ? TempoSourceDefaults::kKitTempo : (id - 2);
+        if (onTempoSourceChosen) onTempoSourceChosen (group);
+    };
+    addAndMakeVisible (tempoCombo);
+
+    songMenuButton.setTooltip ("Rename or delete this song");
+    songMenuButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xFF3A3A3A));
+    songMenuButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFFCECECE));
+    songMenuButton.onClick = [this]
+    {
+        juce::PopupMenu m;
+        m.addItem (1, "Rename song...");
+        m.addItem (2, "Delete song...");
+
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&songMenuButton),
+            [this] (int r)
+            {
+                if (r == 1)      { if (onRenameSongRequested) onRenameSongRequested(); }
+                else if (r == 2) { if (onDeleteSongRequested) onDeleteSongRequested(); }
+            });
+    };
+    addAndMakeVisible (songMenuButton);
 
     // ---- Mode / Lock ----
     modeButton.setClickingTogglesState (true);
@@ -360,6 +417,24 @@ inline void SeqControlPanel::setMetronomeBpm (double bpm)
     bpmLabel.setText (juce::String (bpm, 1) + " BPM", juce::dontSendNotification);
 }
 
+inline void SeqControlPanel::setTempoInfo (const TempoInfo& info)
+{
+    tempoCombo.clear (juce::dontSendNotification);
+    tempoCombo.addItem ("Kit", 1);
+    for (int i = 0; i < info.names.size(); ++i)
+        tempoCombo.addItem (info.names[i], i + 2);
+    tempoCombo.addSeparator();
+    tempoCombo.addItem ("+ New song...", kNewSongId);
+
+    const int id = (info.currentGroup == TempoSourceDefaults::kKitTempo)
+                       ? 1
+                       : juce::jlimit (2, info.names.size() + 1, info.currentGroup + 2);
+    tempoCombo.setSelectedId (id, juce::dontSendNotification);
+
+    tempoCombo.setEnabled (! info.locked);
+    songMenuButton.setEnabled (! info.locked);
+}
+
 inline void SeqControlPanel::handleTap()
 {
     tap.addTap (juce::Time::currentTimeMillis());
@@ -427,21 +502,25 @@ inline void SeqControlPanel::resized()
     stopButton.setBounds (bar.removeFromLeft (34).reduced (1));
     recButton .setBounds (bar.removeFromLeft (34).reduced (1));
     bar.removeFromLeft (6);
-    metronomeButton.setBounds (bar.removeFromLeft (50).reduced (1));
+    metronomeButton.setBounds (bar.removeFromLeft (46).reduced (1));
     bar.removeFromLeft (2);
-    metronomeVolumeSlider.setBounds (bar.removeFromLeft (66).reduced (0, 3));
+    metronomeVolumeSlider.setBounds (bar.removeFromLeft (60).reduced (0, 3));
     bar.removeFromLeft (8);
-    snapBox.setBounds (bar.removeFromLeft (78).reduced (1, 0));
+    snapBox.setBounds (bar.removeFromLeft (76).reduced (1, 0));
     bar.removeFromLeft (4);
-    barsBox.setBounds (bar.removeFromLeft (58).reduced (1, 0));
+    barsBox.setBounds (bar.removeFromLeft (56).reduced (1, 0));
     bar.removeFromLeft (4);
     tapButton.setBounds (bar.removeFromLeft (34).reduced (1));
     bar.removeFromLeft (3);
-    bpmLabel.setBounds (bar.removeFromLeft (62));
+    bpmLabel.setBounds (bar.removeFromLeft (60));
     bar.removeFromLeft (4);
-    modeButton.setBounds (bar.removeFromLeft (60).reduced (1));
+    tempoCombo.setBounds (bar.removeFromLeft (84).reduced (1, 0));
+    bar.removeFromLeft (3);
+    songMenuButton.setBounds (bar.removeFromLeft (22).reduced (1));
+    bar.removeFromLeft (6);
+    modeButton.setBounds (bar.removeFromLeft (58).reduced (1));
     bar.removeFromLeft (4);
-    lockButton.setBounds (bar.removeFromLeft (44).reduced (1));
+    lockButton.setBounds (bar.removeFromLeft (40).reduced (1));
 
     auto rulerRow = area.removeFromTop (kRulerH);
     ruler.setBounds (rulerRow.withTrimmedLeft (kHeaderW));

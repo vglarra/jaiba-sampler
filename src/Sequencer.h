@@ -69,6 +69,15 @@ inline juce::String seqSnapName (SeqSnap s)
 }
 
 //==============================================================================
+// Tempo-source constants, shared by the session model (GjmManager) and the UI.
+// A session owns a list of named tempos ("songs"); each bank points at one.
+namespace TempoSourceDefaults
+{
+    constexpr int kDefaultIndex = 0;    // every bank starts here
+    constexpr int kKitTempo     = -1;   // bank uses its own SeqPattern::bpm
+}
+
+//==============================================================================
 // Tap-tempo accumulator shared by the Rec and Seq tabs.  Keeps a small ring of
 // tap timestamps and averages the intervals; returns -1 until there are two.
 struct TapTempoState

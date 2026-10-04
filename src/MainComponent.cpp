@@ -513,6 +513,14 @@ MainComponent::MainComponent()
     sampleCard.setMetronomeState (metronomeStandalone.load (std::memory_order_relaxed),
                                   metronomeVolume.load (std::memory_order_relaxed));
     sampleCard.setMetronomeBpm (recBpmAtomic.load (std::memory_order_relaxed));
+
+    // Tempo sources ("songs") chosen / managed from the Seq tab.
+    sampleCard.onTempoSourceChosen   = [this] (int group) { setActiveBankTempoGroup (group); };
+    sampleCard.onNewSongRequested    = [this] { promptForNewSong(); };
+    sampleCard.onRenameSongRequested = [this] { promptRenameSong(); };
+    sampleCard.onDeleteSongRequested = [this] { promptDeleteSong(); };
+
+    refreshSeqTempoUI();
 }
 
 MainComponent::~MainComponent()
@@ -2290,6 +2298,8 @@ void MainComponent::loadKitFromFile (const juce::File& file)
 
     sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
     sampleCard.refreshSequencer();   // show the freshly-loaded pattern on the Seq tab
+    applyActiveTempo();              // the kit's own tempo may have changed
+    refreshSeqTempoUI();
 
     // Refresh the bank label (kit name may have just changed).
     updateGjmUI();
@@ -2382,6 +2392,8 @@ void MainComponent::clearAllPadsForNewKit()
     gjmManager.reset();
     seqPattern = SeqPattern{};
     sampleCard.refreshSequencer();
+    applyActiveTempo();
+    refreshSeqTempoUI();
     updateGjmUI();
 
     sampleCard.showTrimToast ("New session started", false);
@@ -2720,6 +2732,10 @@ void MainComponent::switchGjmBank (int bankIdx)
     // Swap in the target bank's step pattern and show it on the Seq tab.
     seqPattern = incoming.sequence;
     sampleCard.refreshSequencer();
+
+    // The new bank may follow a different tempo source (D4/D9).
+    applyActiveTempo();
+    refreshSeqTempoUI();
 
     // Sync MNFreeze atomics so MIDI intercept reflects the new bank instantly
     for (int i = 0; i < PadManager::kMaxPads; ++i)
@@ -4830,6 +4846,30 @@ void MainComponent::metronomeStandaloneChanged (bool on, double bpm)
     recBpmAtomic.store (bpm, std::memory_order_relaxed);
     recMetronomeOn.store (on, std::memory_order_relaxed);
 
+    // Tempo belongs to the bank's tempo source (D4/D9): a named song, or the
+    // kit's own tempo when the bank is on "Kit".
+    {
+        const int g = gjmManager.banks[gjmManager.activeBank].tempoGroup;
+
+        if (g == TempoSourceDefaults::kKitTempo)
+        {
+            if (std::abs (seqPattern.bpm - bpm) > 1e-6)
+            {
+                seqPattern.bpm = bpm;
+                markKitDirty();
+            }
+        }
+        else if (g >= 0 && g < (int) gjmManager.tempoSources.size())
+        {
+            auto& src = gjmManager.tempoSources[(size_t) g];
+            if (std::abs (src.bpm - bpm) > 1e-6)
+            {
+                src.bpm = bpm;
+                markSessionDirty();
+            }
+        }
+    }
+
     // Keep the Rec and Seq tabs' Metro buttons in agreement.
     sampleCard.setMetronomeState (on, metronomeVolume.load (std::memory_order_relaxed));
     // ...and their tempo displays (a tap on either tab lands here).
@@ -4876,6 +4916,205 @@ void MainComponent::metronomeVolumeChanged (float vol)
             markKitDirty();
         }
     }
+}
+
+//==============================================================================
+// Session tempo sources ("songs", D4/D9)
+//
+// A session owns a list of named tempos; every bank points at one.  All banks on
+// the default entry = one global tempo; several banks on the same entry = a song
+// with a tied tempo; a bank on "Kit" uses its own SeqPattern::bpm.
+//==============================================================================
+
+// BPM for the active bank.  The kit-tempo case takes seqPattern (the live copy)
+// because banks[activeBank].sequence can be one edit behind it.
+double MainComponent::activeBankTempo() const
+{
+    return gjmManager.tempoForBank (gjmManager.activeBank, seqPattern.bpm);
+}
+
+// Resolve the active bank's tempo source into the live clock and both tabs.
+// Never while a take is armed — a recording must not have its tempo shift
+// underneath it.
+void MainComponent::applyActiveTempo()
+{
+    if (recIsActive.load (std::memory_order_relaxed))
+        return;
+
+    const double bpm = activeBankTempo();
+    recBpmAtomic.store (bpm, std::memory_order_relaxed);
+    sampleCard.setMetronomeBpm (bpm);
+}
+
+void MainComponent::markSessionDirty()
+{
+    if (gjmManager.isDirty)
+        return;
+
+    gjmManager.isDirty = true;
+    updateGjmUI();
+}
+
+void MainComponent::refreshSeqTempoUI()
+{
+    juce::StringArray names;
+    for (const auto& s : gjmManager.tempoSources)
+        names.add (s.name);
+
+    const int  group  = gjmManager.banks[gjmManager.activeBank].tempoGroup;
+    const bool locked = recIsActive.load (std::memory_order_relaxed);
+
+    sampleCard.setSeqTempoInfo (names, group, locked);
+}
+
+void MainComponent::setActiveBankTempoGroup (int group)
+{
+    // Clamp to something valid: "Kit" or a real source index.
+    if (group != TempoSourceDefaults::kKitTempo
+        && (group < 0 || group >= (int) gjmManager.tempoSources.size()))
+        group = TempoSourceDefaults::kDefaultIndex;
+
+    auto& bank = gjmManager.banks[gjmManager.activeBank];
+    if (bank.tempoGroup == group)
+    {
+        refreshSeqTempoUI();
+        return;
+    }
+
+    bank.tempoGroup = group;
+    markSessionDirty();
+    applyActiveTempo();     // the click follows the new source immediately
+    refreshSeqTempoUI();
+}
+
+juce::String MainComponent::nextSongName() const
+{
+    for (int n = 1; n <= 999; ++n)
+    {
+        const juce::String candidate = "Song " + juce::String (n);
+
+        bool used = false;
+        for (const auto& s : gjmManager.tempoSources)
+            if (s.name == candidate) { used = true; break; }
+
+        if (!used) return candidate;
+    }
+    return "Song 1";
+}
+
+void MainComponent::addTempoSource (const juce::String& name)
+{
+    TempoSource src;
+    src.name = name.isNotEmpty() ? name : nextSongName();
+    src.bpm  = activeBankTempo();   // a new song starts at the current tempo
+
+    gjmManager.tempoSources.push_back (src);
+    gjmManager.banks[gjmManager.activeBank].tempoGroup =
+        (int) gjmManager.tempoSources.size() - 1;
+
+    markSessionDirty();
+    refreshSeqTempoUI();
+    sampleCard.showTrimToast ("New song: " + src.name, false);
+}
+
+void MainComponent::promptForNewSong()
+{
+    auto* aw = new juce::AlertWindow ("New song",
+                                      "Name this song's tempo:",
+                                      juce::MessageBoxIconType::NoIcon);
+    aw->addTextEditor ("name", nextSongName(), "Name:");
+    aw->addButton ("Create", 1);
+    aw->addButton ("Cancel", 0);
+
+    // deleteWhenDismissed: the callback runs before the window is destroyed, so
+    // reading the text editor inside it is safe.
+    aw->enterModalState (true, juce::ModalCallbackFunction::create (
+        [this, aw] (int result)
+        {
+            if (result == 1)
+                addTempoSource (aw->getTextEditorContents ("name").trim());
+        }), true);
+}
+
+void MainComponent::promptRenameSong()
+{
+    const int g = gjmManager.banks[gjmManager.activeBank].tempoGroup;
+
+    if (g == TempoSourceDefaults::kKitTempo)
+    {
+        sampleCard.showTrimToast ("This bank uses its kit tempo", true);
+        return;
+    }
+    if (g < 0 || g >= (int) gjmManager.tempoSources.size())
+        return;
+
+    auto* aw = new juce::AlertWindow ("Rename song",
+                                      "Song name:",
+                                      juce::MessageBoxIconType::NoIcon);
+    aw->addTextEditor ("name", gjmManager.tempoSources[(size_t) g].name, "Name:");
+    aw->addButton ("Rename", 1);
+    aw->addButton ("Cancel", 0);
+
+    aw->enterModalState (true, juce::ModalCallbackFunction::create (
+        [this, aw, g] (int result)
+        {
+            if (result != 1) return;
+
+            const juce::String name = aw->getTextEditorContents ("name").trim();
+            if (name.isEmpty()) return;
+            if (g < 0 || g >= (int) gjmManager.tempoSources.size()) return;
+
+            gjmManager.tempoSources[(size_t) g].name = name;
+            markSessionDirty();
+            refreshSeqTempoUI();
+        }), true);
+}
+
+void MainComponent::promptDeleteSong()
+{
+    const int g = gjmManager.banks[gjmManager.activeBank].tempoGroup;
+
+    if (g == TempoSourceDefaults::kKitTempo)
+    {
+        sampleCard.showTrimToast ("This bank uses its kit tempo", true);
+        return;
+    }
+    if (g < 0 || g >= (int) gjmManager.tempoSources.size())
+        return;
+
+    if (g == TempoSourceDefaults::kDefaultIndex)
+    {
+        sampleCard.showTrimToast ("The default song can't be deleted - rename it instead", true);
+        return;
+    }
+
+    const juce::String name = gjmManager.tempoSources[(size_t) g].name;
+
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::AlertWindow::QuestionIcon)
+            .withTitle ("Delete song")
+            .withMessage ("Delete \"" + name + "\"?\n\n"
+                          "Banks using it fall back to the default song.")
+            .withButton ("Delete")
+            .withButton ("Cancel"),
+        [this, g] (int r)
+        {
+            if (r != 1) return;
+
+            // Reassign banks using it to the default, then close the gap in the
+            // indices (any bank pointing past the erased entry shifts down one).
+            for (auto& b : gjmManager.banks)
+            {
+                if      (b.tempoGroup == g) b.tempoGroup = TempoSourceDefaults::kDefaultIndex;
+                else if (b.tempoGroup >  g) b.tempoGroup -= 1;
+            }
+            gjmManager.tempoSources.erase (gjmManager.tempoSources.begin() + g);
+
+            markSessionDirty();
+            applyActiveTempo();
+            refreshSeqTempoUI();
+        });
 }
 
 void MainComponent::playbackQuantisedEvents()
@@ -5769,6 +6008,8 @@ void MainComponent::loadLastSession()
     gjmManager.reset();
     seqPattern = SeqPattern{};
     sampleCard.refreshSequencer();
+    applyActiveTempo();
+    refreshSeqTempoUI();
     globalControlsBar.setBankIndex (1);
     globalControlsBar.setMaxBank (GjmManager::kNumBanks);
     updateGjmUI();
