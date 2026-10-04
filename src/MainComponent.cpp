@@ -492,6 +492,12 @@ MainComponent::MainComponent()
     appTitleLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFCECECE));
     appTitleLabel.setInterceptsMouseClicks (false, false);
     addAndMakeVisible (appTitleLabel);
+
+    // ── Seq tab wiring ──────────────────────────────────────────────────────────
+    // The tab edits the live per-bank pattern directly; every edit marks the
+    // bank's kit dirty so the unsaved-changes asterisk appears.
+    sampleCard.setSequencerData (&seqPattern, padManager.padSettings);
+    sampleCard.onSequenceEdited = [this] { markKitDirty(); };
 }
 
 MainComponent::~MainComponent()
@@ -2108,6 +2114,15 @@ void MainComponent::saveKitToFile (const juce::File& file)
         padManager.padSettings[i].saveToXml (*padEl);
     }
 
+    // Per-bank step pattern travels with the kit.
+    {
+        auto& activeB = gjmManager.banks[gjmManager.activeBank];
+        activeB.sequence = seqPattern;
+
+        auto* seqEl = root->createNewChildElement ("Sequencer");
+        seqPattern.saveToXml (*seqEl);
+    }
+
     if (root->writeTo (file))
     {
         currentKitFile = file;
@@ -2148,6 +2163,11 @@ void MainComponent::loadKitFromFile (const juce::File& file)
         padManager.padSettings[idx].padIndex = idx;
         padManager.padSettings[idx].loadFromXml (*padEl);
     }
+
+    // Per-bank step pattern (self-contained tracks travel with the kit).
+    seqPattern = SeqPattern{};
+    for (auto* seqEl : xml->getChildIterator())
+        if (seqEl->getTagName() == "Sequencer") { seqPattern.loadFromXml (*seqEl); break; }
 
     // Sync per-pad MNFreeze atomics from freshly-loaded PadSettings so the MIDI
     // intercept loop works correctly for all pads, not just the selected one.
@@ -2248,11 +2268,13 @@ void MainComponent::loadKitFromFile (const juce::File& file)
         activeB.displayName = file.getFileNameWithoutExtension();
         for (int i = 0; i < PadManager::kMaxPads; ++i)
             activeB.pads[i] = padManager.padSettings[i];
+        activeB.sequence = seqPattern;
         activeB.isReady = true;
         activeB.isDirty = false;   // just loaded straight from disk
     }
 
     sampleCard.showTrimToast ("Kit loaded: " + file.getFileName(), false);
+    sampleCard.refreshSequencer();   // show the freshly-loaded pattern on the Seq tab
 
     // Refresh the bank label (kit name may have just changed).
     updateGjmUI();
@@ -2343,6 +2365,8 @@ void MainComponent::clearAllPadsForNewKit()
     currentKitFile = juce::File{};
     kitIsDirty = false;
     gjmManager.reset();
+    seqPattern = SeqPattern{};
+    sampleCard.refreshSequencer();
     updateGjmUI();
 
     sampleCard.showTrimToast ("New session started", false);
@@ -2579,6 +2603,7 @@ void MainComponent::saveGjmToFile (const juce::File& file)
         auto& activeB = gjmManager.banks[gjmManager.activeBank];
         for (int i = 0; i < PadManager::kMaxPads; ++i)
             activeB.pads[i] = padManager.padSettings[i];
+        activeB.sequence = seqPattern;   // Seq-tab edits are part of the session
         activeB.isReady = true;
     }
 
@@ -2667,6 +2692,7 @@ void MainComponent::switchGjmBank (int bankIdx)
         auto& outgoing = gjmManager.banks[gjmManager.activeBank];
         for (int i = 0; i < PadManager::kMaxPads; ++i)
             outgoing.pads[i] = padManager.padSettings[i];
+        outgoing.sequence = seqPattern;   // persist edits made on the Seq tab
         outgoing.isReady = true;
     }
 
@@ -2675,6 +2701,10 @@ void MainComponent::switchGjmBank (int bankIdx)
     const auto& incoming = gjmManager.banks[bankIdx];
     for (int i = 0; i < PadManager::kMaxPads; ++i)
         padManager.padSettings[i] = incoming.pads[i];
+
+    // Swap in the target bank's step pattern and show it on the Seq tab.
+    seqPattern = incoming.sequence;
+    sampleCard.refreshSequencer();
 
     // Sync MNFreeze atomics so MIDI intercept reflects the new bank instantly
     for (int i = 0; i < PadManager::kMaxPads; ++i)
@@ -5714,6 +5744,8 @@ void MainComponent::loadLastSession()
 
     // Start with an empty untitled in-memory session — 16 banks, no files, no disk writes.
     gjmManager.reset();
+    seqPattern = SeqPattern{};
+    sampleCard.refreshSequencer();
     globalControlsBar.setBankIndex (1);
     globalControlsBar.setMaxBank (GjmManager::kNumBanks);
     updateGjmUI();

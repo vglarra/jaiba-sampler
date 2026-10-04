@@ -9,6 +9,7 @@
 #include "KnobLookAndFeel.h"
 #include "PadSettings.h"
 #include "WaveformPeakBin.h"
+#include "SequencerGrid.h"
 
 // Forward declaration — EQDisplay is defined after WaveformViewport, before SampleCard.
 class EQDisplay;
@@ -1242,6 +1243,16 @@ juce::TextButton::ConnectedOnRight);
         recContent->setVisible(false);
         addAndMakeVisible(*recContent);
 
+        // ===== SEQ TAB (per-bank step sequencer — silent shell in Phase 1) =====
+        setupTab(seqTabButton, false);
+        seqTabButton.onClick = [this] { setActiveTab(4); };
+        addAndMakeVisible(seqTabButton);
+
+        seqContent = std::make_unique<SeqControlPanel>();
+        seqContent->onEdited = [this] { if (onSequenceEdited) onSequenceEdited(); };
+        seqContent->setVisible(false);
+        addAndMakeVisible(*seqContent);
+
         eqPlaceholderLabel.setText("Coming soon", juce::dontSendNotification);
         eqPlaceholderLabel.setJustificationType(juce::Justification::centred);
         eqPlaceholderLabel.setFont(juce::Font(16.0f, juce::Font::italic));
@@ -1714,13 +1725,16 @@ juce::TextButton::ConnectedOnRight);
         //  Other tabs → waveform fills card, leaving fixed control rows below.
         //    Total overhead = 200px (adds 3 control rows+gaps = 80px)
         constexpr int kMinWaveformH = 80;
+        // The Seq tab needs the vertical space for its 16-row grid, so the
+        // waveform is dropped entirely while it is active (restored on other tabs).
+        const bool seqTabActive = (activeTab == 4);
         const int waveformHeight = (activeTab == 2)
             ? juce::jmax(kMinWaveformH, (getHeight() - 120) / 2)
-            : juce::jmax(kMinWaveformH, getHeight() - 200);
+            : (seqTabActive ? 0 : juce::jmax(kMinWaveformH, getHeight() - 200));
         
         // ===== CRITICAL FIX #1: Reserve scrollbar space in viewport bounds =====
         // Viewport needs extra height to accommodate scrollbar without squishing content
-        auto waveformRect = area.removeFromTop(waveformHeight + SCROLLBAR_HEIGHT);
+        auto waveformRect = area.removeFromTop(waveformHeight + (waveformHeight > 0 ? SCROLLBAR_HEIGHT : 0));
         waveformViewport.setBounds(waveformRect);
         emptyStateLabel.setBounds(waveformRect);   // overlays the waveform area
         fixedViewportWidth = waveformRect.getWidth();
@@ -1755,10 +1769,14 @@ juce::TextButton::ConnectedOnRight);
             applyTabStyle(adsrTabButton,     activeTab == 1);
             applyTabStyle(eqTabButton,       activeTab == 2);
             applyTabStyle(recTabButton,      activeTab == 3);
-            controlsTabButton.setBounds(tabBar.removeFromLeft(80).reduced(1, 2));
-            adsrTabButton.setBounds    (tabBar.removeFromLeft(80).reduced(1, 2));
-            eqTabButton.setBounds      (tabBar.removeFromLeft(80).reduced(1, 2));
-            recTabButton.setBounds     (tabBar.removeFromLeft(60).reduced(1, 2));
+            applyTabStyle(seqTabButton,      activeTab == 4);
+            // Widths trimmed from the original 80/80/80/60 to make room for the Seq
+            // tab without colliding with the EQ controls docked on the right.
+            controlsTabButton.setBounds(tabBar.removeFromLeft(76).reduced(1, 2));
+            adsrTabButton.setBounds    (tabBar.removeFromLeft(54).reduced(1, 2));
+            eqTabButton.setBounds      (tabBar.removeFromLeft(46).reduced(1, 2));
+            recTabButton.setBounds     (tabBar.removeFromLeft(46).reduced(1, 2));
+            seqTabButton.setBounds     (tabBar.removeFromLeft(46).reduced(1, 2));
             // ADSR and EQ on/off buttons share the same right-aligned slot (44px).
             // Only one is ever visible at a time — updateTabVisibility() enforces this.
             auto rightToggleSlot = tabBar.withLeft(tabBar.getRight() - 44);
@@ -1800,6 +1818,8 @@ juce::TextButton::ConnectedOnRight);
             layoutEqTabContent(tabContentArea);
         else if (activeTab == 3 && recContent != nullptr)
             recContent->setBounds(tabContentArea);
+        else if (activeTab == 4 && seqContent != nullptr)
+            seqContent->setBounds(tabContentArea);
 
         if (activeTab == 0)
         {
@@ -4912,13 +4932,15 @@ void adjustPitchUp()
     };
 
     // ===== TAB BAR =====
-    int activeTab = 0;  // 0=Controls, 1=ADSR, 2=EQ, 3=Rec
+    int activeTab = 0;  // 0=Controls, 1=ADSR, 2=EQ, 3=Rec, 4=Seq
     juce::TextButton controlsTabButton { "Controls" };
     juce::TextButton adsrTabButton     { "ADSR" };
     juce::TextButton eqTabButton       { "EQ" };
     juce::TextButton recTabButton      { "Rec" };
+    juce::TextButton seqTabButton      { "Seq" };
     juce::Label      eqPlaceholderLabel;
     std::unique_ptr<RecControlPanel> recContent;
+    std::unique_ptr<SeqControlPanel> seqContent;
 
     // ===== ADSR ENVELOPE CONTROLS =====
     bool   adsrEnabled       = false;
@@ -5215,7 +5237,7 @@ void adjustPitchUp()
 
     void setActiveTab(int tab)
     {
-        activeTab = juce::jlimit(0, 3, tab);
+        activeTab = juce::jlimit(0, 4, tab);
         resized();
         repaint();  // Force full redraw — clears ghost outlines left by hidden tab components
         listeners.call([this](Listener& l) { l.activeTabChanged(activeTab); });
@@ -5225,7 +5247,7 @@ public:
     // Quiet restore from session — no listener fired.
     void setActiveTabQuiet(int tab)
     {
-        activeTab = juce::jlimit(0, 3, tab);
+        activeTab = juce::jlimit(0, 4, tab);
         resized();
         repaint();  // Force full redraw — clears ghost outlines left by hidden tab components
     }
@@ -5320,6 +5342,28 @@ public:
     // onDropGlobalPad(globalPadIdx): clear a G pad slot entirely.
     std::function<void(int kitPadIdx, int globalPadIdx)> onTransferKitPadToGlobal;
     std::function<void(int globalPadIdx)>                onDropGlobalPad;
+
+    // Fired when the Seq tab edits the pattern — MainComponent marks the kit dirty.
+    std::function<void()> onSequenceEdited;
+
+    // Seq tab wiring.  `pattern` is MainComponent's live SeqPattern for the active
+    // bank; `pads` is the 16 live pads, used only as a dim fallback label before a
+    // track has captured its own sound.
+    void setSequencerData (SeqPattern* pattern, const PadSettings* pads)
+    {
+        if (seqContent != nullptr)
+        {
+            seqContent->setPattern (pattern);
+            seqContent->setPadSettings (pads);
+        }
+    }
+
+    // Re-read the pattern after an external change (bank switch / kit load).
+    void refreshSequencer()
+    {
+        if (seqContent != nullptr)
+            seqContent->refresh();
+    }
 
     // Switch Rec tab to G-pad transfer mode (or back to normal recording mode).
     // Forwarded to RecControlPanel so MainComponent doesn't need to access the inner class.
@@ -5416,6 +5460,10 @@ private:
         // Rec tab content
         if (recContent != nullptr)
             recContent->setVisible(activeTab == 3);
+
+        // Seq tab content
+        if (seqContent != nullptr)
+            seqContent->setVisible(activeTab == 4);
     }
 
     void layoutAdsrTabContent(juce::Rectangle<int>& area)

@@ -428,6 +428,11 @@ private:
     juce::Label gjmStatusLabel;              // shows "No GJM" or "filename ● N/16"
     std::atomic<bool> gjmParsing { false };  // true while background kit-parse job runs
 
+    // Live working copy of the active bank's step pattern.  Mirrors
+    // gjmManager.banks[activeBank].sequence the same way padManager.padSettings
+    // mirrors banks[].pads.  The Seq tab edits this directly.
+    SeqPattern seqPattern;
+
     //==============================================================================
     // Folder navigation
     juce::File currentFolder;

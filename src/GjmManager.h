@@ -3,6 +3,7 @@
 #include <array>
 #include <juce_core/juce_core.h>
 #include "PadSettings.h"
+#include "Sequencer.h"
 
 //==============================================================================
 // GjmBank — one slot in a 16-bank Global Jaiba Map
@@ -12,6 +13,7 @@ struct GjmBank
     juce::String               kitFilePath;   // resolved absolute path to .jai (empty = unassigned)
     juce::String               displayName;   // short name for UI (file stem by default)
     std::array<PadSettings, 16> pads;         // cached pad settings populated after parse
+    SeqPattern                  sequence;     // per-bank step pattern (from <Sequencer>)
     bool                        isReady = false;
     bool                        isDirty = false;  // unsaved edits to this bank's kit (not persisted)
 
@@ -29,7 +31,22 @@ struct GjmBank
         displayName.clear();
         isReady = false;
         isDirty = false;
+        sequence = SeqPattern{};
         for (int i = 0; i < 16; ++i) { pads[i] = PadSettings{}; pads[i].padIndex = i; }
+    }
+};
+
+//==============================================================================
+// Everything a .jai kit file holds.
+struct KitData
+{
+    std::array<PadSettings, 16> pads;
+    SeqPattern                  sequence;
+
+    KitData()
+    {
+        for (int i = 0; i < 16; ++i)
+            pads[i].padIndex = i;
     }
 };
 
@@ -91,12 +108,10 @@ public:
 
     //==========================================================================
     // Thread-safe static .jai parser — call from any thread.
-    // Returns all-default PadSettings for missing or invalid files.
-    static std::array<PadSettings, 16> parseKitFile (const juce::File& file)
+    // Returns all-default PadSettings / empty pattern for missing or invalid files.
+    static KitData parseKit (const juce::File& file)
     {
-        std::array<PadSettings, 16> result;
-        for (int i = 0; i < 16; ++i)
-            result[i].padIndex = i;
+        KitData result;
 
         if (!file.existsAsFile()) return result;
 
@@ -105,11 +120,19 @@ public:
 
         for (auto* padEl : xml->getChildIterator())
         {
-            if (padEl->getTagName() != "Pad") continue;
-            const int idx = padEl->getIntAttribute ("index", -1);
-            if (idx < 0 || idx >= 16) continue;
-            result[idx].loadFromXml (*padEl);
-            result[idx].padIndex = idx;
+            const juce::String tag = padEl->getTagName();
+
+            if (tag == "Pad")
+            {
+                const int idx = padEl->getIntAttribute ("index", -1);
+                if (idx < 0 || idx >= 16) continue;
+                result.pads[idx].loadFromXml (*padEl);
+                result.pads[idx].padIndex = idx;
+            }
+            else if (tag == "Sequencer")
+            {
+                result.sequence.loadFromXml (*padEl);
+            }
         }
         return result;
     }
@@ -186,8 +209,10 @@ public:
         if (bankIdx < 0 || bankIdx >= kNumBanks) return;
         auto& b = banks[bankIdx];
         if (b.isReady || !b.hasFile()) return;
-        b.pads    = parseKitFile (juce::File (b.kitFilePath));
-        b.isReady = true;
+        auto kit     = parseKit (juce::File (b.kitFilePath));
+        b.pads       = std::move (kit.pads);
+        b.sequence   = std::move (kit.sequence);
+        b.isReady    = true;
     }
 
     //==========================================================================
@@ -245,6 +270,11 @@ public:
             padEl->setAttribute ("index", i);
             b.pads[i].saveToXml (*padEl);
         }
+
+        // Per-bank step pattern travels with the kit.
+        auto* seqEl = root->createNewChildElement ("Sequencer");
+        b.sequence.saveToXml (*seqEl);
+
         root->writeTo (kitFile);
         b.isReady = true;
         return kitFile;

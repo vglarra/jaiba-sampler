@@ -27,6 +27,8 @@ target_sources(JaibaSampler
         src/UIComponents.h
         src/ConfigurationManager.h
         src/MidiActivityLight.h
+        src/Sequencer.h
+        src/SequencerGrid.h
 )
 
 # Link required JUCE modules
