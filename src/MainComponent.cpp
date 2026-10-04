@@ -5508,12 +5508,20 @@ void MainComponent::refreshSeqTrackGateFlags (int padIndex, bool oneShot, bool l
 {
     if (padIndex < 0 || padIndex >= SeqPattern::kTracks) return;
 
+    const juce::String padFile = padManager.padSettings[padIndex].sampleFilePath;
+
     for (int t = 0; t < SeqPattern::kTracks; ++t)
     {
         auto& tr = seqPattern.tracks[(size_t) t];
+        if (! tr.sound.hasSound) continue;
 
-        if (! tr.sound.hasSound || tr.sound.sourcePad != padIndex)
-            continue;
+        // Usually the track's own pad.  Matching the file as well keeps this
+        // working after a kit reload, where the stored source pad may be stale.
+        const bool fromThisPad = (tr.sound.sourcePad == padIndex)
+                              || (padFile.isNotEmpty()
+                                  && tr.sound.settings.sampleFilePath == padFile);
+
+        if (! fromThisPad) continue;
 
         tr.sound.settings.oneShotEnabled = oneShot;
         tr.sound.settings.loopEnabled    = loop;

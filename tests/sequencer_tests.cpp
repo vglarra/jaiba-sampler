@@ -211,6 +211,52 @@ int main()
     }
 
     //==========================================================================
+    // A track's captured sound keeps the pad's Loop / OneShot modes
+    //==========================================================================
+    {
+        PadSettings ps;
+        ps.sampleFilePath = "/tmp/loop.wav";
+        ps.loopEnabled    = true;
+        ps.oneShotEnabled = false;
+        ps.volumeLevel    = 0.7f;
+
+        SeqSound snd;
+        snd.hasSound  = true;
+        snd.sourcePad = 3;
+        snd.settings  = ps;
+
+        check (snd.settings.loopEnabled && ! snd.settings.oneShotEnabled,
+               "a captured sound carries the pad's Loop and OneShot modes");
+
+        SeqPattern p;
+        p.tracks[3].sound = snd;
+        p.tracks[3].hits.push_back ({ 0, 0.8f });
+
+        juce::XmlElement x ("Sequencer");
+        p.saveToXml (x);
+
+        SeqPattern q;
+        q.loadFromXml (x);
+        check (q.tracks[3].sound.settings.loopEnabled,
+               "Loop mode survives the kit file with the track");
+        check (! q.tracks[3].sound.settings.oneShotEnabled,
+               "OneShot mode survives the kit file with the track");
+        check (near ((double) q.tracks[3].sound.settings.volumeLevel, 0.7, 1e-3),
+               "and so does the rest of the captured sound");
+
+        // OneShot on is the opposite case, kept explicit.
+        SeqPattern os;
+        os.tracks[0].sound.hasSound = true;
+        os.tracks[0].sound.settings.oneShotEnabled = true;
+        juce::XmlElement ox ("Sequencer");
+        os.saveToXml (ox);
+        SeqPattern osBack;
+        osBack.loadFromXml (ox);
+        check (osBack.tracks[0].sound.settings.oneShotEnabled,
+               "OneShot on survives too");
+    }
+
+    //==========================================================================
     // Erase: steps go, the musical setup stays
     //==========================================================================
     {

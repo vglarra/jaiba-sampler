@@ -308,6 +308,62 @@ int main()
                "a sample configured as OneShot rings past its step, to the end");
     }
 
+    //==========================================================================
+    // Loop: a looping sample fills its step instead of playing once
+    //==========================================================================
+    {
+        // Is there audio in an absolute sample window?  Asserting on a window rather
+        // than "the last audible frame" keeps this independent of release tails.
+        auto audibleBetween = [&] (int blocks, long long from, long long to) -> bool
+        {
+            juce::AudioBuffer<float> m (2, block);
+            long long pos = 0;
+
+            for (int b = 0; b < blocks; ++b)
+            {
+                m.clear();
+                seq.processBlock (block, m, 120.0, 1.0);
+
+                for (int i = 0; i < block; ++i)
+                    if (pos + i >= from && pos + i < to
+                        && std::abs (m.getSample (0, i)) > 0.001f)
+                        return true;
+
+                pos += block;
+            }
+            return false;
+        };
+
+        // shortBuf is 2000 samples (~41 ms) while a 1/16 step is 6000 samples, so
+        // the window at 3000..5000 is past the sample's own length: only a loop can
+        // still be sounding there.
+        seq.stop();
+        auto looping = makeSound (shortBuf, sr, /*oneShot=*/false);
+        looping.settings.loopEnabled = true;
+        seq.setTrackSound (0, looping);
+        seq.setPattern (makePattern ({ 0 }));
+        seq.start();
+        check (audibleBetween (12, 3000, 5000),
+               "a looping sample keeps sounding past the sample's own length");
+
+        seq.stop();
+        auto plain = makeSound (shortBuf, sr, /*oneShot=*/false);
+        plain.settings.loopEnabled = false;
+        seq.setTrackSound (0, plain);
+        seq.start();
+        check (! audibleBetween (12, 3000, 5000),
+               "an unlooped short sample stops when its audio runs out");
+
+        // Both are still cut at the end of the step: a step is a duration.  The
+        // window starts past the sound's 100 ms release tail (~sample 10800), so
+        // this is about the gate, not the fade.
+        seq.stop();
+        seq.setTrackSound (0, looping);
+        seq.start();
+        check (! audibleBetween (60, 13000, 16000),
+               "the loop is released at the end of its step, not left running");
+    }
+
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",
                  failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
