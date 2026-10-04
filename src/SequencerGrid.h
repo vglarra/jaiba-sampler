@@ -60,6 +60,7 @@ public:
     // Session transport/mix options.
     std::function<void (bool)>  onSyncClickToggled;   // lock the click to the sequencer
     std::function<void (float)> onSeqVolumeChanged;   // master level for the pool
+    std::function<void (int, int)> onTimeSigChanged;  // accent grouping (num, den)
 
     SeqControlPanel();
     ~SeqControlPanel() override = default;
@@ -83,6 +84,8 @@ public:
     void setTransportState (bool nowPlaying);
     /** Session options: click sync + the sequencer's master level. */
     void setSeqOptions (bool syncClick, float seqVolume);
+    /** Metronome accent grouping. */
+    void setTimeSig (int numerator, int denominator);
 
     void resized() override;
     void paint (juce::Graphics& g) override;
@@ -183,6 +186,15 @@ private:
     juce::TextButton syncButton { "Sync" };
     juce::Label      seqVolumeLabel;
     juce::Slider     seqVolumeSlider;
+
+    // Metronome accent grouping.
+    juce::ComboBox   sigBox { "Sig" };
+
+    /** The time signatures offered, in menu order. */
+    static juce::StringArray timeSigChoices()
+    {
+        return { "2/4", "3/4", "4/4", "5/4", "6/8", "7/8", "9/8", "12/8" };
+    }
 
     static constexpr int kNewSongId = 1000;
 
@@ -416,6 +428,31 @@ inline SeqControlPanel::SeqControlPanel()
     };
     addAndMakeVisible (seqVolumeSlider);
 
+    // ---- Metronome accent grouping ----
+    sigBox.setTooltip ("Time signature - which click is accented as the bar's first beat");
+    sigBox.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xFF2A2A2A));
+    sigBox.setColour (juce::ComboBox::textColourId,       juce::Colour (0xFFCECECE));
+    sigBox.setColour (juce::ComboBox::outlineColourId,    juce::Colour (0xFF555555));
+    sigBox.setColour (juce::ComboBox::arrowColourId,      juce::Colour (0xFF888888));
+    {
+        const auto choices = timeSigChoices();
+        for (int i = 0; i < choices.size(); ++i)
+            sigBox.addItem (choices[i], i + 1);
+    }
+    sigBox.setSelectedId (3, juce::dontSendNotification);   // 4/4
+    sigBox.onChange = [this]
+    {
+        const auto choices = timeSigChoices();
+        const int idx = sigBox.getSelectedId() - 1;
+        if (idx < 0 || idx >= choices.size()) return;
+
+        const juce::String t = choices[idx];
+        if (onTimeSigChanged)
+            onTimeSigChanged (t.upToFirstOccurrenceOf ("/", false, false).getIntValue(),
+                              t.fromFirstOccurrenceOf ("/", false, false).getIntValue());
+    };
+    addAndMakeVisible (sigBox);
+
     // ---- Tap tempo (same accumulator as the Rec tab) ----
     tapButton.setButtonText ("Tap");
     tapButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF4A3A00));
@@ -548,6 +585,23 @@ inline void SeqControlPanel::GridCanvas::setPlayheadTicks (double ticks)
     if (playheadColumn >= 0) repaint (playheadColumn * kStepW, 0, kStepW, h);
 }
 
+inline void SeqControlPanel::setTimeSig (int numerator, int denominator)
+{
+    if (numerator <= 0 || denominator <= 0)
+    {
+        sigBox.setSelectedId (0, juce::dontSendNotification);
+        return;
+    }
+
+    const juce::String want = juce::String (numerator) + "/" + juce::String (denominator);
+    const auto choices = timeSigChoices();
+    const int idx = choices.indexOf (want);
+
+    // A signature outside the list (hand-edited session) still shows as nothing
+    // selected, but the accent still follows it.
+    sigBox.setSelectedId (idx >= 0 ? idx + 1 : 0, juce::dontSendNotification);
+}
+
 inline void SeqControlPanel::handleTap()
 {
     tap.addTap (juce::Time::currentTimeMillis());
@@ -626,6 +680,8 @@ inline void SeqControlPanel::resized()
         seqVolumeLabel.setBounds (bar.removeFromLeft (52).reduced (0, 3));
         bar.removeFromLeft (4);
         seqVolumeSlider.setBounds (bar.removeFromLeft (90).reduced (0, 3));
+        bar.removeFromLeft (8);
+        sigBox.setBounds (bar.removeFromLeft (66).reduced (1, 0));
     }
 
     // ---- Row 2: pattern + song ----

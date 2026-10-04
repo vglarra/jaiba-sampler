@@ -78,6 +78,37 @@ namespace TempoSourceDefaults
 }
 
 //==============================================================================
+// Metronome accent grouping, driven by the time signature.
+namespace SeqClick
+{
+    /** Compound meters (6/8, 9/8, 12/8) get a secondary accent every 3rd click. */
+    inline int compoundGroup (int numerator, int denominator)
+    {
+        return (denominator == 8 && numerator > 3 && numerator % 3 == 0) ? 3 : 0;
+    }
+
+    /** Which click of the bar this beat is: 0 = bar, 1 = pulse, 2 = plain beat. */
+    inline int accentFor (int beat, int numerator, int denominator)
+    {
+        const int beats = juce::jmax (1, numerator);
+        const int inBar = ((beat % beats) + beats) % beats;
+
+        if (inBar == 0) return 0;
+
+        const int group = compoundGroup (numerator, denominator);
+        if (group > 0 && inBar % group == 0) return 1;
+
+        return 2;
+    }
+
+    /** Click pitch for an accent level — the bar is the highest. */
+    inline double pitchFor (int accent)
+    {
+        return accent == 0 ? 1568.0 : (accent == 1 ? 1318.5 : 1046.5);
+    }
+}
+
+//==============================================================================
 // Tap-tempo accumulator shared by the Rec and Seq tabs.  Keeps a small ring of
 // tap timestamps and averages the intervals; returns -1 until there are two.
 struct TapTempoState

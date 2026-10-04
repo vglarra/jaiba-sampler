@@ -1291,6 +1291,10 @@ juce::TextButton::ConnectedOnRight);
         {
             if (onSeqVolumeChanged) onSeqVolumeChanged (v);
         };
+        seqContent->onTimeSigChanged = [this] (int num, int den)
+        {
+            if (onSeqTimeSigChanged) onSeqTimeSigChanged (num, den);
+        };
         seqContent->setVisible(false);
         addAndMakeVisible(*seqContent);
 
@@ -5433,6 +5437,7 @@ public:
     // Session transport/mix options.
     std::function<void(bool)>  onSyncClickToggled;
     std::function<void(float)> onSeqVolumeChanged;
+    std::function<void(int,int)> onSeqTimeSigChanged;
 
     void setSeqTransport (bool playing)
     {
@@ -5442,6 +5447,11 @@ public:
     void setSeqOptions (bool syncClick, float seqVolume)
     {
         if (seqContent != nullptr) seqContent->setSeqOptions (syncClick, seqVolume);
+    }
+
+    void setSeqTimeSig (int numerator, int denominator)
+    {
+        if (seqContent != nullptr) seqContent->setTimeSig (numerator, denominator);
     }
 
     // Switch Rec tab to G-pad transfer mode (or back to normal recording mode).

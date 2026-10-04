@@ -268,6 +268,7 @@ private:
     void applySeqOptions ();                     // session click-sync + sequencer master level
     void setSeqSyncEnabled (bool on);
     void setSeqMasterVolume (float volume);
+    void setClickTimeSig (int num, int den);     // metronome accent grouping
 
     void saveSessionAction (bool forceDialog);
     void loadSessionAction ();
@@ -765,6 +766,8 @@ private:
     std::atomic<double>  recBpmAtomic        { 120.0 };  // BPM for beat clock + metro
     std::atomic<bool>    syncClickToSeq      { true  };  // lock the click to the sequencer's playhead
     std::atomic<bool>    seqStartPending     { false };  // armed: start on the next click beat
+    std::atomic<int>     clickBeatsPerBar    { 4 };      // metronome accent grouping
+    std::atomic<int>     clickDenominator    { 4 };      // metronome accent grouping
     std::atomic<int64_t> recBeatSampleOffset { 0 };      // WAV samples before beat 0
 
     // Message-thread-only parameters (written before arming)

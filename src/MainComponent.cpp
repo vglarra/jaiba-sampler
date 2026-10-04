@@ -527,6 +527,7 @@ MainComponent::MainComponent()
 
     sampleCard.onSyncClickToggled = [this] (bool on) { setSeqSyncEnabled (on); };
     sampleCard.onSeqVolumeChanged = [this] (float v) { setSeqMasterVolume (v); };
+    sampleCard.onSeqTimeSigChanged = [this] (int num, int den) { setClickTimeSig (num, den); };
 
     publishSeqPattern();
     refreshSeqTempoUI();
@@ -728,8 +729,13 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                         {
                             recMetroBeepLeft  = (int)(sr * 0.020);  // 20ms burst
                             recMetroBeepPhase = 0.0;
-                            // Accent the first beat of each 4/4 bar.
-                            recMetroBeepFreq  = (beatInt % 4 == 0) ? 1568.0 : 1046.5;
+
+                            // Accent the bar's first beat; compound meters also
+                            // accent each dotted-quarter pulse.
+                            recMetroBeepFreq = SeqClick::pitchFor (
+                                SeqClick::accentFor (beatInt,
+                                                     clickBeatsPerBar.load (std::memory_order_relaxed),
+                                                     clickDenominator.load (std::memory_order_relaxed)));
                         }
                     }
                 }
@@ -5321,12 +5327,33 @@ void MainComponent::stopSequencer()
     sampleCard.setSeqTransport (false);
 }
 
-// Session click-sync + the sequencer's own master level.
+// Session click-sync + the sequencer's own master level + click accent grouping.
 void MainComponent::applySeqOptions()
 {
     syncClickToSeq.store (gjmManager.syncClickToSeq, std::memory_order_relaxed);
     seqEngine.setMasterVolume (gjmManager.seqMasterVolume);
     sampleCard.setSeqOptions (gjmManager.syncClickToSeq, gjmManager.seqMasterVolume);
+
+    const int num = gjmManager.timeSigNumerator();
+    const int den = gjmManager.timeSigDenominator();
+    clickBeatsPerBar.store (num, std::memory_order_relaxed);
+    clickDenominator.store (den, std::memory_order_relaxed);
+    sampleCard.setSeqTimeSig (num, den);
+}
+
+void MainComponent::setClickTimeSig (int num, int den)
+{
+    num = juce::jlimit (1, 32, num);
+    den = den > 0 ? den : 4;
+
+    clickBeatsPerBar.store (num, std::memory_order_relaxed);
+    clickDenominator.store (den, std::memory_order_relaxed);
+
+    const juce::String t = juce::String (num) + "/" + juce::String (den);
+    if (gjmManager.timeSig == t) return;
+
+    gjmManager.timeSig = t;
+    markSessionDirty();
 }
 
 void MainComponent::setSeqSyncEnabled (bool on)
