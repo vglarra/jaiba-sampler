@@ -305,6 +305,23 @@ Each source **is** a song: a name plus a tempo. Names are free-form and travel w
 
 Later a song can grow past tempo — an ordered bank list, play order, chaining — as properties of the same named entry, with no change to this model.
 
+### Click phase (sync option)
+
+Tempo alone does not make the click line up: the metronome's beat clock free-runs
+from whenever it was switched on, so its downbeat lands at an arbitrary phase
+against the pattern.  A **Sync** toggle on the Seq tab locks the click's beat
+position to the sequencer's playhead whenever the sequencer is playing, so beats
+1, 2, 3 … coincide with the pattern's.  It re-clicks the downbeat when the pattern
+wraps, is ignored while arming or recording (a take's own beat clock must not be
+disturbed), and does nothing when the sequencer is stopped — the click free-runs
+as before.  Default is on; it is a session setting, saved in the `.gjm`.
+
+### Sequencer master level
+
+A **Seq level** slider balances the whole sequencer pool against the pads, applied
+inside the pool on top of the app master (which the pool, like the metronome beep,
+applies itself).  Session-level and saved in the `.gjm`.
+
 ### Click volume
 
 Bank-level (confirmed): `SeqPattern::clickVolume`. The per-pad `metVol` stays in `PadSettings` for file compatibility and is superseded as the live value.

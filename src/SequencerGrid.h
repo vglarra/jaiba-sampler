@@ -19,11 +19,11 @@ class SeqControlPanel : public juce::Component,
                         private juce::Timer
 {
 public:
-    static constexpr int kRowH     = 14;
+    static constexpr int kRowH     = 13;
     static constexpr int kRulerH   = 12;
     static constexpr int kHeaderW  = 150;
     static constexpr int kStepW    = 20;
-    static constexpr int kToolbarH = 20;
+    static constexpr int kToolbarH = 20;   // per row; there are two
 
     // Row-header column split (within kHeaderW).
     static constexpr int kNumW   = 22;
@@ -57,6 +57,10 @@ public:
     std::function<void ()>     onStopRequested;
     std::function<double ()>   getPlayheadTicks;   // ticks, for the playhead column
 
+    // Session transport/mix options.
+    std::function<void (bool)>  onSyncClickToggled;   // lock the click to the sequencer
+    std::function<void (float)> onSeqVolumeChanged;   // master level for the pool
+
     SeqControlPanel();
     ~SeqControlPanel() override = default;
 
@@ -77,6 +81,8 @@ public:
     void setTempoInfo (const TempoInfo& info);
     /** Transport state from the pool: enables/disables Play/Stop and the playhead. */
     void setTransportState (bool nowPlaying);
+    /** Session options: click sync + the sequencer's master level. */
+    void setSeqOptions (bool syncClick, float seqVolume);
 
     void resized() override;
     void paint (juce::Graphics& g) override;
@@ -172,6 +178,10 @@ private:
     juce::TextButton songMenuButton { "..." }; // rename / delete the current song
     juce::TextButton modeButton { "Live" };
     juce::TextButton lockButton { "Lock" };
+
+    // Session options: click phase sync + the sequencer's master level.
+    juce::TextButton syncButton { "Sync" };
+    juce::Slider     seqVolumeSlider;
 
     static constexpr int kNewSongId = 1000;
 
@@ -365,6 +375,37 @@ inline SeqControlPanel::SeqControlPanel()
     };
     addAndMakeVisible (metronomeVolumeSlider);
 
+    // ---- Click sync: lock the metronome's phase to the sequencer ----
+    syncButton.setClickingTogglesState (true);
+    syncButton.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xFF4A4A4A));
+    syncButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xFF3A7ACC));
+    syncButton.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xFFCECECE));
+    syncButton.setColour (juce::TextButton::textColourOnId,   juce::Colour (0xFF111111));
+    syncButton.setTooltip ("Lock the metronome's downbeat to the sequencer's "
+                           "(off = the click free-runs)");
+    syncButton.onClick = [this]
+    {
+        if (onSyncClickToggled)
+            onSyncClickToggled (syncButton.getToggleState());
+    };
+    addAndMakeVisible (syncButton);
+
+    // ---- Sequencer master level ----
+    seqVolumeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    seqVolumeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    seqVolumeSlider.setRange (0.0, 1.0, 0.01);
+    seqVolumeSlider.setValue (1.0, juce::dontSendNotification);
+    seqVolumeSlider.setColour (juce::Slider::backgroundColourId, juce::Colour (0xFF3A3A3A));
+    seqVolumeSlider.setColour (juce::Slider::trackColourId,      juce::Colour (0xFFB87800));
+    seqVolumeSlider.setColour (juce::Slider::thumbColourId,      juce::Colour (0xFFCECECE));
+    seqVolumeSlider.setTooltip ("Sequencer master level (balances Seq against the pads)");
+    seqVolumeSlider.onValueChange = [this]
+    {
+        if (onSeqVolumeChanged)
+            onSeqVolumeChanged ((float) seqVolumeSlider.getValue());
+    };
+    addAndMakeVisible (seqVolumeSlider);
+
     // ---- Tap tempo (same accumulator as the Rec tab) ----
     tapButton.setButtonText ("Tap");
     tapButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF4A3A00));
@@ -469,6 +510,13 @@ inline void SeqControlPanel::setTransportState (bool nowPlaying)
     }
 }
 
+inline void SeqControlPanel::setSeqOptions (bool syncClick, float seqVolume)
+{
+    syncButton.setToggleState (syncClick, juce::dontSendNotification);
+    seqVolumeSlider.setValue (juce::jlimit (0.0, 1.0, (double) seqVolume),
+                              juce::dontSendNotification);
+}
+
 inline void SeqControlPanel::timerCallback()
 {
     if (getPlayheadTicks)
@@ -552,30 +600,41 @@ inline void SeqControlPanel::resized()
 {
     auto area = getLocalBounds();
 
-    auto bar = area.removeFromTop (kToolbarH);
-    playButton.setBounds (bar.removeFromLeft (38).reduced (1));
-    stopButton.setBounds (bar.removeFromLeft (34).reduced (1));
-    recButton .setBounds (bar.removeFromLeft (34).reduced (1));
-    bar.removeFromLeft (6);
-    metronomeButton.setBounds (bar.removeFromLeft (46).reduced (1));
-    bar.removeFromLeft (2);
-    metronomeVolumeSlider.setBounds (bar.removeFromLeft (60).reduced (0, 3));
-    bar.removeFromLeft (8);
-    snapBox.setBounds (bar.removeFromLeft (76).reduced (1, 0));
-    bar.removeFromLeft (4);
-    barsBox.setBounds (bar.removeFromLeft (56).reduced (1, 0));
-    bar.removeFromLeft (4);
-    tapButton.setBounds (bar.removeFromLeft (34).reduced (1));
-    bar.removeFromLeft (3);
-    bpmLabel.setBounds (bar.removeFromLeft (60));
-    bar.removeFromLeft (4);
-    tempoCombo.setBounds (bar.removeFromLeft (84).reduced (1, 0));
-    bar.removeFromLeft (3);
-    songMenuButton.setBounds (bar.removeFromLeft (22).reduced (1));
-    bar.removeFromLeft (6);
-    modeButton.setBounds (bar.removeFromLeft (58).reduced (1));
-    bar.removeFromLeft (4);
-    lockButton.setBounds (bar.removeFromLeft (40).reduced (1));
+    // ---- Row 1: transport + levels ----
+    {
+        auto bar = area.removeFromTop (kToolbarH);
+        playButton.setBounds (bar.removeFromLeft (38).reduced (1));
+        stopButton.setBounds (bar.removeFromLeft (34).reduced (1));
+        recButton .setBounds (bar.removeFromLeft (34).reduced (1));
+        bar.removeFromLeft (8);
+        metronomeButton.setBounds (bar.removeFromLeft (46).reduced (1));
+        bar.removeFromLeft (2);
+        metronomeVolumeSlider.setBounds (bar.removeFromLeft (60).reduced (0, 3));
+        bar.removeFromLeft (8);
+        syncButton.setBounds (bar.removeFromLeft (40).reduced (1));
+        bar.removeFromLeft (8);
+        seqVolumeSlider.setBounds (bar.removeFromLeft (90).reduced (0, 3));
+    }
+
+    // ---- Row 2: pattern + song ----
+    {
+        auto bar = area.removeFromTop (kToolbarH);
+        snapBox.setBounds (bar.removeFromLeft (76).reduced (1, 0));
+        bar.removeFromLeft (4);
+        barsBox.setBounds (bar.removeFromLeft (56).reduced (1, 0));
+        bar.removeFromLeft (4);
+        tapButton.setBounds (bar.removeFromLeft (34).reduced (1));
+        bar.removeFromLeft (3);
+        bpmLabel.setBounds (bar.removeFromLeft (60));
+        bar.removeFromLeft (4);
+        tempoCombo.setBounds (bar.removeFromLeft (96).reduced (1, 0));
+        bar.removeFromLeft (3);
+        songMenuButton.setBounds (bar.removeFromLeft (22).reduced (1));
+        bar.removeFromLeft (8);
+        modeButton.setBounds (bar.removeFromLeft (58).reduced (1));
+        bar.removeFromLeft (4);
+        lockButton.setBounds (bar.removeFromLeft (40).reduced (1));
+    }
 
     auto rulerRow = area.removeFromTop (kRulerH);
     ruler.setBounds (rulerRow.withTrimmedLeft (kHeaderW));

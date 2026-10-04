@@ -97,6 +97,10 @@ public:
     // global tempo until songs are created deliberately.
     std::vector<TempoSource> tempoSources;
 
+    // Transport / mix options that belong to the session.
+    bool  syncClickToSeq  = true;    // lock the metronome's phase to the sequencer
+    float seqMasterVolume = 1.0f;    // balance the whole sequencer pool
+
     juce::File gjmFile;
     int  activeBank = 0;   // 0-based
     bool isLoaded   = false;
@@ -124,6 +128,8 @@ public:
         isLoaded   = true;
         isUntitled = true;
         isDirty    = false;
+        syncClickToSeq  = true;
+        seqMasterVolume = 1.0f;
     }
 
     //==========================================================================
@@ -260,6 +266,11 @@ public:
             }
         }
 
+        // Transport / mix options (absent in older sessions -> defaults).
+        syncClickToSeq  = xml->getIntAttribute ("syncClick", 1) != 0;
+        seqMasterVolume = juce::jlimit (0.0f, 1.0f,
+                                        (float) xml->getDoubleAttribute ("seqVolume", 1.0));
+
         isLoaded   = true;
         isUntitled = false;
         isDirty    = false;
@@ -296,6 +307,8 @@ public:
         auto root = std::make_unique<juce::XmlElement> ("GlobalJaibaMap");
         root->setAttribute ("version",   1);
         root->setAttribute ("savedDate", juce::Time::getCurrentTime().toString (true, true));
+        root->setAttribute ("syncClick", syncClickToSeq ? 1 : 0);
+        root->setAttribute ("seqVolume", (double) seqMasterVolume);
 
         // Session tempos ("songs"), referenced by each bank's tempoGroup.
         {

@@ -1283,6 +1283,14 @@ juce::TextButton::ConnectedOnRight);
         {
             return getSeqPlayheadTicks ? getSeqPlayheadTicks() : -1.0;
         };
+        seqContent->onSyncClickToggled = [this] (bool on)
+        {
+            if (onSyncClickToggled) onSyncClickToggled (on);
+        };
+        seqContent->onSeqVolumeChanged = [this] (float v)
+        {
+            if (onSeqVolumeChanged) onSeqVolumeChanged (v);
+        };
         seqContent->setVisible(false);
         addAndMakeVisible(*seqContent);
 
@@ -5422,9 +5430,18 @@ public:
     std::function<void()>   onSeqStopRequested;
     std::function<double()> getSeqPlayheadTicks;   // ticks, for the playhead column
 
+    // Session transport/mix options.
+    std::function<void(bool)>  onSyncClickToggled;
+    std::function<void(float)> onSeqVolumeChanged;
+
     void setSeqTransport (bool playing)
     {
         if (seqContent != nullptr) seqContent->setTransportState (playing);
+    }
+
+    void setSeqOptions (bool syncClick, float seqVolume)
+    {
+        if (seqContent != nullptr) seqContent->setSeqOptions (syncClick, seqVolume);
     }
 
     // Switch Rec tab to G-pad transfer mode (or back to normal recording mode).

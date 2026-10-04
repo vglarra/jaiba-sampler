@@ -265,6 +265,9 @@ private:
     void reconcileTrackSounds ();                // adopt pad buffers for stored-but-unloaded tracks
     void startSequencer ();
     void stopSequencer ();
+    void applySeqOptions ();                     // session click-sync + sequencer master level
+    void setSeqSyncEnabled (bool on);
+    void setSeqMasterVolume (float volume);
 
     void saveSessionAction (bool forceDialog);
     void loadSessionAction ();
@@ -760,6 +763,7 @@ private:
     std::atomic<float>   metronomeVolume     { 0.5f  };  // 0–1, independent beep gain
     std::atomic<double>  recSongBeatPos      { 0.0   };  // shared beat clock
     std::atomic<double>  recBpmAtomic        { 120.0 };  // BPM for beat clock + metro
+    std::atomic<bool>    syncClickToSeq      { true  };  // lock the click to the sequencer's playhead
     std::atomic<int64_t> recBeatSampleOffset { 0 };      // WAV samples before beat 0
 
     // Message-thread-only parameters (written before arming)

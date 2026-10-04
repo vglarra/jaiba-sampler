@@ -47,6 +47,13 @@ public:
     /** Live per-track mixer level (0-1), layered over the captured volume. */
     void setTrackVolume (int trackIdx, float volume);
 
+    /** Master level for the whole pool (0-1), for balancing Seq against the pads. */
+    void setMasterVolume (float volume) { masterVolume.store (juce::jlimit (0.0f, 1.0f, volume)); }
+    float getMasterVolume() const { return masterVolume.load(); }
+
+    /** PPQ of the currently published pattern (for the metronome's beat maths). */
+    int patternPpq() const { return ppqAtomic.load (std::memory_order_relaxed); }
+
     void start();
     void stop();
     bool isPlaying() const { return playing.load (std::memory_order_relaxed); }
@@ -77,6 +84,8 @@ private:
 
     std::atomic<bool>   playing    { false };
     std::atomic<double> playheadUI { 0.0 };   // ticks, for the playhead column
+    std::atomic<int>    ppqAtomic  { 960 };   // mirrors the published pattern's PPQ
+    std::atomic<float>  masterVolume { 1.0f };
 
     double sampleRate    = 44100.0;
     double playheadPos = 0.0;
@@ -310,6 +319,9 @@ inline void SequencerEngine::setTrackVolume (int trackIdx, float volume)
 //==============================================================================
 inline void SequencerEngine::setPattern (std::shared_ptr<const SeqPattern> p)
 {
+    // Mirror the PPQ so the metronome can convert the playhead to beats without
+    // touching the message-thread pattern.
+    ppqAtomic.store (p != nullptr && p->ppq > 0 ? p->ppq : 960, std::memory_order_relaxed);
     std::atomic_store (&pattern, std::move (p));
 }
 
@@ -444,8 +456,10 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
 
     // Master volume applies here, exactly as the metronome beep applies it: the
     // pad mix already carries it, so scaling the shared buffer would double it.
-    if (masterGain != 1.0)
-        poolBuffer.applyGain (0, numSamples, (float) masterGain);
+    // The pool's own master sits on top, to balance Seq against the pads.
+    const float poolGain = (float) masterGain * masterVolume.load (std::memory_order_relaxed);
+    if (poolGain != 1.0f)
+        poolBuffer.applyGain (0, numSamples, poolGain);
 
     for (int ch = 0; ch < nCh; ++ch)
         mix.addFrom (ch, 0, poolBuffer, ch, 0, numSamples);

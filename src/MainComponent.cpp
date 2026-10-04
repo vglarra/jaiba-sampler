@@ -525,8 +525,12 @@ MainComponent::MainComponent()
     sampleCard.onSeqStopRequested  = [this] { stopSequencer(); };
     sampleCard.getSeqPlayheadTicks = [this] { return seqEngine.playheadTicks(); };
 
+    sampleCard.onSyncClickToggled = [this] (bool on) { setSeqSyncEnabled (on); };
+    sampleCard.onSeqVolumeChanged = [this] (float v) { setSeqMasterVolume (v); };
+
     publishSeqPattern();
     refreshSeqTempoUI();
+    applySeqOptions();
 }
 
 MainComponent::~MainComponent()
@@ -652,7 +656,23 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                 const double bps   = recBpmAtomic.load (std::memory_order_relaxed) / 60.0;
                 const double delta = (double)bufferToFill.numSamples / sr * bps;
                 const double oldBeat = recSongBeatPos.load (std::memory_order_relaxed);
-                const double newBeat = oldBeat + delta;
+                double newBeat = oldBeat + delta;
+
+                // ── Click sync: lock the beat to the sequencer's playhead so the
+                //    downbeat lines up with the pattern.  Skipped while arming or
+                //    recording, so a take's own beat clock is never disturbed.
+                if (syncClickToSeq.load (std::memory_order_relaxed)
+                    && seqEngine.isPlaying()
+                    && ! recIsActive.load    (std::memory_order_relaxed)
+                    && ! recWaitForBeat.load (std::memory_order_relaxed))
+                {
+                    const double ppq = (double) juce::jmax (1, seqEngine.patternPpq());
+                    newBeat = seqEngine.playheadTicks() / ppq;
+
+                    // The pattern wrapped: click the downbeat again.
+                    if (newBeat < oldBeat)
+                        recLastBeat = -1;
+                }
 
                 // ── Quantized record arm: fire at next beat boundary ──────────
                 if (recWaitForBeat.load (std::memory_order_relaxed))
@@ -2416,6 +2436,7 @@ void MainComponent::clearAllPadsForNewKit()
     refreshSeqTempoUI();
     stopSequencer();
     publishSeqPattern();
+    applySeqOptions();
     updateGjmUI();
 
     sampleCard.showTrimToast ("New session started", false);
@@ -2613,6 +2634,9 @@ void MainComponent::finishGjmLoad()
             globalLoopColumn.setSlotState (g, GlobalLoopColumn::SlotState::Empty);
         }
     }
+
+    // Session transport/mix options travel with the .gjm (click sync, Seq level).
+    applySeqOptions();
 
     // activeBank is already 0 from loadManifest() — do NOT set it here.
     // Setting it before switchGjmBank(0) would make activeBank == bankIdx inside
@@ -5248,6 +5272,35 @@ void MainComponent::stopSequencer()
     sampleCard.setSeqTransport (false);
 }
 
+// Session click-sync + the sequencer's own master level.
+void MainComponent::applySeqOptions()
+{
+    syncClickToSeq.store (gjmManager.syncClickToSeq, std::memory_order_relaxed);
+    seqEngine.setMasterVolume (gjmManager.seqMasterVolume);
+    sampleCard.setSeqOptions (gjmManager.syncClickToSeq, gjmManager.seqMasterVolume);
+}
+
+void MainComponent::setSeqSyncEnabled (bool on)
+{
+    syncClickToSeq.store (on, std::memory_order_relaxed);
+
+    if (gjmManager.syncClickToSeq == on) return;
+
+    gjmManager.syncClickToSeq = on;
+    markSessionDirty();
+}
+
+void MainComponent::setSeqMasterVolume (float volume)
+{
+    volume = juce::jlimit (0.0f, 1.0f, volume);
+    seqEngine.setMasterVolume (volume);
+
+    if (std::abs (gjmManager.seqMasterVolume - volume) < 1e-4f) return;
+
+    gjmManager.seqMasterVolume = volume;
+    markSessionDirty();
+}
+
 void MainComponent::playbackQuantisedEvents()
 {
     printf ("[REC] playbackQuantisedEvents — %d events\n", (int)recQuantised.size());
@@ -6143,6 +6196,7 @@ void MainComponent::loadLastSession()
     refreshSeqTempoUI();
     stopSequencer();
     publishSeqPattern();
+    applySeqOptions();
     globalControlsBar.setBankIndex (1);
     globalControlsBar.setMaxBank (GjmManager::kNumBanks);
     updateGjmUI();
