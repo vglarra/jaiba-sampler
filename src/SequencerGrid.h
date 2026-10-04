@@ -719,10 +719,10 @@ inline void SeqControlPanel::showTrackMenu (int row, int screenX, int screenY)
                         + (tr.sound.name().isEmpty() ? juce::String{}
                                                      : " - " + tr.sound.name()));
 
-    m.addItem (1, tr.sound.hasSound
-                     ? (tr.sound.linked ? "Detach from pad" : "Re-link to pad")
-                     : "Re-link to pad",
-               true);
+    // Re-linking replaces whatever the track is holding with the pad's sound, so
+    // say so rather than letting it look like a harmless toggle.
+    m.addItem (1, tr.sound.linked ? "Detach from pad (keep this sound)"
+                                  : "Re-link to pad (takes the pad's sound)");
     m.addItem (2, "Update from pad");
 
     if (tr.sound.hasSound)

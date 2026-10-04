@@ -5554,20 +5554,33 @@ void MainComponent::handleSeqTrackAction (int trackIdx, SeqTrackAction action)
     {
         case SeqTrackAction::ToggleLink:
         {
-            tr.sound.linked = ! tr.sound.linked;
-
             if (tr.sound.linked)
             {
-                // Re-linking: pick the pad's sound straight back up.
-                refreshSeqTracksFromPad (trackIdx);
-                sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
-                                          + " linked to pad", false);
-            }
-            else
-            {
+                // Detaching changes nothing about the sound: the track simply stops
+                // following the pad from here on.
+                tr.sound.linked = false;
                 sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
                                           + " detached - it now owns its sound", false);
+                break;
             }
+
+            // Re-linking is a PULL: the pad's sound is copied into the track and the
+            // pad itself is never written to.  It must re-capture the buffer as well
+            // as the settings -- otherwise a track that had loaded its own sample
+            // would show the pad's name while still playing its own audio, with its
+            // trim computed from the pad's settings against the wrong buffer.
+            if (! captureTrackFromPad (trackIdx))
+            {
+                sampleCard.showTrimToast ("Pad " + juce::String (trackIdx + 1)
+                                          + " has nothing loaded - track stays detached",
+                                          true);
+                return;
+            }
+
+            tr.sound.linked = true;
+            sampleCard.showTrimToast ("Track " + juce::String (trackIdx + 1)
+                                      + " re-linked - it follows pad "
+                                      + juce::String (trackIdx + 1) + " again", false);
             break;
         }
 
