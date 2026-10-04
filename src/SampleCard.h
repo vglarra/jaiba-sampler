@@ -1250,6 +1250,23 @@ juce::TextButton::ConnectedOnRight);
 
         seqContent = std::make_unique<SeqControlPanel>();
         seqContent->onEdited = [this] { if (onSequenceEdited) onSequenceEdited(); };
+        // Metro controls on the Seq tab drive the same listeners the Rec tab uses,
+        // so both tabs control one metronome (kept in sync by MainComponent).
+        seqContent->onMetronomeToggled = [this](bool on)
+        {
+            const double bpm = getMetronomeBpm ? getMetronomeBpm() : 120.0;
+            listeners.call([on, bpm](Listener& l) { l.metronomeStandaloneChanged(on, bpm); });
+        };
+        seqContent->onMetronomeVolumeChanged = [this](float vol)
+        {
+            listeners.call([vol](Listener& l) { l.metronomeVolumeChanged(vol); });
+        };
+        // Tap tempo on the Seq tab drives the same tempo the Rec tab uses.
+        seqContent->onTempoChanged = [this](double bpm)
+        {
+            const bool on = getMetronomeOn ? getMetronomeOn() : false;
+            listeners.call([on, bpm](Listener& l) { l.metronomeStandaloneChanged(on, bpm); });
+        };
         seqContent->setVisible(false);
         addAndMakeVisible(*seqContent);
 
@@ -4730,6 +4747,18 @@ void adjustPitchUp()
             metronomeVolumeSlider.setValue (juce::jlimit (0.0, 1.0, (double)v),
                                             juce::dontSendNotification);
         }
+        // Silent — this tab and the Seq tab are kept in sync by MainComponent.
+        void   setMetronomeOn(bool on)
+        {
+            metronomeButton.setToggleState (on, juce::dontSendNotification);
+        }
+        // Silent — the Seq tab's tap button and this tab share one tempo.
+        void   setBpm(double bpm)
+        {
+            currentBpm = juce::jlimit (60.0, 360.0, bpm);
+            tapBpmLabel.setText (juce::String (currentBpm, 1) + " BPM",
+                                 juce::dontSendNotification);
+        }
 
         // Called by MainComponent when a G pad is selected / deselected.
         // In G pad mode: hides Record, shows Transfer, adjustTargetPad shows kit pad source.
@@ -4851,41 +4880,8 @@ void adjustPitchUp()
         }
 
         // ===== Tap Tempo state =====
-        struct TapState
-        {
-            static constexpr int          kMaxTaps   = 8;
-            static constexpr juce::int64  kTimeoutMs = 2000;
-
-            juce::int64 times[kMaxTaps] = {};
-            int         count           = 0;
-
-            void addTap (juce::int64 nowMs)
-            {
-                // Reset sequence if gap since last tap exceeds timeout.
-                if (count > 0 && nowMs - times[0] > kTimeoutMs)
-                    count = 0;
-                // Shift ring buffer and insert newest at front.
-                for (int i = kMaxTaps - 1; i > 0; --i)
-                    times[i] = times[i - 1];
-                times[0] = nowMs;
-                count = juce::jmin (count + 1, kMaxTaps);
-            }
-
-            // Returns average BPM from collected taps, or -1 if < 2 taps.
-            double getBpm() const
-            {
-                if (count < 2) return -1.0;
-                double sumMs = 0.0;
-                for (int i = 0; i < count - 1; ++i)
-                    sumMs += (double)(times[i] - times[i + 1]);
-                const double avgMs = sumMs / (count - 1);
-                return 60000.0 / avgMs;
-            }
-
-            void clear() { count = 0; }
-        };
-
-        TapState tap;
+        // Logic lives in TapTempoState (Sequencer.h) so the Seq tab taps identically.
+        TapTempoState tap;
 
         // Tap button flashes orange on each tap.
         void flashTapButton()
@@ -5301,8 +5297,36 @@ public:
     }
     void setMetronomeVolume(float v)
     {
+        if (recContent != nullptr) recContent->setMetronomeVolume(v);
+        if (seqContent != nullptr) seqContent->setMetronomeVolume(v);
+    }
+
+    // Push the global metronome state into BOTH tabs (Rec and Seq) so the two
+    // controls can never disagree.
+    void setMetronomeState (bool on, float vol)
+    {
         if (recContent != nullptr)
-            recContent->setMetronomeVolume(v);
+        {
+            recContent->setMetronomeOn (on);
+            recContent->setMetronomeVolume (vol);
+        }
+        if (seqContent != nullptr)
+            seqContent->setMetronomeState (on, vol);
+    }
+
+    // Supplied by MainComponent: the tempo to use when the Metro button is
+    // toggled from the Seq tab (the bank/global BPM).  Without it the panel
+    // would have to invent a tempo and could stomp the Rec tab's setting.
+    std::function<double()> getMetronomeBpm;
+    // Supplied by MainComponent: whether the metronome is currently running, so a
+    // Seq-tab tap re-arms it with the new tempo instead of guessing.
+    std::function<bool()>   getMetronomeOn;
+
+    // Push the shared tempo into BOTH tabs' displays (tap tempo on either tab).
+    void setMetronomeBpm (double bpm)
+    {
+        if (recContent != nullptr) recContent->setBpm (bpm);
+        if (seqContent != nullptr) seqContent->setMetronomeBpm (bpm);
     }
 
     // Restore saved zoom level and scroll position after a sample load.

@@ -69,6 +69,47 @@ inline juce::String seqSnapName (SeqSnap s)
 }
 
 //==============================================================================
+// Tap-tempo accumulator shared by the Rec and Seq tabs.  Keeps a small ring of
+// tap timestamps and averages the intervals; returns -1 until there are two.
+struct TapTempoState
+{
+    static constexpr int         kMaxTaps   = 8;
+    static constexpr juce::int64 kTimeoutMs = 2000;
+
+    juce::int64 times[kMaxTaps] = {};
+    int         count           = 0;
+
+    void addTap (juce::int64 nowMs)
+    {
+        // Reset the sequence if the gap since the last tap exceeds the timeout.
+        if (count > 0 && nowMs - times[0] > kTimeoutMs)
+            count = 0;
+
+        // Shift the ring and insert the newest tap at the front.
+        for (int i = kMaxTaps - 1; i > 0; --i)
+            times[i] = times[i - 1];
+
+        times[0] = nowMs;
+        count    = juce::jmin (count + 1, kMaxTaps);
+    }
+
+    /** Average BPM from the collected taps, or -1 if there are fewer than two. */
+    double getBpm() const
+    {
+        if (count < 2) return -1.0;
+
+        double sumMs = 0.0;
+        for (int i = 0; i < count - 1; ++i)
+            sumMs += (double) (times[i] - times[i + 1]);
+
+        const double avgMs = sumMs / (count - 1);
+        return avgMs > 0.0 ? 60000.0 / avgMs : -1.0;
+    }
+
+    void clear() { count = 0; }
+};
+
+//==============================================================================
 struct SeqHit
 {
     int   tick     = 0;     // absolute ticks from the pattern start

@@ -498,6 +498,21 @@ MainComponent::MainComponent()
     // bank's kit dirty so the unsaved-changes asterisk appears.
     sampleCard.setSequencerData (&seqPattern, padManager.padSettings);
     sampleCard.onSequenceEdited = [this] { markKitDirty(); };
+
+    // The Seq tab's Metro button needs the current tempo (recBpmAtomic for now;
+    // Phase 2 promotes the tempo to the bank pattern).  Seed both tabs' metronome
+    // controls from the live state so Rec and Seq always agree.
+    sampleCard.getMetronomeBpm = [this]
+    {
+        return recBpmAtomic.load (std::memory_order_relaxed);
+    };
+    sampleCard.getMetronomeOn = [this]
+    {
+        return metronomeStandalone.load (std::memory_order_relaxed);
+    };
+    sampleCard.setMetronomeState (metronomeStandalone.load (std::memory_order_relaxed),
+                                  metronomeVolume.load (std::memory_order_relaxed));
+    sampleCard.setMetronomeBpm (recBpmAtomic.load (std::memory_order_relaxed));
 }
 
 MainComponent::~MainComponent()
@@ -4815,6 +4830,11 @@ void MainComponent::metronomeStandaloneChanged (bool on, double bpm)
     recBpmAtomic.store (bpm, std::memory_order_relaxed);
     recMetronomeOn.store (on, std::memory_order_relaxed);
 
+    // Keep the Rec and Seq tabs' Metro buttons in agreement.
+    sampleCard.setMetronomeState (on, metronomeVolume.load (std::memory_order_relaxed));
+    // ...and their tempo displays (a tap on either tab lands here).
+    sampleCard.setMetronomeBpm (bpm);
+
     if (!on)
     {
         // Stop the beat clock only if not actively recording
@@ -4830,6 +4850,9 @@ void MainComponent::metronomeVolumeChanged (float vol)
 {
     const float v = juce::jlimit (0.0f, 1.0f, vol);
     metronomeVolume.store (v, std::memory_order_relaxed);
+
+    // Keep the Rec and Seq tabs' volume sliders in agreement.
+    sampleCard.setMetronomeState (metronomeStandalone.load (std::memory_order_relaxed), v);
 
     // Persist the level on the pad currently shown in the Rec tab.  PadSettings is
     // what gets written to the kit (.jai) and to the session (.gjm), so nothing

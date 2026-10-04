@@ -33,6 +33,12 @@ public:
     // Fired whenever the pattern is edited (MainComponent marks the kit dirty).
     std::function<void()> onEdited;
 
+    // Metronome — mirrors the Rec tab's controls.  BPM is supplied by the owner
+    // (the bank/global tempo), so this panel never invents one.
+    std::function<void (bool)>  onMetronomeToggled;
+    std::function<void (float)> onMetronomeVolumeChanged;
+    std::function<void (double)> onTempoChanged;   // tap tempo
+
     SeqControlPanel();
     ~SeqControlPanel() override = default;
 
@@ -42,6 +48,13 @@ public:
     void setPadSettings (const PadSettings* p);
     /** Re-read the pattern after an external change (bank switch / kit load). */
     void refresh();
+
+    /** Reflect the global metronome state (kept in sync with the Rec tab). */
+    void setMetronomeState (bool on, float volume);
+    /** Volume only — leaves the Metro toggle as it is. */
+    void setMetronomeVolume (float volume);
+    /** Tempo display — the live tempo, shared with the Rec tab. */
+    void setMetronomeBpm (double bpm);
 
     void resized() override;
     void paint (juce::Graphics& g) override;
@@ -129,6 +142,14 @@ private:
     juce::Label      bpmLabel;
     juce::TextButton modeButton { "Live" };
     juce::TextButton lockButton { "Lock" };
+
+    // Metronome — same controls as the Rec tab.
+    juce::TextButton metronomeButton { "Metro" };
+    juce::Slider     metronomeVolumeSlider;
+    juce::TextButton tapButton { "Tap" };
+    TapTempoState    tap;
+
+    void handleTap();
 
     SeqViewport  gridViewport;
     GridCanvas   gridCanvas;
@@ -239,6 +260,44 @@ inline SeqControlPanel::SeqControlPanel()
     };
     addAndMakeVisible (lockButton);
 
+    // ---- Metronome (copied from the Rec tab, two-way synced) ----
+    metronomeButton.setButtonText ("Metro");
+    metronomeButton.setClickingTogglesState (true);
+    metronomeButton.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xFF4A4A4A));
+    metronomeButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xFF00CF7F));
+    metronomeButton.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xFFCECECE));
+    metronomeButton.setColour (juce::TextButton::textColourOnId,   juce::Colour (0xFF111111));
+    metronomeButton.setTooltip ("Standalone metronome (same control as the Rec tab)");
+    metronomeButton.onClick = [this]
+    {
+        if (onMetronomeToggled)
+            onMetronomeToggled (metronomeButton.getToggleState());
+    };
+    addAndMakeVisible (metronomeButton);
+
+    metronomeVolumeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    metronomeVolumeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    metronomeVolumeSlider.setRange (0.0, 1.0, 0.01);
+    metronomeVolumeSlider.setValue (0.5, juce::dontSendNotification);
+    metronomeVolumeSlider.setColour (juce::Slider::backgroundColourId, juce::Colour (0xFF3A3A3A));
+    metronomeVolumeSlider.setColour (juce::Slider::trackColourId,      juce::Colour (0xFF00CF7F));
+    metronomeVolumeSlider.setColour (juce::Slider::thumbColourId,      juce::Colour (0xFFCECECE));
+    metronomeVolumeSlider.setTooltip ("Metronome volume");
+    metronomeVolumeSlider.onValueChange = [this]
+    {
+        if (onMetronomeVolumeChanged)
+            onMetronomeVolumeChanged ((float) metronomeVolumeSlider.getValue());
+    };
+    addAndMakeVisible (metronomeVolumeSlider);
+
+    // ---- Tap tempo (same accumulator as the Rec tab) ----
+    tapButton.setButtonText ("Tap");
+    tapButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF4A3A00));
+    tapButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFFCECECE));
+    tapButton.setTooltip ("Tap tempo — shared with the Rec tab");
+    tapButton.onClick = [this] { handleTap(); };
+    addAndMakeVisible (tapButton);
+
     // ---- Grid ----
     gridCanvas.pattern = nullptr;
     gridCanvas.onEdited = [this] { notifyEdited(); };
@@ -283,6 +342,46 @@ inline void SeqControlPanel::refresh()
     rebuild();
 }
 
+inline void SeqControlPanel::setMetronomeState (bool on, float volume)
+{
+    metronomeButton.setToggleState (on, juce::dontSendNotification);
+    metronomeVolumeSlider.setValue (juce::jlimit (0.0, 1.0, (double) volume),
+                                    juce::dontSendNotification);
+}
+
+inline void SeqControlPanel::setMetronomeVolume (float volume)
+{
+    metronomeVolumeSlider.setValue (juce::jlimit (0.0, 1.0, (double) volume),
+                                    juce::dontSendNotification);
+}
+
+inline void SeqControlPanel::setMetronomeBpm (double bpm)
+{
+    bpmLabel.setText (juce::String (bpm, 1) + " BPM", juce::dontSendNotification);
+}
+
+inline void SeqControlPanel::handleTap()
+{
+    tap.addTap (juce::Time::currentTimeMillis());
+
+    // Flash the button orange, like the Rec tab's.
+    tapButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFFB87800));
+    juce::Timer::callAfterDelay (120, [sp = juce::Component::SafePointer<SeqControlPanel>(this)]
+    {
+        if (sp != nullptr)
+            sp->tapButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF4A3A00));
+    });
+
+    const double bpm = tap.getBpm();
+    if (bpm > 0.0)
+    {
+        const double clamped = juce::jlimit (60.0, 360.0, bpm);
+        setMetronomeBpm (clamped);          // immediate feedback
+        if (onTempoChanged)
+            onTempoChanged (clamped);       // MainComponent applies + echoes back
+    }
+}
+
 inline void SeqControlPanel::rebuild()
 {
     if (pattern != nullptr)
@@ -295,7 +394,8 @@ inline void SeqControlPanel::rebuild()
             if (kBarCounts[i] == pattern->bars) barsId = i + 1;
         barsBox.setSelectedId (barsId, juce::dontSendNotification);
 
-        bpmLabel.setText (juce::String (pattern->bpm, 1) + " BPM", juce::dontSendNotification);
+        // The BPM label is driven by setMetronomeBpm (the live/shared tempo), not
+        // by pattern->bpm, so the Rec and Seq tabs can never disagree.
 
         modeButton.setToggleState (pattern->liveMode, juce::dontSendNotification);
         modeButton.setButtonText (pattern->liveMode ? "Live" : "Arrange");
@@ -327,10 +427,16 @@ inline void SeqControlPanel::resized()
     stopButton.setBounds (bar.removeFromLeft (34).reduced (1));
     recButton .setBounds (bar.removeFromLeft (34).reduced (1));
     bar.removeFromLeft (6);
+    metronomeButton.setBounds (bar.removeFromLeft (50).reduced (1));
+    bar.removeFromLeft (2);
+    metronomeVolumeSlider.setBounds (bar.removeFromLeft (66).reduced (0, 3));
+    bar.removeFromLeft (8);
     snapBox.setBounds (bar.removeFromLeft (78).reduced (1, 0));
     bar.removeFromLeft (4);
     barsBox.setBounds (bar.removeFromLeft (58).reduced (1, 0));
     bar.removeFromLeft (4);
+    tapButton.setBounds (bar.removeFromLeft (34).reduced (1));
+    bar.removeFromLeft (3);
     bpmLabel.setBounds (bar.removeFromLeft (62));
     bar.removeFromLeft (4);
     modeButton.setBounds (bar.removeFromLeft (60).reduced (1));
