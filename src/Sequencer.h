@@ -212,7 +212,8 @@ struct SeqPattern
     SeqSnap snap        = SeqSnap::Sixteenth;
     int     bars        = 1;      // 4/4 bars
     int     ppq         = 960;
-    double  bpm         = 120.0;  // bank tempo, shared with the metronome
+    double  bpm         = 120.0;  // this kit's own tempo — used when the session's
+                                  // tempo source for the bank is "Kit" (tempoGroup == -1)
     float   clickVolume = 0.5f;   // bank-level metronome level
     bool    liveMode    = true;   // Live (read-only) vs Arrange
     bool    locked      = false;

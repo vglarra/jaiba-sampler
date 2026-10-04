@@ -1,7 +1,8 @@
 # Seq tab — step sequencer plan
 
-Status: **proposal only — nothing implemented.**
-Revision 4 — self-contained (detached) tracks + per-track mixer volume.
+Status: **in progress** — Phases 0 + 1 are built (silent grid + kit persistence), and the
+metronome controls and tap tempo are mirrored onto the Seq tab.
+Revision 5 — session tempo sources ("songs") replace bank-level BPM.
 Related: `docs/Click behaviour idea.md` (metronome click — parked)
 
 ---
@@ -15,11 +16,12 @@ A new **Seq** tab on the SampleCard that hosts a per-kit step sequencer.
 | **D1** | Track model | **16 tracks, nominally one per pad** (track *i* starts out as pad *i*). |
 | **D2** | Pattern ownership | **Per bank/kit.** The Seq view is shared by all 16 pads. One sequence plays at a time, owned by the bank that started it. |
 | **D3** | MIDI rows | **Removed.** No MIDI tracks, no MIDI output subsystem. |
-| **D4** | Transport | **Shared with the metronome** → tempo **and click volume** are bank-level (§8). |
+| **D4** | Tempo | **Session tempo sources** (§8): the session owns a list of named tempos and each bank points at one. Every bank on the default = one global tempo; a group of banks on the same named tempo = a song. Click volume is bank-level. |
 | **D5** | Free / no-snap | Live-record unquantised + shift-drag arbitrary placement. |
 | **D6** | Legacy pattern recorder | Keep the data code, **disable the UI**, repurpose the Rec tab later for sound-card input recording. |
 | **D7** | Sound ownership | **Self-contained tracks.** Each track stores its own sample path + settings and plays through its own resident engine — independent of the live pads and of the active bank. |
 | **D8** | Track mixing | **Per-track volume fader**, always live and adjustable after recording. |
+| **D9** | Songs | Each tempo source is a **named, portable song**. Names are free-form; new ones default to **"Song 1"**, "Song 2", … (§8). |
 
 Snap choices: **1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32, 1/32T, 1/64, Free**.
 
@@ -245,25 +247,77 @@ Per bank, inside the bank's `.jai`, so a kit carries its groove (D2) and its sou
 - The `<Sound>` element reuses the same attribute names as `<Pad>` (so the writer/reader already understand them), but **only the sound-relevant subset** — deliberately excluding `savedPatterns`, MIDI routing, zoom and tab, so a track snapshot never duplicates a pad's patterns.
 - Touch points: `GjmBank` gains `SeqPattern sequence;`; `GjmManager::parseKitFile` must return it too (new `KitData` struct or out-parameter) and `saveBankKit` writes it. The `.gjm` references and rewrites each bank's `.jai`, so "Save Session" covers it.
 
+### Session side — tempo sources (D4 / D9)
+
+The kit stays a pure kit; the **grouping** lives in the session (`.gjm`):
+
+```xml
+<GlobalJaibaMap ...>
+  <Tempos default="0">
+    <Tempo index="0" name="Song 1" bpm="120"/>
+    <Tempo index="1" name="Song 2" bpm="95"/>
+  </Tempos>
+  <Bank index="0" kitPath="..." name="..." tempoGroup="0"/>
+  <Bank index="1" kitPath="..." name="..." tempoGroup="1"/>
+  ...
+</GlobalJaibaMap>
+```
+
+- `tempoGroup >= 0` → that named tempo's BPM; `-1` → the bank's own `SeqPattern::bpm` (the kit's tempo).
+- Old sessions have neither `<Tempos>` nor `tempoGroup`, so every bank resolves to the default entry — **backward compatible**, and a session behaves as one global tempo until songs are created deliberately.
+
 ---
 
-## 8. Metronome and tempo ownership (D4)
+## 8. Tempo — session tempo sources (D4, D9)
 
-- **BPM → bank level** (in `SeqPattern`). The metronome reads it; this replaces the global `recBpmAtomic` as the source of truth for the bank's tempo.
-- **Click volume → bank level** (confirmed). Replaces the per-pad `metVol` as the live value; the per-pad field stays in `PadSettings` for file compatibility and is superseded.
-- **Metronome on/off → transport state.**
-- Because the sequencer pool is resident, the click and the sequence keep running across bank switches.
+Tempo ownership and song grouping are really the same question, so they share one mechanism: a **session owns a list of named tempos, and every bank points at one**.
 
-### Tempo persistence — to do in Phase 2
+```xml
+<Tempos default="0">
+  <Tempo index="0" name="Song 1" bpm="120"/>   <!-- default: every bank starts here -->
+  <Tempo index="1" name="Song 2" bpm="95"/>
+</Tempos>
 
-**Current state:** the Metro and Tap controls now exist on both the Rec and Seq tabs and drive one live tempo (`recBpmAtomic`); both BPM displays stay in sync. `SeqPattern::bpm` is serialised and round-trips through the kit, but **nothing writes it from the UI yet** — so a tapped tempo is not remembered.
+<Bank index="0" tempoGroup="0"/>    <!-- Song 1               -->
+<Bank index="1" tempoGroup="1"/>    <!-- Song 2               -->
+<Bank index="2" tempoGroup="1"/>    <!-- Song 2 (tied)        -->
+<Bank index="3" tempoGroup="-1"/>   <!-- this kit's own tempo -->
+```
 
-**Phase 2 work, in order:**
+**Resolution** for the active bank — one rule:
 
-1. **Tap / tempo changes write the bank tempo.** In `MainComponent::metronomeStandaloneChanged()`, set `seqPattern.bpm = bpm` (marking the kit dirty only when it actually changes) instead of leaving it at the default. This makes the tempo part of the kit, alongside the pattern.
-2. **Loading the tempo back.** On bank switch and kit/session load, push the incoming `SeqPattern::bpm` into the live tempo (`recBpmAtomic`) so the metronome and (later) the sequencer follow the loaded bank. Guard it while a take is armed so a recording's tempo cannot shift underneath it.
-3. **Keep the panels in step.** `SampleCard::setMetronomeBpm()` already fans a tempo out to both tabs; call it from the load paths too, so the displays match the restored bank.
-4. **Decide the switch behaviour.** With a per-bank tempo, changing banks changes the click tempo. Confirm that is wanted (the alternative is to keep the live tempo global and treat `SeqPattern::bpm` as a per-kit default applied only when the pattern is started). This is the one open question in the migration.
+- `tempoGroup >= 0` → that named tempo's BPM
+- `tempoGroup == -1` → the bank's own `SeqPattern::bpm`
+
+### What that buys
+
+| Want | How it looks |
+|---|---|
+| One **global tempo** for the session | Every bank left on the default entry — zero setup, no mode |
+| **3 banks = one song**, tempos tied | Those 3 banks pointed at a named entry, e.g. "Song 2" |
+| A **kit with its own tempo** | That bank set to "Kit" (`-1`) |
+
+Switching banks **within** a source keeps the click rock-steady; switching **between** sources changes tempo — so song boundaries are audible. That composes with the resident pool (§3.3), where a pattern keeps playing across a bank switch.
+
+### Songs (D9)
+
+Each source **is** a song: a name plus a tempo. Names are free-form and travel with the session, so a song can be ported between sessions by Save As / copy. New songs are numbered by default — **"Song 1"**, then "Song 2", … — created through a small prompt pre-filled with the next free name. The name is a label only; nothing keys off it.
+
+Later a song can grow past tempo — an ordered bank list, play order, chaining — as properties of the same named entry, with no change to this model.
+
+### Click volume
+
+Bank-level (confirmed): `SeqPattern::clickVolume`. The per-pad `metVol` stays in `PadSettings` for file compatibility and is superseded as the live value.
+
+### Tempo persistence — the Phase 2 work, in order
+
+**Current state:** the Metro and Tap controls exist on both the Rec and Seq tabs and drive one live tempo (`recBpmAtomic`); both BPM displays stay in sync. `SeqPattern::bpm` is serialised and round-trips, but **nothing writes it from the UI yet** — a tapped tempo is not remembered.
+
+1. **Session data.** Add `TempoSource { name, bpm }` and a `std::vector<TempoSource>` to `GjmManager`, plus `int tempoGroup = 0` on `GjmBank`. Serialise `<Tempos>` and the `tempoGroup` attribute. Default every bank to the default entry so old sessions load unchanged.
+2. **Resolve on switch.** In `switchGjmBank` (and kit/session load), resolve the incoming bank's source into the live tempo and fan it to both tabs via `SampleCard::setMetronomeBpm()`. Guard while a take is armed so a recording's tempo cannot shift underneath it.
+3. **Write on change.** Tap/tempo writes to the **resolved source** — a named entry's `bpm`, or the kit's `SeqPattern::bpm` when the bank is on "Kit". Mark the kit dirty only when it actually changes.
+4. **UI.** A tempo-source selector next to the BPM on the Seq toolbar: `Song 1 ▾` / `Song 2` / `Kit` / `+ New song…`. Choosing one assigns the bank. Tap affects whichever source the current bank uses — so tapping on a "Song 2" bank sets all three of that song's banks at once.
+5. **Manage sources.** Rename and delete. Keep a source alive when its last bank leaves it (names persist). Decide at build time whether deleting a source that still has banks reassigns them to the default or is refused.
 
 ---
 
@@ -281,7 +335,7 @@ Per bank, inside the bank's `.jai`, so a kit carries its groove (D2) and its sou
 |---|---|
 | **0** | `SeqPattern` model (self-contained tracks + per-track volume) + `.jai` round-trip. No UI. |
 | **1** | Seq tab shell: 5th tab, panel, waveform reclaimed, 16-row grid with row header (sample name + volume fader), snap combo, click-to-toggle, ruler. **Silent.** |
-| **2** | Resident sequencer pool: lazily-created FFT-less engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing + master volume. **Plus tempo persistence** (§8): tap/tempo writes `SeqPattern::bpm`, and bank switch / kit load restore it into the live metronome tempo. |
+| **2** | Resident sequencer pool: lazily-created FFT-less engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing + master volume. **Plus session tempo sources** (§8): `<Tempos>` + per-bank `tempoGroup` in the session, resolution on bank switch, tap writing the resolved source, and the tempo-source selector UI. |
 | **3** | Velocity editing (drag) + **Record mode** + Free mode + mode switching. |
 | **4** | Polish: bars/length, mute, copy/paste, swing, undo, quantise-now, "Update from pad", "playing: Bank N" indicator, unique-pad-note warning, optional global launch strip. |
 
@@ -300,7 +354,7 @@ Phases 0–2 give a working self-contained 16-track sequencer that survives bank
 - **Broken sample paths.** Self-contained tracks store a path; move the file and the track goes silent (same as pads today). Surface it in the row header (e.g. "missing").
 - **Duplicated settings in the `.jai`.** Each track repeats a subset of pad settings. Small, but the reader/writer must stay in sync with `PadSettings`'s attribute names.
 - **Two behaviours to document.** "Sound captured at record time" vs "live pad" is exactly the kind of thing that confuses later — the row header showing the *captured* name is the mitigation.
-- **Tempo migration.** Moving BPM to per-bank touches the existing Rec/pattern paths — do it in Phase 2, keeping `recBpmAtomic` mirrored while both features coexist.
+- **Tempo migration.** Moving BPM from the global `recBpmAtomic` to session tempo sources touches the Rec tab, the metronome and the bank-switch path. Do it in Phase 2 with `recBpmAtomic` kept as the live mirror, and make sure old sessions (no `<Tempos>`, no `tempoGroup`) resolve every bank to the default source — nothing should change until songs are created deliberately.
 
 ---
 
@@ -327,8 +381,8 @@ Phases 0–2 give a working self-contained 16-track sequencer that survives bank
 
 The metronome controls from the Rec tab were then mirrored onto the Seq tab (Metro toggle, volume slider and Tap tempo), with both tabs driving one shared tempo (commit `f966e3d`).
 
-**All decisions are closed (D1–D8). Next up is Phase 2**, which is two pieces of work that can land separately:
+**All decisions are closed (D1–D9). Next up is Phase 2**, which is two pieces that can land separately:
 
-1. **Tempo persistence** (§8) — the smaller, self-contained one. Tap/tempo writes `SeqPattern::bpm`; bank switch and kit load restore it into the live tempo.
+1. **Session tempo sources** (§8) — the smaller, self-contained one, and the foundation for songs. `Tempos` + per-bank `tempoGroup` in the session, resolution on bank switch, tap writing the resolved source, and the tempo-source selector with named songs (default "Song 1").
 2. **The resident playback pool** — the larger one: FFT-gated engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing. Start by gating `PadAudioEngine`'s FFT thread as an isolated change with its own build check.
 
