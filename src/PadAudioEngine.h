@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -99,9 +99,13 @@ public:
     //==========================================================================
     // Construction / destruction
 
-    explicit PadAudioEngine(juce::AudioFormatManager& fmt)
+    explicit PadAudioEngine(juce::AudioFormatManager& fmt, bool enableFft = true)
         : formatManager(fmt)
     {
+        // Sequencer-pool engines pass enableFft=false: they never display a
+        // spectrum, and the worker thread would otherwise be created per track.
+        fftEnabled = enableFft;
+
         for (int i = 0; i < 16; ++i)
             sampler.addVoice(new LoopingSamplerVoice());
         sampler.setNoteStealingEnabled(true);
@@ -139,13 +143,21 @@ public:
         fftAbstractFifo.reset();
         std::fill(std::begin(fftCircularBuffer), std::end(fftCircularBuffer), 0.0f);
 
+        // Reserve the per-block MIDI scratch so renderNextBlock never allocates.
+        shiftedMidi.ensureSize (1024);
+
         // Pre-compute flat EQ coefficients (used by Reset button — no math at click time)
         defaultFlatCoeffs[0] = computeEqCoeffs(100.0f,  0.0f, 1.0f, 2, sampleRate);
         defaultFlatCoeffs[1] = computeEqCoeffs(500.0f,  0.0f, 1.0f, 2, sampleRate);
         defaultFlatCoeffs[2] = computeEqCoeffs(8000.0f, 0.0f, 1.0f, 2, sampleRate);
 
-        fftThread = std::make_unique<FftWorkerThread>(*this);
-        fftThread->startThread();
+        // Sequencer-pool engines opt out: no spectrum is ever displayed for them,
+        // and one worker thread per track would be pure overhead.
+        if (fftEnabled)
+        {
+            fftThread = std::make_unique<FftWorkerThread>(*this);
+            fftThread->startThread();
+        }
     }
 
     void releaseResources() {}
@@ -177,8 +189,9 @@ public:
             juce::AudioBuffer<float> subBuf(ownBuffer.getArrayOfWritePointers(),
                                             nCh, 0, numSamples);
             // Use startSample=0 in subBuf — MIDI events reference absolute sample within block,
-            // so we need to pass the same midiMessages but shifted. Use an offset MidiBuffer view.
-            juce::MidiBuffer shiftedMidi;
+            // so we need to pass the same midiMessages but shifted. Reuse a member buffer:
+            // addEvent can allocate, and this now runs once per engine per audio block.
+            shiftedMidi.clear();
             for (const auto& meta : midiMessages)
             {
                 const int pos = meta.samplePosition - startSample;
@@ -252,6 +265,7 @@ public:
         }
 
         // ── Push THIS PAD'S audio to FFT (from ownBuffer, not the accumulated mix) ──
+        if (fftEnabled)
         {
             const int toWrite = juce::jmin(numSamples, fftAbstractFifo.getFreeSpace());
 
@@ -296,6 +310,26 @@ public:
     }
 
     void clearSoundsAndVoices() { sampler.clearSounds(); }
+
+    /** The decoded audio for the currently selected sample, or null.
+        Returned by shared_ptr rather than copied so callers (the sequencer pool)
+        can build their own sound from the same buffer with no duplicate RAM. */
+    std::shared_ptr<juce::AudioBuffer<float>> getSelectedAudioData() const
+    {
+        juce::ScopedLock lock (sampleLock);
+        if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size()) return {};
+        const auto* s = samples[selectedSampleIndex];
+        return s != nullptr ? s->audioData : nullptr;
+    }
+
+    /** Sample rate of the currently selected sample (0 if none). */
+    double getSelectedSampleRate() const
+    {
+        juce::ScopedLock lock (sampleLock);
+        if (selectedSampleIndex < 0 || selectedSampleIndex >= samples.size()) return 0.0;
+        const auto* s = samples[selectedSampleIndex];
+        return s != nullptr ? s->sampleRate : 0.0;
+    }
 
     void allNotesOff(int channel = 0, bool allowTailOff = false)
     {
@@ -746,6 +780,8 @@ private:
         PadAudioEngine& owner;
     };
     std::unique_ptr<FftWorkerThread> fftThread;
+    bool fftEnabled = true;   // false for sequencer-pool engines (see the ctor)
+    juce::MidiBuffer shiftedMidi;   // reused per block — keeps renderNextBlock allocation-free
 
     void processFftOnWorkerThread()
     {
