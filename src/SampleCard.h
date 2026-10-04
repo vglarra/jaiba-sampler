@@ -1275,6 +1275,14 @@ juce::TextButton::ConnectedOnRight);
         seqContent->onNewSongRequested    = [this] { if (onNewSongRequested)    onNewSongRequested(); };
         seqContent->onRenameSongRequested = [this] { if (onRenameSongRequested) onRenameSongRequested(); };
         seqContent->onDeleteSongRequested = [this] { if (onDeleteSongRequested) onDeleteSongRequested(); };
+
+        // Transport — the playback pool lives in MainComponent.
+        seqContent->onPlayRequested  = [this] { if (onSeqPlayRequested) onSeqPlayRequested(); };
+        seqContent->onStopRequested  = [this] { if (onSeqStopRequested) onSeqStopRequested(); };
+        seqContent->getPlayheadTicks = [this]
+        {
+            return getSeqPlayheadTicks ? getSeqPlayheadTicks() : -1.0;
+        };
         seqContent->setVisible(false);
         addAndMakeVisible(*seqContent);
 
@@ -5407,6 +5415,16 @@ public:
     {
         if (seqContent != nullptr)
             seqContent->setTempoInfo ({ names, currentGroup, locked });
+    }
+
+    // ---- Sequencer transport (playback pool lives in MainComponent) ----
+    std::function<void()>   onSeqPlayRequested;
+    std::function<void()>   onSeqStopRequested;
+    std::function<double()> getSeqPlayheadTicks;   // ticks, for the playhead column
+
+    void setSeqTransport (bool playing)
+    {
+        if (seqContent != nullptr) seqContent->setTransportState (playing);
     }
 
     // Switch Rec tab to G-pad transfer mode (or back to normal recording mode).

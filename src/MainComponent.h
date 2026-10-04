@@ -17,6 +17,7 @@
 #include "PadManager.h"
 #include "TrianglePadGrid.h"
 #include "GjmManager.h"
+#include "SequencerEngine.h"
 #include "GlobalLoopColumn.h"
 #include "LevelMeter.h"
 #include "FftVisualizerView.h"
@@ -257,6 +258,14 @@ private:
     void promptForNewSong ();
     void promptRenameSong ();
     void promptDeleteSong ();
+
+    // ---- Sequencer playback pool (D7) ---------------------------------------
+    void publishSeqPattern ();                   // snapshot the live pattern for the audio thread
+    bool captureTrackFromPad (int trackIdx);     // snapshot a pad's sound into a track
+    void reconcileTrackSounds ();                // adopt pad buffers for stored-but-unloaded tracks
+    void startSequencer ();
+    void stopSequencer ();
+
     void saveSessionAction (bool forceDialog);
     void loadSessionAction ();
     void saveBankKitAction (bool forceDialog);   // false = overwrite the bank's .jai, true = pick a new one
@@ -462,6 +471,10 @@ private:
     // Phase 2: PadManager owns all audio processing for all pads.
     // padManager must be declared AFTER formatManager (PadManager ctor takes a ref to it).
     PadManager padManager { formatManager };
+
+    // Resident playback pool for the Seq tab (D7).  Lives outside the bank swap,
+    // so a pattern keeps sounding while another bank is active.
+    SequencerEngine seqEngine { formatManager };
 
     // Convenience accessor — returns engine for the currently selected pad.
     // When a global loop pad is selected (padSelectionSource == Global), routes to

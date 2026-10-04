@@ -15,7 +15,8 @@
 //   [ fixed row header (150) ][ ruler                        ]
 //   [ fixed row header        ][ scrolling 16-row step grid   ]
 //==============================================================================
-class SeqControlPanel : public juce::Component
+class SeqControlPanel : public juce::Component,
+                        private juce::Timer
 {
 public:
     static constexpr int kRowH     = 14;
@@ -51,6 +52,11 @@ public:
     std::function<void ()>    onRenameSongRequested;
     std::function<void ()>    onDeleteSongRequested;
 
+    // Transport — the pool lives in MainComponent; the panel just drives it.
+    std::function<void ()>     onPlayRequested;
+    std::function<void ()>     onStopRequested;
+    std::function<double ()>   getPlayheadTicks;   // ticks, for the playhead column
+
     SeqControlPanel();
     ~SeqControlPanel() override = default;
 
@@ -69,6 +75,8 @@ public:
     void setMetronomeBpm (double bpm);
     /** Which tempo source this bank follows, and the names to offer. */
     void setTempoInfo (const TempoInfo& info);
+    /** Transport state from the pool: enables/disables Play/Stop and the playhead. */
+    void setTransportState (bool nowPlaying);
 
     void resized() override;
     void paint (juce::Graphics& g) override;
@@ -104,6 +112,12 @@ private:
         int stepAt (int x) const;
         /** Row under a y position, or -1. */
         int rowAt (int y) const;
+
+        /** Playhead in ticks (-1 = hidden).  Repaints only the affected columns. */
+        void setPlayheadTicks (double ticks);
+
+    private:
+        int playheadColumn = -1;
     };
 
     //==========================================================================
@@ -174,6 +188,8 @@ private:
     HeaderCanvas headerCanvas;
     Ruler        ruler;
 
+    void timerCallback() override;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SeqControlPanel)
 };
 
@@ -194,13 +210,15 @@ inline SeqControlPanel::SeqControlPanel()
     styleBtn (stopButton, juce::Colour (0xFFCC4444));
     styleBtn (recButton,  juce::Colour (0xFFCC4444));
 
-    // Phase 1: the shell shows the transport but playback arrives in Phase 2.
-    playButton.setEnabled (false);
-    stopButton.setEnabled (false);
+    // Phase 1 built the shell; playback is live now, recording is Phase 3.
+    stopButton.setEnabled (false);   // enabled while playing
     recButton .setEnabled (false);
-    playButton.setTooltip ("Sequencer playback arrives in Phase 2");
-    stopButton.setTooltip ("Sequencer playback arrives in Phase 2");
+    playButton.setTooltip ("Play the pattern");
+    stopButton.setTooltip ("Stop the pattern");
     recButton .setTooltip ("Step recording arrives in Phase 3");
+
+    playButton.onClick   = [this] { if (onPlayRequested) onPlayRequested(); };
+    stopButton.onClick   = [this] { if (onStopRequested) onStopRequested(); };
 
     for (auto* b : { &playButton, &stopButton, &recButton })
         addAndMakeVisible (*b);
@@ -435,6 +453,43 @@ inline void SeqControlPanel::setTempoInfo (const TempoInfo& info)
     songMenuButton.setEnabled (! info.locked);
 }
 
+inline void SeqControlPanel::setTransportState (bool nowPlaying)
+{
+    playButton.setEnabled (! nowPlaying);
+    stopButton.setEnabled (nowPlaying);
+
+    if (nowPlaying)
+    {
+        startTimerHz (30);   // playhead repaint
+    }
+    else
+    {
+        stopTimer();
+        gridCanvas.setPlayheadTicks (-1.0);
+    }
+}
+
+inline void SeqControlPanel::timerCallback()
+{
+    if (getPlayheadTicks)
+        gridCanvas.setPlayheadTicks (getPlayheadTicks());
+}
+
+inline void SeqControlPanel::GridCanvas::setPlayheadTicks (double ticks)
+{
+    const int col = (pattern != nullptr && ticks >= 0.0)
+                        ? (int) (ticks / (double) juce::jmax (1, pattern->ticksPerStep()))
+                        : -1;
+
+    if (col == playheadColumn) return;
+
+    // Repaint only the columns that change, not the whole grid.
+    const int h = getHeight();
+    if (playheadColumn >= 0) repaint (playheadColumn * kStepW, 0, kStepW, h);
+    playheadColumn = col;
+    if (playheadColumn >= 0) repaint (playheadColumn * kStepW, 0, kStepW, h);
+}
+
 inline void SeqControlPanel::handleTap()
 {
     tap.addTap (juce::Time::currentTimeMillis());
@@ -618,6 +673,16 @@ inline void SeqControlPanel::GridCanvas::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0xFF2E2E2E));
     for (int r = 1; r < SeqPattern::kTracks; ++r)
         g.drawHorizontalLine (r * kRowH, 0.0f, (float) width);
+
+    // Playhead column (drawn last so it reads over the cells).
+    if (playheadColumn >= 0 && playheadColumn < steps)
+    {
+        const int x = playheadColumn * kStepW;
+        g.setColour (juce::Colour (0x33FFFFFF));
+        g.fillRect (x, 0, kStepW, height);
+        g.setColour (juce::Colour (0xAAFFFFFF));
+        g.drawVerticalLine (x, 0.0f, (float) height);
+    }
 }
 
 inline void SeqControlPanel::GridCanvas::mouseDown (const juce::MouseEvent& e)

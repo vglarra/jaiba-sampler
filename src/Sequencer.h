@@ -137,6 +137,7 @@ struct SeqSound
     bool        hasSound  = false;
     int         sourcePad = 0;    // pad it came from — label/default only
     PadSettings settings;         // includes sampleFilePath; sound-relevant fields only
+    double      sampleRate = 44100.0;   // of the captured audio (runtime; rebuilt on load)
     std::shared_ptr<juce::AudioBuffer<float>> audio;
 
     juce::String name() const

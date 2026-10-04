@@ -497,7 +497,7 @@ MainComponent::MainComponent()
     // The tab edits the live per-bank pattern directly; every edit marks the
     // bank's kit dirty so the unsaved-changes asterisk appears.
     sampleCard.setSequencerData (&seqPattern, padManager.padSettings);
-    sampleCard.onSequenceEdited = [this] { markKitDirty(); };
+    sampleCard.onSequenceEdited = [this] { markKitDirty(); publishSeqPattern(); };
 
     // The Seq tab's Metro button needs the current tempo (recBpmAtomic for now;
     // Phase 2 promotes the tempo to the bank pattern).  Seed both tabs' metronome
@@ -520,6 +520,12 @@ MainComponent::MainComponent()
     sampleCard.onRenameSongRequested = [this] { promptRenameSong(); };
     sampleCard.onDeleteSongRequested = [this] { promptDeleteSong(); };
 
+    // Sequencer transport — the pool is resident, so playback survives bank switches.
+    sampleCard.onSeqPlayRequested  = [this] { startSequencer(); };
+    sampleCard.onSeqStopRequested  = [this] { stopSequencer(); };
+    sampleCard.getSeqPlayheadTicks = [this] { return seqEngine.playheadTicks(); };
+
+    publishSeqPattern();
     refreshSeqTempoUI();
 }
 
@@ -556,6 +562,9 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
 
     // Delegate all audio engine initialization (FFT, EQ, voices) to PadManager.
     padManager.prepareToPlay(samplesPerBlockExpected, sampleRate);
+
+    // Resident sequencer pool (FFT-less engines, lazily created per used track).
+    seqEngine.prepareToPlay(sampleRate, samplesPerBlockExpected);
 
     // Inform EQDisplay of the current sample rate so biquad response rendering is correct.
     sampleCard.setEqSampleRate(sampleRate);
@@ -609,6 +618,15 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     // Delegate all per-pad audio rendering + EQ + FFT + normGain + volumeGain to PadManager.
     // PadManager also applies master volume after mixing all pads.
     padManager.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
+
+    // ── Sequencer pool ────────────────────────────────────────────────────────
+    // Sample-accurate step playback from its own resident engines, so it keeps
+    // sounding across bank switches.  It applies master volume itself (the pad mix
+    // above already carries it), exactly like the metronome beep does.
+    seqEngine.processBlock (bufferToFill.numSamples,
+                            *bufferToFill.buffer,
+                            recBpmAtomic.load (std::memory_order_relaxed),
+                            padManager.getMasterVolume());
 
     // ── Live output capture — tap master mix into WAV while pattern plays ─────
     if (liveRenderActive.load (std::memory_order_acquire))
@@ -797,6 +815,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
 
 void MainComponent::releaseResources()
 {
+    seqEngine.releaseResources();
 }
 
 //==============================================================================
@@ -2300,6 +2319,7 @@ void MainComponent::loadKitFromFile (const juce::File& file)
     sampleCard.refreshSequencer();   // show the freshly-loaded pattern on the Seq tab
     applyActiveTempo();              // the kit's own tempo may have changed
     refreshSeqTempoUI();
+    publishSeqPattern();
 
     // Refresh the bank label (kit name may have just changed).
     updateGjmUI();
@@ -2394,6 +2414,8 @@ void MainComponent::clearAllPadsForNewKit()
     sampleCard.refreshSequencer();
     applyActiveTempo();
     refreshSeqTempoUI();
+    stopSequencer();
+    publishSeqPattern();
     updateGjmUI();
 
     sampleCard.showTrimToast ("New session started", false);
@@ -2736,6 +2758,7 @@ void MainComponent::switchGjmBank (int bankIdx)
     // The new bank may follow a different tempo source (D4/D9).
     applyActiveTempo();
     refreshSeqTempoUI();
+    publishSeqPattern();   // the pool plays the new bank's pattern
 
     // Sync MNFreeze atomics so MIDI intercept reflects the new bank instantly
     for (int i = 0; i < PadManager::kMaxPads; ++i)
@@ -5117,6 +5140,114 @@ void MainComponent::promptDeleteSong()
         });
 }
 
+//==============================================================================
+// Sequencer playback pool (D7)
+//
+// The audio thread reads an immutable snapshot published here, so pattern edits
+// never block it.  Track sounds live in resident engines outside the bank swap.
+//==============================================================================
+
+void MainComponent::publishSeqPattern()
+{
+    // A track with steps but no sound yet captures its pad on first use (D7:
+    // tracks own their sound).  Skipped for pads with nothing loaded, so an edit
+    // never force-creates engines for empty pads.
+    for (int t = 0; t < SeqPattern::kTracks; ++t)
+    {
+        auto& tr = seqPattern.tracks[(size_t) t];
+        if (! tr.hits.empty() && ! tr.sound.hasSound
+            && padManager.padSettings[t].sampleFilePath.isNotEmpty())
+            captureTrackFromPad (t);
+    }
+
+    // Copy the live pattern into an immutable snapshot for the audio thread, and
+    // push the per-track mixer levels alongside it.
+    seqEngine.setPattern (std::make_shared<SeqPattern> (seqPattern));
+
+    for (int t = 0; t < SeqPattern::kTracks; ++t)
+        seqEngine.setTrackVolume (t, seqPattern.tracks[(size_t) t].volume);
+}
+
+// Snapshot a pad's sound (path + settings + a SHARED reference to its decoded
+// buffer) into a track, so the pattern keeps playing what it was recorded with.
+bool MainComponent::captureTrackFromPad (int trackIdx)
+{
+    if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return false;
+
+    auto& tr        = seqPattern.tracks[(size_t) trackIdx];
+    auto& padEngine = padManager.getEngine (trackIdx);
+    const auto& ps  = padManager.padSettings[trackIdx];
+
+    auto audio = padEngine.getSelectedAudioData();
+    if (audio == nullptr || ps.sampleFilePath.isEmpty())
+        return false;
+
+    tr.sound.hasSound   = true;
+    tr.sound.sourcePad  = trackIdx;
+    tr.sound.settings   = ps;
+    tr.sound.sampleRate = padEngine.getSelectedSampleRate();
+
+    // This is a *sound* snapshot: drop the per-pad UI/routing data so a kit file
+    // never duplicates saved patterns, MIDI routing, zoom or the active tab.
+    tr.sound.settings.savedPatterns.clear();
+    tr.sound.settings.midiDevice.clear();
+    tr.sound.settings.zoomLevel          = 1.0;
+    tr.sound.settings.zoomScrollPosition = 0.0f;
+    tr.sound.settings.activeTab          = 0;
+    tr.sound.settings.sampleFilePath     = ps.sampleFilePath;
+
+    tr.sound.audio = std::move (audio);
+
+    seqEngine.setTrackSound (trackIdx, tr.sound);
+    return true;
+}
+
+// A stored track sound has no buffer after a session load.  Adopt the pad's
+// decoded buffer when it is the same file — that avoids re-reading disk, and the
+// pads are preloaded anyway whenever a bank becomes active.
+void MainComponent::reconcileTrackSounds()
+{
+    for (int t = 0; t < SeqPattern::kTracks; ++t)
+    {
+        auto& tr = seqPattern.tracks[(size_t) t];
+        if (! tr.sound.hasSound)
+            continue;
+
+        if (tr.sound.audio != nullptr)
+        {
+            seqEngine.setTrackSound (t, tr.sound);   // already captured this session
+            continue;
+        }
+
+        auto& padEngine = padManager.getEngine (t);
+        auto  audio     = padEngine.getSelectedAudioData();
+
+        if (audio != nullptr
+            && padManager.padSettings[t].sampleFilePath == tr.sound.settings.sampleFilePath)
+        {
+            tr.sound.audio      = std::move (audio);
+            tr.sound.sampleRate = padEngine.getSelectedSampleRate();
+            seqEngine.setTrackSound (t, tr.sound);
+        }
+    }
+}
+
+void MainComponent::startSequencer()
+{
+    reconcileTrackSounds();
+    publishSeqPattern();
+    seqEngine.start();
+    sampleCard.setSeqTransport (true);
+
+    sampleCard.showTrimToast ("Seq: playing", false);
+}
+
+void MainComponent::stopSequencer()
+{
+    seqEngine.stop();
+    sampleCard.setSeqTransport (false);
+}
+
 void MainComponent::playbackQuantisedEvents()
 {
     printf ("[REC] playbackQuantisedEvents — %d events\n", (int)recQuantised.size());
@@ -6010,6 +6141,8 @@ void MainComponent::loadLastSession()
     sampleCard.refreshSequencer();
     applyActiveTempo();
     refreshSeqTempoUI();
+    stopSequencer();
+    publishSeqPattern();
     globalControlsBar.setBankIndex (1);
     globalControlsBar.setMaxBank (GjmManager::kNumBanks);
     updateGjmUI();

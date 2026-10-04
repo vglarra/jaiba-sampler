@@ -29,6 +29,7 @@ target_sources(JaibaSampler
         src/MidiActivityLight.h
         src/Sequencer.h
         src/SequencerGrid.h
+        src/SequencerEngine.h
 )
 
 # Link required JUCE modules
