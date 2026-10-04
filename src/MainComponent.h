@@ -764,6 +764,7 @@ private:
     std::atomic<double>  recSongBeatPos      { 0.0   };  // shared beat clock
     std::atomic<double>  recBpmAtomic        { 120.0 };  // BPM for beat clock + metro
     std::atomic<bool>    syncClickToSeq      { true  };  // lock the click to the sequencer's playhead
+    std::atomic<bool>    seqStartPending     { false };  // armed: start on the next click beat
     std::atomic<int64_t> recBeatSampleOffset { 0 };      // WAV samples before beat 0
 
     // Message-thread-only parameters (written before arming)
@@ -775,6 +776,7 @@ private:
     int    recLastBeat       = -1;
     int    recMetroBeepLeft  = 0;
     double recMetroBeepPhase = 0.0;
+    double recMetroBeepFreq  = 1000.0;   // accented (higher) on the bar's first beat
 
     // Message-thread-only event storage
     std::vector<RecordedEvent> recEvents;

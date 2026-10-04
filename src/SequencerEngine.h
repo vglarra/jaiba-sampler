@@ -56,6 +56,20 @@ public:
 
     void start();
     void stop();
+
+    /** Begin playing with the tick playhead pre-offset: a negative value means the
+        pattern's tick 0 is that many ticks away, so the run starts mid-block on an
+        exact sample.  Audio thread only (used to drop in on a click beat). */
+    void beginPlaybackAt (double ticks)
+    {
+        playheadPos = ticks;
+        playheadUI.store (juce::jmax (0.0, ticks), std::memory_order_relaxed);
+
+        for (auto& m : trackMidi) m.clear();
+        for (auto& a : activeNote) a = -1;
+
+        playing.store (true, std::memory_order_relaxed);
+    }
     bool isPlaying() const { return playing.load (std::memory_order_relaxed); }
     double playheadTicks() const { return playheadUI.load (std::memory_order_relaxed); }
 
@@ -469,5 +483,5 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
     while (playheadPos >= totalTks)
         playheadPos -= totalTks;
 
-    playheadUI.store (playheadPos, std::memory_order_relaxed);
+    playheadUI.store (juce::jmax (0.0, playheadPos), std::memory_order_relaxed);
 }

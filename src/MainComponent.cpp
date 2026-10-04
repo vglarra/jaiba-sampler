@@ -623,15 +623,6 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
     // PadManager also applies master volume after mixing all pads.
     padManager.renderNextBlock(*bufferToFill.buffer, midiMessages, 0, bufferToFill.numSamples);
 
-    // ── Sequencer pool ────────────────────────────────────────────────────────
-    // Sample-accurate step playback from its own resident engines, so it keeps
-    // sounding across bank switches.  It applies master volume itself (the pad mix
-    // above already carries it), exactly like the metronome beep does.
-    seqEngine.processBlock (bufferToFill.numSamples,
-                            *bufferToFill.buffer,
-                            recBpmAtomic.load (std::memory_order_relaxed),
-                            padManager.getMasterVolume());
-
     // ── Live output capture — tap master mix into WAV while pattern plays ─────
     if (liveRenderActive.load (std::memory_order_acquire))
     {
@@ -703,16 +694,43 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                     recSongBeatPos.store (newBeat, std::memory_order_relaxed);
                 }
 
-                // ── Metronome beep trigger ────────────────────────────────────
-                if (recMetronomeOn.load (std::memory_order_relaxed))
+                // ── Beat boundary ─────────────────────────────────────────────
+                // Tracked even while the click is silent, so switching the metronome
+                // on mid-beat waits for the next beat instead of firing at once.
                 {
-                    const double beat   = recSongBeatPos.load (std::memory_order_relaxed);
-                    const int beatInt   = (int)std::floor (beat);
+                    const double beat = recSongBeatPos.load (std::memory_order_relaxed);
+                    const int beatInt = (int) std::floor (beat);
+
                     if (beatInt > recLastBeat)
                     {
-                        recLastBeat       = beatInt;
-                        recMetroBeepLeft  = (int)(sr * 0.020);  // 20ms burst
-                        recMetroBeepPhase = 0.0;
+                        recLastBeat = beatInt;
+
+                        // An armed Play (sync on, click already running) drops the
+                        // pattern in on exactly this beat: work out where inside the
+                        // block the boundary fell and pre-offset the playhead.
+                        if (seqStartPending.exchange (false, std::memory_order_acq_rel))
+                        {
+                            const double frac = delta > 0.0
+                                ? juce::jlimit (0.0, 1.0, ((double) beatInt - oldBeat) / delta)
+                                : 0.0;
+                            const int k = juce::jlimit (0, juce::jmax (0, bufferToFill.numSamples - 1),
+                                                        (int) std::round (frac * (double) bufferToFill.numSamples));
+
+                            const double bpmNow = juce::jlimit (20.0, 300.0,
+                                                recBpmAtomic.load (std::memory_order_relaxed));
+                            const double seqPpq = (double) juce::jmax (1, seqEngine.patternPpq());
+                            const double tps    = bpmNow / 60.0 * seqPpq / sr;
+
+                            seqEngine.beginPlaybackAt (-(double) k * tps);
+                        }
+
+                        if (recMetronomeOn.load (std::memory_order_relaxed))
+                        {
+                            recMetroBeepLeft  = (int)(sr * 0.020);  // 20ms burst
+                            recMetroBeepPhase = 0.0;
+                            // Accent the first beat of each 4/4 bar.
+                            recMetroBeepFreq  = (beatInt % 4 == 0) ? 1568.0 : 1046.5;
+                        }
                     }
                 }
             }
@@ -720,7 +738,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
             // Mix metronome beep (finishes even after clock stops)
             if (recMetroBeepLeft > 0)
             {
-                const double phaseInc = juce::MathConstants<double>::twoPi * 1000.0 / sr;
+                const double phaseInc = juce::MathConstants<double>::twoPi * recMetroBeepFreq / sr;
                 const int n  = juce::jmin (recMetroBeepLeft, bufferToFill.numSamples);
                 const float mv  = padManager.getMasterVolume();
                 const float vol = metronomeVolume.load (std::memory_order_relaxed);
@@ -741,8 +759,23 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& buffer
                     recMetroBeepPhase -= juce::MathConstants<double>::twoPi;
                 recMetroBeepLeft -= n;
             }
+
+            // A start armed while the click was running must not hang if the click
+            // stops before the next beat arrives.
+            if (! clockOn && seqStartPending.exchange (false, std::memory_order_acq_rel))
+                seqEngine.beginPlaybackAt (0.0);
         }
     }
+
+    // ── Sequencer pool ────────────────────────────────────────────────────────
+    // Rendered after the beat clock so an armed start can drop in mid-block.
+    // Sample-accurate step playback from its own resident engines, so it keeps
+    // sounding across bank switches.  It applies master volume itself (the pad mix
+    // above already carries it), exactly like the metronome beep does.
+    seqEngine.processBlock (bufferToFill.numSamples,
+                            *bufferToFill.buffer,
+                            recBpmAtomic.load (std::memory_order_relaxed),
+                            padManager.getMasterVolume());
 
     if (sineWaveActive)
     {
@@ -5260,6 +5293,21 @@ void MainComponent::startSequencer()
 {
     reconcileTrackSounds();
     publishSeqPattern();
+
+    // With sync on and the click already running, drop the pattern in on the next
+    // beat rather than starting mid-click (the audio thread completes the start).
+    const bool clickRunning = metronomeStandalone.load (std::memory_order_relaxed)
+                           && ! recIsActive.load    (std::memory_order_relaxed)
+                           && ! recWaitForBeat.load (std::memory_order_relaxed);
+
+    if (syncClickToSeq.load (std::memory_order_relaxed) && clickRunning)
+    {
+        seqStartPending.store (true, std::memory_order_release);
+        sampleCard.setSeqTransport (true);   // Stop stays available to cancel
+        sampleCard.showTrimToast ("Seq: waiting for the click...", false);
+        return;
+    }
+
     seqEngine.start();
     sampleCard.setSeqTransport (true);
 
@@ -5268,6 +5316,7 @@ void MainComponent::startSequencer()
 
 void MainComponent::stopSequencer()
 {
+    seqStartPending.store (false, std::memory_order_release);
     seqEngine.stop();
     sampleCard.setSeqTransport (false);
 }

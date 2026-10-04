@@ -181,6 +181,7 @@ private:
 
     // Session options: click phase sync + the sequencer's master level.
     juce::TextButton syncButton { "Sync" };
+    juce::Label      seqVolumeLabel;
     juce::Slider     seqVolumeSlider;
 
     static constexpr int kNewSongId = 1000;
@@ -390,7 +391,16 @@ inline SeqControlPanel::SeqControlPanel()
     };
     addAndMakeVisible (syncButton);
 
-    // ---- Sequencer master level ----
+    // ---- Sequencer master level (boxed label, same look as the song box) ----
+    seqVolumeLabel.setText ("Seq Vol", juce::dontSendNotification);
+    seqVolumeLabel.setJustificationType (juce::Justification::centred);
+    seqVolumeLabel.setFont (juce::Font (juce::FontOptions (10.0f)));
+    seqVolumeLabel.setColour (juce::Label::backgroundColourId,  juce::Colour (0xFF2A2A2A));
+    seqVolumeLabel.setColour (juce::Label::outlineColourId,     juce::Colour (0xFF555555));
+    seqVolumeLabel.setColour (juce::Label::textColourId,        juce::Colour (0xFFCECECE));
+    seqVolumeLabel.setTooltip ("Sequencer master level (balances Seq against the pads)");
+    addAndMakeVisible (seqVolumeLabel);
+
     seqVolumeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     seqVolumeSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
     seqVolumeSlider.setRange (0.0, 1.0, 0.01);
@@ -613,6 +623,8 @@ inline void SeqControlPanel::resized()
         bar.removeFromLeft (8);
         syncButton.setBounds (bar.removeFromLeft (40).reduced (1));
         bar.removeFromLeft (8);
+        seqVolumeLabel.setBounds (bar.removeFromLeft (52).reduced (0, 3));
+        bar.removeFromLeft (4);
         seqVolumeSlider.setBounds (bar.removeFromLeft (90).reduced (0, 3));
     }
 
