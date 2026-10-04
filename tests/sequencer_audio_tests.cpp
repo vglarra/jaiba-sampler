@@ -50,7 +50,8 @@ int main()
     for (int i = 0; i < 2000; ++i)
         shortBuf->setSample (0, i, 1.0f);
 
-    auto makeSound = [] (std::shared_ptr<juce::AudioBuffer<float>> buf, double rate)
+    auto makeSound = [] (std::shared_ptr<juce::AudioBuffer<float>> buf, double rate,
+                         bool oneShot = true)
     {
         SeqSound s;
         s.hasSound                  = true;
@@ -59,7 +60,7 @@ int main()
         s.audio                     = std::move (buf);
         s.settings.sampleFilePath   = "/tmp/seqtest-kick.wav";
         s.settings.midiNote         = 60;
-        s.settings.oneShotEnabled   = true;
+        s.settings.oneShotEnabled   = oneShot;
         s.settings.volumeLevel      = 1.0f;
         s.settings.startPointSeconds = 0.0;
         s.settings.endPointSeconds   = -1.0;
@@ -261,6 +262,50 @@ int main()
             onTheBeat = std::llabs (onsets[k] - (long long) k * beat) <= 2;
 
         check (onTheBeat, "each beat lands on its own exact sample");
+    }
+
+    //==========================================================================
+    // Step gate: a step is a DURATION, not just a trigger
+    //==========================================================================
+    {
+        // lastAudibleSample runs `blocks` blocks and reports the final audible frame.
+        auto lastAudibleSample = [&] (int blocks) -> long long
+        {
+            long long last = -1;
+            juce::AudioBuffer<float> m (2, block);
+
+            for (int b = 0; b < blocks; ++b)
+            {
+                m.clear();
+                seq.processBlock (block, m, 120.0, 1.0);
+                for (int i = 0; i < block; ++i)
+                    if (std::abs (m.getSample (0, i)) > 0.001f)
+                        last = (long long) b * block + i;
+            }
+            return last;
+        };
+
+        // A 1/16 step at 120 BPM is 240 ticks = 6000 samples.
+        // oneShot OFF: the note is released at the step's end, so a 1-second sample
+        // is cut off around 6000 samples plus its release tail -- not left ringing.
+        seq.stop();
+        seq.setTrackSound (0, makeSound (longBuf, sr, /*oneShot=*/false));
+        seq.setPattern (makePattern ({ 0 }));
+        seq.start();
+
+        const long long gatedEnd = lastAudibleSample (40);   // 20480 samples of run
+        check (gatedEnd > 5000, "a gated sample is held for at least its step");
+        check (gatedEnd < 15000,
+               "a gated sample is released at the end of its step, not played as a one-shot");
+
+        // oneShot ON: the same sample ignores the release and rings to its end.
+        seq.stop();
+        seq.setTrackSound (0, makeSound (longBuf, sr, /*oneShot=*/true));
+        seq.start();
+
+        const long long oneShotEnd = lastAudibleSample (200);   // past the 1 s sample
+        check (oneShotEnd > 40000,
+               "a sample configured as OneShot rings past its step, to the end");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",

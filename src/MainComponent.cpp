@@ -4174,6 +4174,10 @@ void MainComponent::endPointChanged(double endPointSeconds)
 
 void MainComponent::loopEnabledChanged(bool isLooping)
 {
+    refreshSeqTrackGateFlags (padManager.selectedPadIndex,
+                              padManager.padSettings[padManager.selectedPadIndex].oneShotEnabled,
+                              isLooping);
+
     pad().loopEnabled.store(isLooping);
 
     // Update the flag on all currently loaded sounds — no rebuild needed
@@ -4376,6 +4380,9 @@ void MainComponent::oneShotEnabledChanged(bool enabled)
     for (int i = 0; i < pad().getSynthesiser().getNumSounds(); ++i)
         if (auto* sound = dynamic_cast<LoopingSamplerSound*>(pad().getSynthesiser().getSound(i).get()))
             sound->oneShotEnabled.store(enabled);
+
+    refreshSeqTrackGateFlags (padManager.selectedPadIndex, enabled,
+                              padManager.padSettings[padManager.selectedPadIndex].loopEnabled);
 
     // If oneshot is being turned off, cancel any running tail poll.
     if (!enabled && isOneShotTailPlaying)
@@ -5493,6 +5500,27 @@ void MainComponent::applyClickSettings()
 // snap, track levels, captured sounds).  If the transport was running it goes back
 // to the top and plays again, so a bad take can be scrapped and retaken in one
 // click without losing the groove you set up.
+// The Control panel's OneShot / Loop toggles are the user's statement of how a
+// sample should be played, so a sequencer track captured from that pad follows
+// them live -- otherwise a track would keep behaving the way it was configured
+// when it was first recorded.
+void MainComponent::refreshSeqTrackGateFlags (int padIndex, bool oneShot, bool loop)
+{
+    if (padIndex < 0 || padIndex >= SeqPattern::kTracks) return;
+
+    for (int t = 0; t < SeqPattern::kTracks; ++t)
+    {
+        auto& tr = seqPattern.tracks[(size_t) t];
+
+        if (! tr.sound.hasSound || tr.sound.sourcePad != padIndex)
+            continue;
+
+        tr.sound.settings.oneShotEnabled = oneShot;
+        tr.sound.settings.loopEnabled    = loop;
+        seqEngine.setTrackGateFlags (t, oneShot, loop);
+    }
+}
+
 void MainComponent::eraseSequencerHitsAction()
 {
     juce::AlertWindow::showAsync (

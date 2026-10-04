@@ -47,6 +47,27 @@ public:
     /** Live per-track mixer level (0-1), layered over the captured volume. */
     void setTrackVolume (int trackIdx, float volume);
 
+    /** Live-update an installed track's gate flags from the Control panel's
+        OneShot / Loop toggles, without rebuilding the sound.  A one-shot voice
+        ignores the note-off the step gate emits, so the sample rings past its step;
+        everything else is released at the end of the step. */
+    void setTrackGateFlags (int trackIdx, bool oneShot, bool loop)
+    {
+        if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return;
+
+        auto& slot = trackEngines[(size_t) trackIdx];
+        if (slot == nullptr) return;
+
+        if (auto* snd = dynamic_cast<LoopingSamplerSound*> (
+                            slot->getSynthesiser().getSound (0).get()))
+        {
+            snd->oneShotEnabled.store (oneShot);
+            snd->loopEnabled.store (loop);
+        }
+
+        slot->loopEnabled.store (loop);
+    }
+
     /** Master level for the whole pool (0-1), for balancing Seq against the pads. */
     void setMasterVolume (float volume) { masterVolume.store (juce::jlimit (0.0f, 1.0f, volume)); }
     float getMasterVolume() const { return masterVolume.load(); }
@@ -70,6 +91,7 @@ public:
 
         for (auto& m : trackMidi) m.clear();
         for (auto& a : activeNote) a = -1;
+        for (auto& g : gateCountdown) g = -1;
 
         playing.store (true, std::memory_order_relaxed);
     }
@@ -82,7 +104,8 @@ public:
 
 private:
     PadAudioEngine& getOrCreateEngine (int trackIdx);
-    void triggerTrack (int trackIdx, int offset, float velocity);
+    void triggerTrack (int trackIdx, int offset, float velocity,
+                       int gateSamples, int numSamples);
     void updateTrackGain (int trackIdx);
     void silenceAllVoices();
 
@@ -92,6 +115,12 @@ private:
     std::array<juce::MidiBuffer, SeqPattern::kTracks> trackMidi;
     std::array<int,   SeqPattern::kTracks> trackNote  {};   // trigger note per track
     std::array<int,   SeqPattern::kTracks> activeNote {};   // -1 = nothing sounding
+
+    // Step gate: a hit is released at the end of its step.  Countdown is measured
+    // from the end of the current block so it can be carried across blocks;
+    // -1 means no note is waiting to be released.
+    std::array<int,   SeqPattern::kTracks> gateCountdown {};
+    std::array<int,   SeqPattern::kTracks> gateNote      {};
     std::array<float, SeqPattern::kTracks> trackLevel {};   // mixer fader
     std::array<float, SeqPattern::kTracks> soundLevel {};   // captured settings' volume
 
@@ -119,6 +148,8 @@ inline void SequencerEngine::prepareToPlay (double newSampleRate, int blockSize)
     sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
 
     activeNote.fill (-1);
+    gateCountdown.fill (-1);
+    gateNote  .fill (60);
     trackNote .fill (60);
     trackLevel.fill (1.0f);
     soundLevel.fill (1.0f);
@@ -355,7 +386,8 @@ inline void SequencerEngine::silenceAllVoices()
 {
     for (int t = 0; t < SeqPattern::kTracks; ++t)
     {
-        activeNote[(size_t) t] = -1;
+        activeNote[(size_t) t]   = -1;
+        gateCountdown[(size_t) t] = -1;
         if (auto& e = trackEngines[(size_t) t])
             e->forceStopAllVoices();   // one-shots ignore note-off, so hard-stop
     }
@@ -369,7 +401,10 @@ inline void SequencerEngine::start()
     playheadUI.store (0.0, std::memory_order_relaxed);
 
     for (int t = 0; t < SeqPattern::kTracks; ++t)
+    {
         trackMidi[(size_t) t].clear();
+        gateCountdown[(size_t) t] = -1;
+    }
 
     playing.store (true, std::memory_order_relaxed);
 }
@@ -385,21 +420,40 @@ inline void SequencerEngine::stop()
     silenceAllVoices();
 }
 
-inline void SequencerEngine::triggerTrack (int trackIdx, int offset, float velocity)
+// One hit = one note held for the length of its step, then released.  That is what
+// makes a step a *duration*: a gated sample is cut at the step boundary, while a
+// sample configured as OneShot ignores the release and rings on to its end -- the
+// Control panel's setting, honoured here rather than assumed.
+inline void SequencerEngine::triggerTrack (int trackIdx, int offset, float velocity,
+                                           int gateSamples, int numSamples)
 {
-    auto& buf = trackMidi[(size_t) trackIdx];
+    auto& buf  = trackMidi[(size_t) trackIdx];
     const int note = trackNote[(size_t) trackIdx];
+    const auto& idx = (size_t) trackIdx;
 
-    // Off-at-next-hit: retriggering a track releases the previous note first, so
-    // loops can't stack up and nothing is left hanging.
-    const int prev = activeNote[(size_t) trackIdx];
-    if (prev >= 0)
-        buf.addEvent (juce::MidiMessage::noteOff (1, prev), offset);
+    // Retrigger: anything still held (or still waiting to be released) is let go
+    // first, so notes cannot stack up or be cut by a stale gate.
+    if (activeNote[idx] >= 0 || gateCountdown[idx] >= 0)
+        buf.addEvent (juce::MidiMessage::noteOff (1, note), offset);
 
     buf.addEvent (juce::MidiMessage::noteOn (1, note,
                                              juce::jlimit (0.01f, 1.0f, velocity)),
                   offset);
-    activeNote[(size_t) trackIdx] = note;
+    activeNote[idx] = note;
+
+    const int offAt = offset + juce::jmax (1, gateSamples);
+
+    if (offAt < numSamples)
+    {
+        buf.addEvent (juce::MidiMessage::noteOff (1, note), offAt);
+        activeNote[idx]   = -1;
+        gateCountdown[idx] = -1;
+    }
+    else
+    {
+        gateNote[idx]      = note;
+        gateCountdown[idx] = offAt - numSamples;   // carried into later blocks
+    }
 }
 
 //==============================================================================
@@ -433,6 +487,30 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
     for (auto& m : trackMidi)
         m.clear();
 
+    // Release notes whose step has ended.  Done before the new hits are emitted so
+    // that a note-off and a note-on landing on the same sample stay in that order.
+    const int gateSamples = juce::jmax (1, (int) std::llround (
+                                (double) juce::jmax (1, snap->ticksPerStep())
+                                / juce::jmax (1.0e-9, ticksPerSample)));
+
+    for (int t = 0; t < SeqPattern::kTracks; ++t)
+    {
+        auto& left = gateCountdown[(size_t) t];
+        if (left < 0) continue;
+
+        if (left < numSamples)
+        {
+            trackMidi[(size_t) t].addEvent (juce::MidiMessage::noteOff (1, gateNote[(size_t) t]),
+                                            juce::jlimit (0, numSamples - 1, left));
+            activeNote[(size_t) t] = -1;
+            left = -1;
+        }
+        else
+        {
+            left -= numSamples;
+        }
+    }
+
     // Collect this block's hits, wrapping at the pattern end if it crosses.
     auto emitRange = [&] (double from, double to, double virtualBase)
     {
@@ -450,7 +528,7 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
                 int offset = (int) std::floor ((vTick - blockStart) / ticksPerSample);
                 offset = juce::jlimit (0, juce::jmax (0, numSamples - 1), offset);
 
-                triggerTrack (t, offset, h.velocity);
+                triggerTrack (t, offset, h.velocity, gateSamples, numSamples);
             }
         }
     };
