@@ -125,6 +125,17 @@ private:
         /** Playhead in ticks (-1 = hidden).  Repaints only the affected columns. */
         void setPlayheadTicks (double ticks);
 
+        /** Columns to draw: the loop, plus any dimmed columns holding hits that
+            were kept when the signature shortened the bar. */
+        int visibleSteps() const
+        {
+            if (pattern == nullptr) return 0;
+
+            return juce::jmax (pattern->totalSteps(),
+                               juce::jmin (pattern->displaySteps(),
+                                           pattern->totalSteps() + kMaxGhostSteps));
+        }
+
     private:
         int playheadColumn = -1;
     };
@@ -260,6 +271,10 @@ private:
     }
 
     static constexpr int kNewSongId = 1000;
+
+    /** Cap on dimmed overhang columns, so a stray far-off hit cannot make the
+        canvas absurdly wide. */
+    static constexpr int kMaxGhostSteps = 64;
 
     // Metronome — same controls as the Rec tab.
     juce::TextButton metronomeButton { "Metro" };
@@ -783,7 +798,7 @@ inline void SeqControlPanel::resized()
 
     if (pattern != nullptr)
     {
-        const int w = juce::jmax (1, pattern->totalSteps()) * kStepW;
+        const int w = juce::jmax (1, gridCanvas.visibleSteps()) * kStepW;
         const int h = SeqPattern::kTracks * kRowH;
         gridCanvas.setSize (w, h);
     }
@@ -820,9 +835,11 @@ inline void SeqControlPanel::GridCanvas::paint (juce::Graphics& g)
     if (pattern == nullptr) return;
 
     const int steps  = pattern->totalSteps();
+    const int shown  = juce::jmax (steps, visibleSteps());
     const int tps    = juce::jmax (1, pattern->ticksPerStep());
     const int spb    = juce::jmax (1, pattern->stepsPerBar());
-    const int width  = steps * kStepW;
+    const int width  = shown * kStepW;
+    const int loopW  = steps * kStepW;
     const int height = SeqPattern::kTracks * kRowH;
 
     g.fillAll (juce::Colour (0xFF1B1B1B));
@@ -832,39 +849,68 @@ inline void SeqControlPanel::GridCanvas::paint (juce::Graphics& g)
     {
         const int y = r * kRowH;
         g.setColour ((r % 2) ? juce::Colour (0xFF202020) : juce::Colour (0xFF252525));
-        g.fillRect (0, y, width, kRowH);
+        g.fillRect (0, y, loopW, kRowH);
+
+        // Dimmed overhang: hits kept here are stored but outside the loop.
+        if (shown > steps)
+        {
+            g.setColour (juce::Colour (0xFF141414));
+            g.fillRect (loopW, y, width - loopW, kRowH);
+        }
 
         const auto& tr = pattern->tracks[r];
         for (const auto& h : tr.hits)
         {
             if (h.tick < 0) continue;
             const int s = h.tick / tps;
-            if (s < 0 || s >= steps) continue;
+            if (s < 0 || s >= shown) continue;
 
             const float v = juce::jlimit (0.0f, 1.0f, h.velocity);
             const float bright = 0.35f + 0.65f * v;
             auto col = juce::Colour (0xFF00CF7F).withMultipliedBrightness (bright);
             if (tr.mute) col = col.withSaturation (0.15f);
 
-            g.setColour (col);
-            g.fillRoundedRectangle (juce::Rectangle<float> (
+            const auto cell = juce::Rectangle<float> (
                 (float) (s * kStepW + 1), (float) (y + 1),
-                (float) (kStepW - 2), (float) (kRowH - 2)), 2.0f);
+                (float) (kStepW - 2), (float) (kRowH - 2));
+
+            if (s < steps)
+            {
+                g.setColour (col);
+                g.fillRoundedRectangle (cell, 2.0f);
+            }
+            else
+            {
+                // Outside the loop: hollow and dim, so it cannot be mistaken for a
+                // note that is playing.  Switching the signature back revives it.
+                g.setColour (col.withAlpha (0.28f));
+                g.fillRoundedRectangle (cell, 2.0f);
+                g.setColour (col.withAlpha (0.70f));
+                g.drawRoundedRectangle (cell, 2.0f, 1.0f);
+            }
         }
     }
 
     // Vertical lines: bar (bright), beat (medium).
-    for (int s = 0; s <= steps; ++s)
+    for (int s = 0; s <= shown; ++s)
     {
         const int x = s * kStepW;
         const bool isBar  = (s % spb) == 0;
         const bool isBeat = (s % juce::jmax (1, spb / 4)) == 0;
 
-        if (isBar)       g.setColour (juce::Colour (0xFF5A5A5A));
-        else if (isBeat) g.setColour (juce::Colour (0xFF3E3E3E));
-        else             g.setColour (juce::Colour (0xFF2E2E2E));
+        if (s > steps)        g.setColour (juce::Colour (0xFF232323));
+        else if (isBar)       g.setColour (juce::Colour (0xFF5A5A5A));
+        else if (isBeat)      g.setColour (juce::Colour (0xFF3E3E3E));
+        else                  g.setColour (juce::Colour (0xFF2E2E2E));
 
         g.drawVerticalLine (x, 0.0f, (float) height);
+    }
+
+    // The loop end — the boundary those dimmed notes sit beyond.
+    if (shown > steps)
+    {
+        g.setColour (juce::Colour (0xFFB87800));
+        g.fillRect (loopW - 1, 0, 2, height);
     }
 
     // Horizontal row separators.
@@ -1077,13 +1123,31 @@ inline void SeqControlPanel::Ruler::paint (juce::Graphics& g)
     if (pattern == nullptr) return;
 
     const int steps = pattern->totalSteps();
+    const int shown = juce::jmax (steps, juce::jmin (pattern->displaySteps(),
+                                                     steps + kMaxGhostSteps));
     const int spb   = juce::jmax (1, pattern->stepsPerBar());
     const int spBeat = juce::jmax (1, spb / 4);
     const auto font = juce::Font (juce::FontOptions (9.0f, juce::Font::bold));
 
-    g.setFont (font);
+    // Overhang: stored notes that sit beyond the loop after a signature change.
+    if (shown > steps)
+    {
+        const int x0 = steps * kStepW - scrollX;
+        const int w  = (shown - steps) * kStepW;
 
-    for (int s = 0; s < steps; ++s)
+        g.setColour (juce::Colour (0xFF221703));
+        g.fillRect (x0, 0, w, kRulerH);
+
+        g.setColour (juce::Colour (0xFFB87800));
+        g.fillRect (x0 - 1, 0, 2, kRulerH);
+
+        g.setColour (juce::Colour (0xFF8A6A2A));
+        g.drawText ("outside loop (" + juce::String (pattern->hitsPastLoop()) + ")",
+                    juce::Rectangle<int> (x0 + 4, 0, juce::jmax (1, w - 4), kRulerH),
+                    juce::Justification::centredLeft, false);
+    }
+
+    for (int s = 0; s < shown; ++s)
     {
         const int x = s * kStepW - scrollX;
         if (x + kStepW < 0 || x > getWidth()) continue;

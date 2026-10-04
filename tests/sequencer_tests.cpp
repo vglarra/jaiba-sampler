@@ -214,6 +214,39 @@ int main()
         bad.sigNum = 0;
         bad.sigDen = 0;
         check (bad.stepsPerBar() >= 1, "a degenerate signature still yields a bar");
+
+        // --- Overhang: notes kept past the loop end -------------------------
+        SeqPattern ov;
+        ov.sigNum = 4;
+        ov.sigDen = 4;                       // 16 steps / 3840 ticks
+        ov.tracks[0].hits.push_back ({ 240, 1.0f });    // inside
+        check (ov.displaySteps() == 16 && ! ov.hasHitsPastLoop(),
+               "an in-loop pattern needs no overhang");
+
+        ov.tracks[0].hits.push_back ({ 3600, 1.0f });   // inside 4/4, near the end
+        check (ov.displaySteps() == 16 && ov.hitsPastLoop() == 0,
+               "a hit inside the loop adds no overhang");
+
+        ov.sigNum = 3;                       // loop is now 2880 ticks
+        check (ov.hitsPastLoop() == 1, "shrinking the bar exposes a stored note");
+        check (ov.displaySteps() == 16,
+               "the exposed note extends the drawing area to its column");
+        check (ov.tracks[0].hits.size() == 2, "exposing a note does not delete it");
+
+        ov.sigNum = 4;
+        check (ov.hitsPastLoop() == 0 && ov.displaySteps() == 16,
+               "restoring the signature clears the overhang");
+
+        // The boundary itself counts as outside: the engine stops at totalTicks.
+        SeqPattern edge;
+        edge.tracks[0].hits.push_back ({ edge.totalTicks(), 1.0f });
+        check (edge.hitsPastLoop() == 1,
+               "a hit exactly on the loop end counts as outside");
+
+        SeqPattern neg;
+        neg.tracks[0].hits.push_back ({ -5, 1.0f });
+        check (neg.displaySteps() == neg.totalSteps(),
+               "negative ticks never widen the drawing area");
     }
 
     //==========================================================================

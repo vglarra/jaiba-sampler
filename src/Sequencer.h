@@ -307,6 +307,37 @@ struct SeqPattern
         return (int) std::llround ((double) tick / (double) tps) * tps;
     }
 
+    /** Steps needed to draw every stored hit, including hits past the loop end.
+        Never less than totalSteps(). */
+    int displaySteps() const
+    {
+        const int tps = juce::jmax (1, ticksPerStep());
+        int last = totalSteps();
+
+        for (const auto& t : tracks)
+            for (const auto& h : t.hits)
+                if (h.tick >= 0)
+                    last = juce::jmax (last, h.tick / tps + 1);
+
+        return last;
+    }
+
+    /** Hits stored past the end of the loop: kept and saved, but not played. */
+    int hitsPastLoop() const
+    {
+        const int end = totalTicks();
+        int n = 0;
+
+        for (const auto& t : tracks)
+            for (const auto& h : t.hits)
+                if (h.tick < 0 || h.tick >= end)
+                    ++n;
+
+        return n;
+    }
+
+    bool hasHitsPastLoop() const { return hitsPastLoop() > 0; }
+
     bool hasAnyHits() const
     {
         for (const auto& t : tracks)
