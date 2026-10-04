@@ -2378,6 +2378,7 @@ void MainComponent::loadKitFromFile (const juce::File& file)
     sampleCard.refreshSequencer();   // show the freshly-loaded pattern on the Seq tab
     applyActiveTempo();              // the kit's own tempo may have changed
     refreshSeqTempoUI();
+    applyClickSettings();            // ...and its meter, which lives in the pattern
     publishSeqPattern();
 
     // Refresh the bank label (kit name may have just changed).
@@ -2818,9 +2819,10 @@ void MainComponent::switchGjmBank (int bankIdx)
     seqPattern = incoming.sequence;
     sampleCard.refreshSequencer();
 
-    // The new bank may follow a different tempo source (D4/D9).
+    // The new bank may follow a different tempo source (D4/D9) and its own meter.
     applyActiveTempo();
     refreshSeqTempoUI();
+    applyClickSettings();
     publishSeqPattern();   // the pool plays the new bank's pattern
 
     // Sync MNFreeze atomics so MIDI intercept reflects the new bank instantly
@@ -5338,26 +5340,39 @@ void MainComponent::applySeqOptions()
     seqEngine.setMasterVolume (gjmManager.seqMasterVolume);
     sampleCard.setSeqOptions (gjmManager.syncClickToSeq, gjmManager.seqMasterVolume);
 
-    const int num = gjmManager.timeSigNumerator();
-    const int den = gjmManager.timeSigDenominator();
-    clickBeatsPerBar.store (num, std::memory_order_relaxed);
-    clickDenominator.store (den, std::memory_order_relaxed);
-    sampleCard.setSeqTimeSig (num, den);
+    applyClickSettings();
 }
 
+// The active pattern's signature drives both the grid's bar length and the click's
+// accent grouping, so it is pushed out wherever the pattern changes.
+void MainComponent::applyClickSettings()
+{
+    clickBeatsPerBar.store (seqPattern.sigNum, std::memory_order_relaxed);
+    clickDenominator.store (seqPattern.sigDen, std::memory_order_relaxed);
+    sampleCard.setSeqTimeSig (seqPattern.sigNum, seqPattern.sigDen);
+}
+
+// Changing the signature only re-derives the bar length: hits are stored in ticks
+// and are never re-quantised or dropped, so switching back to the original
+// signature restores the pattern exactly, hits past the shorter loop included.
 void MainComponent::setClickTimeSig (int num, int den)
 {
     num = juce::jlimit (1, 32, num);
     den = den > 0 ? den : 4;
 
-    clickBeatsPerBar.store (num, std::memory_order_relaxed);
-    clickDenominator.store (den, std::memory_order_relaxed);
+    if (seqPattern.sigNum == num && seqPattern.sigDen == den) return;
 
-    const juce::String t = juce::String (num) + "/" + juce::String (den);
-    if (gjmManager.timeSig == t) return;
+    seqPattern.sigNum = num;
+    seqPattern.sigDen = den;
 
-    gjmManager.timeSig = t;
-    markSessionDirty();
+    sampleCard.refreshSequencer();   // re-lays out the columns, bar lines and ruler
+    applyClickSettings();
+    publishSeqPattern();
+    markKitDirty();                  // the signature is part of the kit's sequence
+
+    sampleCard.showTrimToast ("Sig " + juce::String (num) + "/" + juce::String (den)
+                              + " - " + juce::String (seqPattern.stepsPerBar())
+                              + " steps/bar", false);
 }
 
 void MainComponent::setSeqSyncEnabled (bool on)

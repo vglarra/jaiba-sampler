@@ -268,7 +268,9 @@ struct SeqPattern
     static constexpr int kTracks = 16;
 
     SeqSnap snap        = SeqSnap::Sixteenth;
-    int     bars        = 1;      // 4/4 bars
+    int     bars        = 1;      // bars of the signature below
+    int     sigNum      = 4;      // time signature numerator (beats per bar)
+    int     sigDen      = 4;      // time signature denominator (beat unit)
     int     ppq         = 960;
     double  bpm         = 120.0;  // this kit's own tempo — used when the session's
                                   // tempo source for the bank is "Kit" (tempoGroup == -1)
@@ -280,7 +282,18 @@ struct SeqPattern
 
     //==========================================================================
     int ticksPerStep() const { return ppq / juce::jmax (1, seqGridStepsPerBeat (snap)); }
-    int stepsPerBar()  const { return 4 * seqGridStepsPerBeat (snap); }
+
+    /** Steps in one bar of THIS signature.  A bar holds (num*4/den) quarter notes
+        and each quarter note holds seqGridStepsPerBeat() grid steps -- so 4/4 at
+        1/16 is 16 steps, 3/4 is 12, 6/8 is 12, 7/8 is 14. */
+    int stepsPerBar() const
+    {
+        const int num = juce::jmax (1, sigNum);
+        const int den = juce::jmax (1, sigDen);
+        const int spq = juce::jmax (1, seqGridStepsPerBeat (snap));
+
+        return juce::jmax (1, (num * spq * 4 + den / 2) / den);
+    }
     int totalSteps()   const { return juce::jmax (1, bars) * stepsPerBar(); }
     int totalTicks()   const { return totalSteps() * ticksPerStep(); }
 
@@ -306,6 +319,8 @@ struct SeqPattern
     {
         el.setAttribute ("snap",     (int) snap);
         el.setAttribute ("bars",     bars);
+        el.setAttribute ("sigNum",   sigNum);
+        el.setAttribute ("sigDen",   sigDen);
         el.setAttribute ("ppq",      ppq);
         el.setAttribute ("bpm",      bpm);
         el.setAttribute ("clickVol", (double) clickVolume);
@@ -333,6 +348,8 @@ struct SeqPattern
         snap        = (SeqSnap) juce::jlimit (0, (int) SeqSnap::Free,
                                               el.getIntAttribute ("snap", (int) SeqSnap::Sixteenth));
         bars        = juce::jlimit (1, 32, el.getIntAttribute ("bars", 1));
+        sigNum      = juce::jlimit (1, 32, el.getIntAttribute ("sigNum", 4));
+        sigDen      = juce::jlimit (1, 32, el.getIntAttribute ("sigDen", 4));
         ppq         = juce::jmax (24, el.getIntAttribute ("ppq", 960));
         bpm         = juce::jlimit (20.0, 300.0, el.getDoubleAttribute ("bpm", 120.0));
         clickVolume = juce::jlimit (0.0f, 1.0f, (float) el.getDoubleAttribute ("clickVol", 0.5));

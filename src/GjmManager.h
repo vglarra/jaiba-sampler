@@ -100,18 +100,8 @@ public:
     // Transport / mix options that belong to the session.
     bool  syncClickToSeq  = true;    // lock the metronome's phase to the sequencer
     float seqMasterVolume = 1.0f;    // balance the whole sequencer pool
-    juce::String timeSig  = "4/4";   // metronome accent grouping
-
-    int timeSigNumerator() const
-    {
-        return juce::jlimit (1, 32, timeSig.upToFirstOccurrenceOf ("/", false, false)
-                                        .trim().getIntValue());
-    }
-    int timeSigDenominator() const
-    {
-        const int d = timeSig.fromFirstOccurrenceOf ("/", false, false).trim().getIntValue();
-        return d > 0 ? d : 4;
-    }
+    // NB: the time signature is NOT here -- it belongs to the pattern, since it
+    // decides the grid's bar length, and travels with the kit in the .jai.
 
     juce::File gjmFile;
     int  activeBank = 0;   // 0-based
@@ -142,7 +132,6 @@ public:
         isDirty    = false;
         syncClickToSeq  = true;
         seqMasterVolume = 1.0f;
-        timeSig         = "4/4";
     }
 
     //==========================================================================
@@ -283,7 +272,6 @@ public:
         syncClickToSeq  = xml->getIntAttribute ("syncClick", 1) != 0;
         seqMasterVolume = juce::jlimit (0.0f, 1.0f,
                                         (float) xml->getDoubleAttribute ("seqVolume", 1.0));
-        timeSig = xml->getStringAttribute ("timeSig", "4/4");
 
         isLoaded   = true;
         isUntitled = false;
@@ -323,7 +311,6 @@ public:
         root->setAttribute ("savedDate", juce::Time::getCurrentTime().toString (true, true));
         root->setAttribute ("syncClick", syncClickToSeq ? 1 : 0);
         root->setAttribute ("seqVolume", (double) seqMasterVolume);
-        root->setAttribute ("timeSig",   timeSig);
 
         // Session tempos ("songs"), referenced by each bank's tempoGroup.
         {

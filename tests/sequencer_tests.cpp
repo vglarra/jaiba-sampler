@@ -125,9 +125,6 @@ int main()
         // Session options.
         m.syncClickToSeq  = false;
         m.seqMasterVolume = 0.42f;
-        m.timeSig         = "9/8";
-        check (m.timeSigNumerator() == 9 && m.timeSigDenominator() == 8,
-               "time signature parses");
 
         check (m.saveManifest (tmp), "session manifest writes");
 
@@ -145,16 +142,11 @@ int main()
                "kit-tempo bank round-trips");
         check (! r.syncClickToSeq, "click-sync option round-trips");
         check (near ((double) r.seqMasterVolume, 0.42), "sequencer master level round-trips");
-        check (r.timeSig == "9/8", "time signature round-trips");
 
         // An out-of-range group falls back to the default source.
         r.banks[5].tempoGroup = 99;
         check (near (r.tempoForBank (5), 120.0), "out-of-range group falls back to default");
 
-        // A malformed signature must not divide by zero.
-        r.timeSig = "garbage";
-        check (r.timeSigNumerator() >= 1 && r.timeSigDenominator() == 4,
-               "malformed time signature degrades safely");
 
         // ---- Backward compatibility: an old manifest with no <Tempos> ----
         const auto oldFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
@@ -176,12 +168,52 @@ int main()
                "legacy banks default to the default source");
         check (near (old.tempoForBank (0), 120.0),
                "legacy session behaves as one global tempo");
-        check (old.syncClickToSeq && near ((double) old.seqMasterVolume, 1.0)
-               && old.timeSig == "4/4",
+        check (old.syncClickToSeq && near ((double) old.seqMasterVolume, 1.0),
                "legacy session gets sensible option defaults");
 
         tmp.deleteFile();
         oldFile.deleteFile();
+    }
+
+    //==========================================================================
+    // Time signature decides the grid's bar length
+    //==========================================================================
+    {
+        auto stepsInBar = [] (int num, int den, SeqSnap snap)
+        {
+            SeqPattern p;
+            p.sigNum = num;
+            p.sigDen = den;
+            p.snap   = snap;
+            return p.stepsPerBar();
+        };
+
+        const auto sx = SeqSnap::Sixteenth;
+
+        check (stepsInBar (4, 4, sx) == 16, "4/4 at 1/16 is 16 steps per bar");
+        check (stepsInBar (3, 4, sx) == 12, "3/4 at 1/16 is 12 steps per bar");
+        check (stepsInBar (2, 4, sx) == 8,  "2/4 at 1/16 is 8 steps per bar");
+        check (stepsInBar (5, 4, sx) == 20, "5/4 at 1/16 is 20 steps per bar");
+        check (stepsInBar (6, 8, sx) == 12, "6/8 at 1/16 is 12 steps per bar");
+        check (stepsInBar (7, 8, sx) == 14, "7/8 at 1/16 is 14 steps per bar");
+        check (stepsInBar (12, 8, sx) == 24, "12/8 at 1/16 is 24 steps per bar");
+        check (stepsInBar (4, 4, SeqSnap::Eighth) == 8,
+               "4/4 at 1/8 is 8 steps per bar");
+        check (stepsInBar (3, 4, SeqSnap::Quarter) == 3,
+               "3/4 at 1/4 is 3 steps per bar");
+
+        // Bar length in ticks must stay consistent with the tick model.
+        SeqPattern p3;
+        p3.sigNum = 3;
+        p3.sigDen = 4;
+        check (p3.stepsPerBar() * p3.ticksPerStep() == 3 * p3.ppq,
+               "3/4 bar is exactly three quarter notes of ticks");
+
+        // Degenerate input must not divide by zero or return an empty bar.
+        SeqPattern bad;
+        bad.sigNum = 0;
+        bad.sigDen = 0;
+        check (bad.stepsPerBar() >= 1, "a degenerate signature still yields a bar");
     }
 
     //==========================================================================
@@ -198,6 +230,9 @@ int main()
 
         p.tracks[0].volume = 0.75f;
         p.tracks[0].mute   = true;
+        p.sigNum = 7;
+        p.sigDen = 8;
+
         p.tracks[0].hits.push_back ({ 0,   0.9f });
         p.tracks[0].hits.push_back ({ 240, 0.4f });
 
@@ -209,8 +244,9 @@ int main()
         p.tracks[3].sound.settings.eq1Freq        = 120.0f;
         p.tracks[3].hits.push_back ({ 480, 1.0f });
 
-        check (p.totalSteps() == 32, "2 bars at 1/16 is 32 steps");
-        check (p.totalTicks() == 32 * 240, "step count converts to ticks");
+        // This pattern is 7/8, so 2 bars at 1/16 is 2 * 14 = 28 steps.
+        check (p.totalSteps() == 28, "2 bars of 7/8 at 1/16 is 28 steps");
+        check (p.totalTicks() == 28 * 240, "step count converts to ticks");
 
         juce::XmlElement xml ("Sequencer");
         p.saveToXml (xml);
@@ -219,6 +255,7 @@ int main()
         q.loadFromXml (xml);
         check (q.tracks[0].hits.size() == 2, "pattern XML loads back at all");
         check (q.bars == 2 && q.ppq == 960, "bars + ppq round-trip");
+        check (q.sigNum == 7 && q.sigDen == 8, "time signature round-trips with the kit");
         check (near (q.bpm, 137.0), "kit tempo round-trips");
         check (near ((double) q.clickVolume, 0.33), "click volume round-trips");
         check (q.liveMode == false, "mode round-trips");
@@ -235,6 +272,31 @@ int main()
                "captured volume round-trips");
         check (q.tracks[3].sound.audio == nullptr,
                "audio buffers are NOT serialised (rebuilt on load)");
+
+        // The non-destructive guarantee: a hit past the end of a shorter loop is
+        // still written, so switching signature back and forth loses nothing.
+        SeqPattern wide;
+        wide.sigNum = 4;
+        wide.sigDen = 4;
+        wide.tracks[0].hits.push_back ({ 3600, 1.0f });   // past a 3/4 bar (2880)
+        check (wide.totalTicks() == 3840, "a 4/4 bar is 3840 ticks at 960 PPQ");
+
+        wide.sigNum = 3;
+        check (wide.totalTicks() == 2880, "the same pattern in 3/4 loops at 2880");
+        check (wide.tracks[0].hits.size() == 1,
+               "changing signature does not drop hits outside the loop");
+
+        juce::XmlElement wideXml ("Sequencer");
+        wide.saveToXml (wideXml);
+        SeqPattern wideBack;
+        wideBack.loadFromXml (wideXml);
+        check (wideBack.tracks[0].hits.size() == 1
+               && wideBack.tracks[0].hits[0].tick == 3600,
+               "a hit outside the loop survives save + load");
+
+        wide.sigNum = 4;
+        check (wide.totalTicks() == 3840 && wide.tracks[0].hits[0].tick == 3600,
+               "returning to 4/4 restores the original loop and its hits");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",

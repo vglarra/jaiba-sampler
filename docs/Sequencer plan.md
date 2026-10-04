@@ -232,7 +232,8 @@ Per bank, inside the bank's `.jai`, so a kit carries its groove (D2) and its sou
 <JaibaKit version="1" ...>
   <Pad index="0"> ... </Pad>
   ...
-  <Sequencer snap="3" bars="1" ppq="960" bpm="120" clickVol="0.5" mode="live">
+  <Sequencer snap="3" bars="1" sigNum="4" sigDen="4" ppq="960" bpm="120"
+             clickVol="0.5" mode="live">
     <Track volume="0.80" mute="0">
       <!-- sound-relevant fields only; no patterns / MIDI routing / zoom -->
       <Sound pad="0" samplePath="C:/samples/kick.wav" vol="1.0" eqEn="1" ... />

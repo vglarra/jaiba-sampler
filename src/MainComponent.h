@@ -268,7 +268,8 @@ private:
     void applySeqOptions ();                     // session click-sync + sequencer master level
     void setSeqSyncEnabled (bool on);
     void setSeqMasterVolume (float volume);
-    void setClickTimeSig (int num, int den);     // metronome accent grouping
+    void setClickTimeSig (int num, int den);     // pattern's signature (grid + accent)
+    void applyClickSettings ();                  // push the active pattern's signature out
 
     void saveSessionAction (bool forceDialog);
     void loadSessionAction ();
