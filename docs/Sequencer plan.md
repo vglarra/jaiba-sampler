@@ -254,6 +254,17 @@ Per bank, inside the bank's `.jai`, so a kit carries its groove (D2) and its sou
 - **Metronome on/off → transport state.**
 - Because the sequencer pool is resident, the click and the sequence keep running across bank switches.
 
+### Tempo persistence — to do in Phase 2
+
+**Current state:** the Metro and Tap controls now exist on both the Rec and Seq tabs and drive one live tempo (`recBpmAtomic`); both BPM displays stay in sync. `SeqPattern::bpm` is serialised and round-trips through the kit, but **nothing writes it from the UI yet** — so a tapped tempo is not remembered.
+
+**Phase 2 work, in order:**
+
+1. **Tap / tempo changes write the bank tempo.** In `MainComponent::metronomeStandaloneChanged()`, set `seqPattern.bpm = bpm` (marking the kit dirty only when it actually changes) instead of leaving it at the default. This makes the tempo part of the kit, alongside the pattern.
+2. **Loading the tempo back.** On bank switch and kit/session load, push the incoming `SeqPattern::bpm` into the live tempo (`recBpmAtomic`) so the metronome and (later) the sequencer follow the loaded bank. Guard it while a take is armed so a recording's tempo cannot shift underneath it.
+3. **Keep the panels in step.** `SampleCard::setMetronomeBpm()` already fans a tempo out to both tabs; call it from the load paths too, so the displays match the restored bank.
+4. **Decide the switch behaviour.** With a per-bank tempo, changing banks changes the click tempo. Confirm that is wanted (the alternative is to keep the live tempo global and treat `SeqPattern::bpm` as a per-kit default applied only when the pattern is started). This is the one open question in the migration.
+
 ---
 
 ## 9. Legacy pattern recorder (D6)
@@ -270,7 +281,7 @@ Per bank, inside the bank's `.jai`, so a kit carries its groove (D2) and its sou
 |---|---|
 | **0** | `SeqPattern` model (self-contained tracks + per-track volume) + `.jai` round-trip. No UI. |
 | **1** | Seq tab shell: 5th tab, panel, waveform reclaimed, 16-row grid with row header (sample name + volume fader), snap combo, click-to-toggle, ruler. **Silent.** |
-| **2** | Resident sequencer pool: lazily-created FFT-less engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing + master volume, bank tempo. |
+| **2** | Resident sequencer pool: lazily-created FFT-less engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing + master volume. **Plus tempo persistence** (§8): tap/tempo writes `SeqPattern::bpm`, and bank switch / kit load restore it into the live metronome tempo. |
 | **3** | Velocity editing (drag) + **Record mode** + Free mode + mode switching. |
 | **4** | Polish: bars/length, mute, copy/paste, swing, undo, quantise-now, "Update from pad", "playing: Bank N" indicator, unique-pad-note warning, optional global launch strip. |
 
@@ -310,8 +321,14 @@ Phases 0–2 give a working self-contained 16-track sequencer that survives bank
 
 ---
 
-## 13. Suggested first move
+## 13. Status
 
-**Phase 0 + Phase 1, then stop and look.** The Seq tab that reclaims the waveform, draws the 16-row grid with its row header (captured sample name + volume fader), the 9 snap choices and the mode toggle, lets you click steps in and out, and saves/reloads with the kit — **silent**. That validates the layout fit, the row-header density and the `.jai` shape before any audio-thread work, and it is cheap to discard if the feel is wrong.
+**Phase 0 + 1 are done** (commit `522bbe6`): the `SeqPattern` model round-trips through the kit, and the Seq tab draws the 16-row grid with its row header, the 9 snap choices, per-track volume and the mode toggle, saving and reloading with the kit. Still **silent** — Play/Stop and Rec are disabled with tooltips.
 
-All decisions are closed (D1–D8). Ready to start on your word.
+The metronome controls from the Rec tab were then mirrored onto the Seq tab (Metro toggle, volume slider and Tap tempo), with both tabs driving one shared tempo (commit `f966e3d`).
+
+**All decisions are closed (D1–D8). Next up is Phase 2**, which is two pieces of work that can land separately:
+
+1. **Tempo persistence** (§8) — the smaller, self-contained one. Tap/tempo writes `SeqPattern::bpm`; bank switch and kit load restore it into the live tempo.
+2. **The resident playback pool** — the larger one: FFT-gated engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing. Start by gating `PadAudioEngine`'s FFT thread as an isolated change with its own build check.
+
