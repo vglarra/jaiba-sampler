@@ -533,6 +533,7 @@ MainComponent::MainComponent()
     sampleCard.onSyncClickToggled = [this] (bool on) { setSeqSyncEnabled (on); };
     sampleCard.onSeqVolumeChanged = [this] (float v) { setSeqMasterVolume (v); };
     sampleCard.onSeqTimeSigChanged = [this] (int num, int den) { setClickTimeSig (num, den); };
+    sampleCard.onSeqAuditionTrack = [this] (int track) { seqEngine.auditionTrack (track); };
     sampleCard.onSeqTrackAction = [this] (int track, SeqTrackAction a)
     {
         handleSeqTrackAction (track, a);

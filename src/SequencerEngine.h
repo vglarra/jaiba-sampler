@@ -68,6 +68,19 @@ public:
         applyMix (trackIdx, ps);
     }
 
+    /** Sound one track's note immediately, for previewing a step from the grid.
+        Works with the transport stopped -- that is when a pattern is being built --
+        and is safe to call from the message thread: the request is handed to the
+        audio thread through an atomic rather than touching its MIDI buffers. */
+    void auditionTrack (int trackIdx, float velocity = SequencerVelocity::kDefault)
+    {
+        if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return;
+
+        auditionRequest[(size_t) trackIdx].store (
+            juce::jlimit (1, 127, juce::roundToInt (velocity * 127.0f)),
+            std::memory_order_relaxed);
+    }
+
     /** Master level for the whole pool (0-1), for balancing Seq against the pads. */
     void setMasterVolume (float volume) { masterVolume.store (juce::jlimit (0.0f, 1.0f, volume)); }
     float getMasterVolume() const { return masterVolume.load(); }
@@ -121,6 +134,7 @@ private:
     // Step gate: a hit is released at the end of its step.  Countdown is measured
     // from the end of the current block so it can be carried across blocks;
     // -1 means no note is waiting to be released.
+    std::array<std::atomic<int>, SeqPattern::kTracks> auditionRequest {};   // -1 = none
     std::array<int,   SeqPattern::kTracks> gateCountdown {};
     std::array<int,   SeqPattern::kTracks> gateNote      {};
     std::array<float, SeqPattern::kTracks> trackLevel {};   // mixer fader
@@ -151,6 +165,7 @@ inline void SequencerEngine::prepareToPlay (double newSampleRate, int blockSize)
     sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
 
     activeNote.fill (-1);
+    for (auto& a : auditionRequest) a.store (-1, std::memory_order_relaxed);
     gateCountdown.fill (-1);
     gateNote  .fill (60);
     trackNote .fill (60);
@@ -512,8 +527,21 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
                                            double bpm, double masterGain)
 {
     auto snap = std::atomic_load (&pattern);
+    const bool isPlaying = playing.load (std::memory_order_relaxed);
 
-    if (snap == nullptr || ! playing.load (std::memory_order_relaxed))
+    // Collect audition requests first.  They have to sound with the transport
+    // stopped, which is exactly when a pattern is being built, so they cannot sit
+    // behind the "is it playing" guard.
+    std::array<int, SeqPattern::kTracks> auditionVel {};
+    bool anyAudition = false;
+
+    for (int t = 0; t < SeqPattern::kTracks; ++t)
+    {
+        auditionVel[(size_t) t] = auditionRequest[(size_t) t].exchange (-1, std::memory_order_relaxed);
+        if (auditionVel[(size_t) t] >= 0) anyAudition = true;
+    }
+
+    if ((snap == nullptr || ! isPlaying) && ! anyAudition)
         return;
 
     const int nCh = mix.getNumChannels();
@@ -524,26 +552,29 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
 
     poolBuffer.clear (0, numSamples);
 
-    const double ppq      = snap->ppq > 0 ? (double) snap->ppq : 960.0;
-    const double totalTks = (double) snap->totalTicks();
+    const double ppq      = (snap != nullptr && snap->ppq > 0) ? (double) snap->ppq : 960.0;
+    const double totalTks = snap != nullptr ? (double) snap->totalTicks() : 3840.0;
     const double safeBpm  = juce::jlimit (20.0, 300.0, bpm);
 
     if (totalTks <= 0.0)
         return;
 
     const double ticksPerSample = (safeBpm / 60.0) * ppq / sampleRate;
-    const double blockStart     = playheadPos;
-    const double blockEnd       = playheadPos + ticksPerSample * (double) numSamples;
 
     for (auto& m : trackMidi)
         m.clear();
 
-    // Release notes whose step has ended.  Done before the new hits are emitted so
-    // that a note-off and a note-on landing on the same sample stay in that order.
+    // A step is a duration, and an audition gets one step's worth of gate too.
     const int gateSamples = juce::jmax (1, (int) std::llround (
-                                (double) juce::jmax (1, snap->ticksPerStep())
+                                (double) juce::jmax (1, snap != nullptr ? snap->ticksPerStep() : 240)
                                 / juce::jmax (1.0e-9, ticksPerSample)));
 
+    const double blockStart = playheadPos;
+    const double blockEnd   = playheadPos + ticksPerSample * (double) numSamples;
+
+    // ---- Pattern playback (only while the transport runs) ----
+    if (isPlaying && snap != nullptr)
+    {
     for (int t = 0; t < SeqPattern::kTracks; ++t)
     {
         auto& left = gateCountdown[(size_t) t];
@@ -595,6 +626,24 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
             emitRange (0.0, blockEnd - totalTks, totalTks);
     }
 
+    // Advance and wrap.  Only while playing: an audition must not move the
+    // playhead, or previewing a step would shift the pattern underneath you.
+    playheadPos = blockEnd;
+    while (playheadPos >= totalTks)
+        playheadPos -= totalTks;
+
+    playheadUI.store (juce::jmax (0.0, playheadPos), std::memory_order_relaxed);
+    }   // end of pattern playback
+
+    // ---- Auditions: a previewed step sounds whether or not the transport runs ----
+    for (int t = 0; t < SeqPattern::kTracks; ++t)
+    {
+        const int vel = auditionVel[(size_t) t];
+        if (vel < 0 || trackEngines[(size_t) t] == nullptr) continue;
+
+        triggerTrack (t, 0, (float) vel / 127.0f, gateSamples, numSamples);
+    }
+
     // Render every track engine that exists into the private pool buffer.
     for (int t = 0; t < SeqPattern::kTracks; ++t)
     {
@@ -612,11 +661,4 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
 
     for (int ch = 0; ch < nCh; ++ch)
         mix.addFrom (ch, 0, poolBuffer, ch, 0, numSamples);
-
-    // Advance and wrap.
-    playheadPos = blockEnd;
-    while (playheadPos >= totalTks)
-        playheadPos -= totalTks;
-
-    playheadUI.store (juce::jmax (0.0, playheadPos), std::memory_order_relaxed);
 }

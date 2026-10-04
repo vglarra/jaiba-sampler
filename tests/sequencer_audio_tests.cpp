@@ -396,6 +396,30 @@ int main()
                "and that loop is still released at the end of the step");
     }
 
+    //==========================================================================
+    // Audition: preview a step with the transport stopped
+    //==========================================================================
+    {
+        seq.stop();
+        seq.setTrackSound (0, makeSound (shortBuf, sr, /*oneShot=*/true));
+        seq.setPattern (makePattern ({ 960 }));   // a hit a beat away: not yet due
+        seq.start();
+        seq.stop();                              // rewound and silent
+
+        check (! audibleBetween (4, 0, 2000), "stopped and idle, nothing sounds");
+
+        seq.auditionTrack (0);
+        check (audibleBetween (4, 0, 2000),
+               "an audition sounds while the transport is stopped");
+
+        check (seq.playheadTicks() == 0.0,
+               "an audition does not move the playhead");
+
+        // And it is silent again once it has played.
+        check (! audibleBetween (30, 40000, 43000),
+               "an audition is a one-off, not a stuck note");
+    }
+
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",
                  failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
