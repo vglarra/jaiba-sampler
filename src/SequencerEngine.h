@@ -81,6 +81,14 @@ public:
             std::memory_order_relaxed);
     }
 
+    /** Stop a held audition.  0 in the request slot means "release". */
+    void endAudition (int trackIdx)
+    {
+        if (trackIdx < 0 || trackIdx >= SeqPattern::kTracks) return;
+
+        auditionRequest[(size_t) trackIdx].store (0, std::memory_order_relaxed);
+    }
+
     /** Master level for the whole pool (0-1), for balancing Seq against the pads. */
     void setMasterVolume (float volume) { masterVolume.store (juce::jlimit (0.0f, 1.0f, volume)); }
     float getMasterVolume() const { return masterVolume.load(); }
@@ -123,6 +131,7 @@ private:
                        int gateSamples, int numSamples);
     void updateTrackGain (int trackIdx);
     void silenceAllVoices();
+    void releaseTrack (int trackIdx, int offset);
 
     juce::AudioFormatManager& formatManager;
 
@@ -135,6 +144,8 @@ private:
     // from the end of the current block so it can be carried across blocks;
     // -1 means no note is waiting to be released.
     std::array<std::atomic<int>, SeqPattern::kTracks> auditionRequest {};   // -1 = none
+    static constexpr int kIdleTailBlocks = 64;   // ~0.7 s of tail after the last sound
+    int idleRenderBlocks = 0;                    // blocks left to render while stopped
     std::array<int,   SeqPattern::kTracks> gateCountdown {};
     std::array<int,   SeqPattern::kTracks> gateNote      {};
     std::array<float, SeqPattern::kTracks> trackLevel {};   // mixer fader
@@ -165,6 +176,7 @@ inline void SequencerEngine::prepareToPlay (double newSampleRate, int blockSize)
     sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
 
     activeNote.fill (-1);
+    idleRenderBlocks = 0;
     for (auto& a : auditionRequest) a.store (-1, std::memory_order_relaxed);
     gateCountdown.fill (-1);
     gateNote  .fill (60);
@@ -450,6 +462,8 @@ inline void SequencerEngine::setPattern (std::shared_ptr<const SeqPattern> p)
 // silence them.
 inline void SequencerEngine::silenceAllVoices()
 {
+    idleRenderBlocks = 0;
+
     for (int t = 0; t < SeqPattern::kTracks; ++t)
     {
         activeNote[(size_t) t]   = -1;
@@ -507,12 +521,20 @@ inline void SequencerEngine::triggerTrack (int trackIdx, int offset, float veloc
                   offset);
     activeNote[idx] = note;
 
-    const int offAt = offset + juce::jmax (1, gateSamples);
+    if (gateSamples <= 0)
+    {
+        // Held until released -- what an audition does, so it lasts exactly as long
+        // as the mouse is down.  A one-shot voice ignores the release and rings on.
+        gateCountdown[idx] = -1;
+        return;
+    }
+
+    const int offAt = offset + gateSamples;
 
     if (offAt < numSamples)
     {
         buf.addEvent (juce::MidiMessage::noteOff (1, note), offAt);
-        activeNote[idx]   = -1;
+        activeNote[idx]    = -1;
         gateCountdown[idx] = -1;
     }
     else
@@ -520,6 +542,18 @@ inline void SequencerEngine::triggerTrack (int trackIdx, int offset, float veloc
         gateNote[idx]      = note;
         gateCountdown[idx] = offAt - numSamples;   // carried into later blocks
     }
+}
+
+//==============================================================================
+inline void SequencerEngine::releaseTrack (int trackIdx, int offset)
+{
+    const size_t idx = (size_t) trackIdx;
+
+    if (activeNote[idx] >= 0 || gateCountdown[idx] >= 0)
+        trackMidi[idx].addEvent (juce::MidiMessage::noteOff (1, trackNote[idx]), offset);
+
+    activeNote[idx]    = -1;
+    gateCountdown[idx] = -1;
 }
 
 //==============================================================================
@@ -541,8 +575,21 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
         if (auditionVel[(size_t) t] >= 0) anyAudition = true;
     }
 
-    if ((snap == nullptr || ! isPlaying) && ! anyAudition)
+    // While stopped the pool normally renders nothing, but an audition has to keep
+    // sounding for as long as it is held -- and its release tail has to finish, or
+    // it would be cut off mid-fade.  idleRenderBlocks keeps the engines running for
+    // a moment after the last sound.
+    bool heldNote = false;
+    for (const auto& a : activeNote)
+        if (a >= 0) { heldNote = true; break; }
+
+    const bool mustRender = isPlaying || anyAudition || heldNote || idleRenderBlocks > 0;
+
+    if ((snap == nullptr && ! anyAudition && ! heldNote && idleRenderBlocks <= 0) || ! mustRender)
         return;
+
+    if (! isPlaying)
+        idleRenderBlocks = (anyAudition || heldNote) ? kIdleTailBlocks : idleRenderBlocks - 1;
 
     const int nCh = mix.getNumChannels();
     if (nCh <= 0 || numSamples <= 0) return;
@@ -641,7 +688,11 @@ inline void SequencerEngine::processBlock (int numSamples, juce::AudioBuffer<flo
         const int vel = auditionVel[(size_t) t];
         if (vel < 0 || trackEngines[(size_t) t] == nullptr) continue;
 
-        triggerTrack (t, 0, (float) vel / 127.0f, gateSamples, numSamples);
+        if (vel == 0)
+            releaseTrack (t, 0);                       // mouse up
+        else
+            triggerTrack (t, 0, (float) vel / 127.0f,  // mouse down: hold it
+                          /*gateSamples=*/0, numSamples);
     }
 
     // Render every track engine that exists into the private pool buffer.

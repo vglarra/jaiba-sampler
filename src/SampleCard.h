@@ -1299,6 +1299,10 @@ juce::TextButton::ConnectedOnRight);
         {
             if (onSeqAuditionTrack) onSeqAuditionTrack (track);
         };
+        seqContent->onAuditionEndTrack = [this] (int track)
+        {
+            if (onSeqAuditionEnd) onSeqAuditionEnd (track);
+        };
         seqContent->onTrackAction = [this] (int track, SeqTrackAction a)
         {
             if (onSeqTrackAction) onSeqTrackAction (track, a);
@@ -5456,6 +5460,7 @@ public:
     std::function<void(int,int)> onSeqTimeSigChanged;
     std::function<void(int, SeqTrackAction)> onSeqTrackAction;
     std::function<void(int)>     onSeqAuditionTrack;
+    std::function<void(int)>     onSeqAuditionEnd;
     std::function<void()>        onSeqEraseRequested;
     std::function<void()>        onSeqClearRequested;
 

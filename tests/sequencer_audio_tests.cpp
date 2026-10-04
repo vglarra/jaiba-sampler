@@ -411,13 +411,30 @@ int main()
         seq.auditionTrack (0);
         check (audibleBetween (4, 0, 2000),
                "an audition sounds while the transport is stopped");
+        seq.endAudition (0);
 
         check (seq.playheadTicks() == 0.0,
                "an audition does not move the playhead");
 
-        // And it is silent again once it has played.
-        check (! audibleBetween (30, 40000, 43000),
-               "an audition is a one-off, not a stuck note");
+        // A held audition lasts as long as the mouse is held: a looping sample
+        // keeps sounding well past its own length until endAudition() arrives.
+        seq.stop();
+        auto held = makeSound (shortBuf, sr, /*oneShot=*/false);
+        held.settings.loopEnabled = true;
+        seq.setTrackSound (0, held);
+
+        seq.auditionTrack (0);
+        check (audibleBetween (12, 3000, 5000),
+               "a held audition keeps sounding while the mouse is down");
+
+        seq.endAudition (0);
+        check (! audibleBetween (30, 20000, 23000),
+               "releasing the mouse ends the audition");
+
+        // And it does not leave a stuck note behind when never released.
+        seq.auditionTrack (1);          // no engine on track 1: must be harmless
+        seq.endAudition (1);
+        check (true, "auditioning a track with no sound is harmless");
     }
 
     std::printf ("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL PASSED",

@@ -534,6 +534,7 @@ MainComponent::MainComponent()
     sampleCard.onSeqVolumeChanged = [this] (float v) { setSeqMasterVolume (v); };
     sampleCard.onSeqTimeSigChanged = [this] (int num, int den) { setClickTimeSig (num, den); };
     sampleCard.onSeqAuditionTrack = [this] (int track) { seqEngine.auditionTrack (track); };
+    sampleCard.onSeqAuditionEnd   = [this] (int track) { seqEngine.endAudition (track); };
     sampleCard.onSeqTrackAction = [this] (int track, SeqTrackAction a)
     {
         handleSeqTrackAction (track, a);

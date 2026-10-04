@@ -65,7 +65,8 @@ public:
     std::function<void (float)> onSeqVolumeChanged;   // master level for the pool
     std::function<void (int, int)> onTimeSigChanged;  // accent grouping (num, den)
     std::function<void (int, SeqTrackAction)> onTrackAction;   // from a row's menu
-    std::function<void (int)> onAuditionTrack;                 // preview a track
+    std::function<void (int)> onAuditionTrack;                 // preview start
+    std::function<void (int)> onAuditionEndTrack;              // preview stop
     std::function<void ()>      onEraseRequested;     // steps only
     std::function<void ()>      onClearRequested;     // steps + settings
 
@@ -134,7 +135,8 @@ private:
         int rowH = kRowHDefault;      // set by SeqControlPanel::resized()
         bool editable = true;         // Arrange mode and unlocked
         std::function<void()> onEdited;
-        std::function<void (int)> onAudition;   // preview a track's sound
+        std::function<void (int)> onAudition;      // press: start previewing
+        std::function<void (int)> onAuditionEnd;   // release: stop
 
         void paint (juce::Graphics& g) override;
         void mouseDown (const juce::MouseEvent& e) override;
@@ -163,6 +165,8 @@ private:
 
     private:
         int playheadColumn = -1;
+
+        int auditionRow = -1;   // track currently previewing (mouse held)
 
         // Velocity drag state.
         int   pressRow    = -1;
@@ -193,6 +197,8 @@ private:
         std::function<void()> onEdited;
         std::function<void (int, int, int)> onTrackMenu;   // row, screenX, screenY
         std::function<void (int)> onAudition;
+        std::function<void (int)> onAuditionEnd;
+        int auditionRow = -1;
         int scrollY = 0;
 
         void paint (juce::Graphics& g) override;
@@ -630,12 +636,14 @@ inline SeqControlPanel::SeqControlPanel()
     gridCanvas.pattern = nullptr;
     gridCanvas.onEdited = [this] { notifyEdited(); };
     gridCanvas.onAudition = [this] (int row) { if (onAuditionTrack) onAuditionTrack (row); };
+    gridCanvas.onAuditionEnd = [this] (int row) { if (onAuditionEndTrack) onAuditionEndTrack (row); };
 
     headerCanvas.onEdited = [this] { notifyEdited(); };
     headerCanvas.setTooltip ("Drag the % up/down to set the track level, "
                              "double-click to reset it to 100%");
     headerCanvas.onTrackMenu = [this] (int row, int sx, int sy) { showTrackMenu (row, sx, sy); };
     headerCanvas.onAudition  = [this] (int row) { if (onAuditionTrack) onAuditionTrack (row); };
+    headerCanvas.onAuditionEnd = [this] (int row) { if (onAuditionEndTrack) onAuditionEndTrack (row); };
 
     gridViewport.setViewedComponent (&gridCanvas, false);
     gridViewport.setScrollBarsShown (true, true);
@@ -1118,7 +1126,11 @@ inline void SeqControlPanel::GridCanvas::mouseDown (const juce::MouseEvent& e)
 
     // Preview the step being touched.  Locked means silent as well as read-only,
     // so a performance cannot be disturbed by a stray click.
-    if (! pattern->locked && onAudition) onAudition (row);
+    if (! pattern->locked && onAudition)
+    {
+        auditionRow = row;
+        onAudition (row);
+    }
 
     const int tps   = juce::jmax (1, pattern->ticksPerStep());
     const int tick0 = step * tps;
@@ -1193,6 +1205,13 @@ inline void SeqControlPanel::GridCanvas::mouseDrag (const juce::MouseEvent& e)
 inline void SeqControlPanel::GridCanvas::mouseUp (const juce::MouseEvent& e)
 {
     juce::ignoreUnused (e);
+
+    // End the preview at the moment the mouse is released.
+    if (auditionRow >= 0)
+    {
+        if (onAuditionEnd) onAuditionEnd (auditionRow);
+        auditionRow = -1;
+    }
 
     if (pattern == nullptr || pressRow < 0)
     {
@@ -1381,7 +1400,11 @@ inline void SeqControlPanel::HeaderCanvas::mouseDown (const juce::MouseEvent& e)
     }
 
     // Number / name area: preview the track without touching the pattern.
-    if (! pattern->locked && onAudition) onAudition (row);
+    if (! pattern->locked && onAudition)
+    {
+        auditionRow = row;
+        onAudition (row);
+    }
 }
 
 inline void SeqControlPanel::HeaderCanvas::mouseMove (const juce::MouseEvent& e)
@@ -1416,6 +1439,12 @@ inline void SeqControlPanel::HeaderCanvas::mouseDrag (const juce::MouseEvent& e)
 
 inline void SeqControlPanel::HeaderCanvas::mouseUp (const juce::MouseEvent&)
 {
+    if (auditionRow >= 0)
+    {
+        if (onAuditionEnd) onAuditionEnd (auditionRow);
+        auditionRow = -1;
+    }
+
     dragRow  = -1;
     dragging = false;
 }
