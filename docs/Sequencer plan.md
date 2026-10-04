@@ -1,7 +1,7 @@
 # Seq tab — step sequencer plan
 
 Status: **proposal only — nothing implemented.**
-Revision 3 — final track model (16 pad tracks), all decisions locked.
+Revision 4 — self-contained (detached) tracks + per-track mixer volume.
 Related: `docs/Click behaviour idea.md` (metronome click — parked)
 
 ---
@@ -12,22 +12,26 @@ A new **Seq** tab on the SampleCard that hosts a per-kit step sequencer.
 
 | # | Decision | Agreed |
 |---|---|---|
-| **D1** | Track model | **16 tracks, one per pad.** Track *i* IS pad *i*. No MIDI tracks. |
-| **D2** | Pattern ownership | **Per bank/kit.** The Seq view is shared by all 16 pads — opening Seq on pad 1 shows the same thing as on pad 2. |
-| **D3** | MIDI rows | **Removed.** The 4-MIDI-track idea is dropped; the app needs no MIDI output. |
+| **D1** | Track model | **16 tracks, nominally one per pad** (track *i* starts out as pad *i*). |
+| **D2** | Pattern ownership | **Per bank/kit.** The Seq view is shared by all 16 pads. One sequence plays at a time, owned by the bank that started it. |
+| **D3** | MIDI rows | **Removed.** No MIDI tracks, no MIDI output subsystem. |
 | **D4** | Transport | **Shared with the metronome** → tempo **and click volume** are bank-level (§8). |
 | **D5** | Free / no-snap | Live-record unquantised + shift-drag arbitrary placement. |
-| **D6** | Legacy pattern recorder | Keep the data code, **disable the UI**, repurpose the Rec tab later for **sound-card input recording**. Nothing deleted yet. |
+| **D6** | Legacy pattern recorder | Keep the data code, **disable the UI**, repurpose the Rec tab later for sound-card input recording. |
+| **D7** | Sound ownership | **Self-contained tracks.** Each track stores its own sample path + settings and plays through its own resident engine — independent of the live pads and of the active bank. |
+| **D8** | Track mixing | **Per-track volume fader**, always live and adjustable after recording. |
 
 Snap choices: **1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32, 1/32T, 1/64, Free**.
 
-### What dropping the MIDI rows buys us
+### Why D7 (this is the big one)
 
-The biggest new subsystem in Revision 2 was MIDI output (`MidiOutput`, a device selector, timestamped sending, OS/driver latency risks, plus the reserved-note block). **All of it is gone.** The sequencer is now purely an internal pad trigger — no new device plumbing, no reserved notes, and the track count drops from 20 rows to 16, which also fixes the layout squeeze (§5).
+Revision 3 had `SeqTrack.padIndex` pointing at `padManager.getEngine(padIndex)`, but those 16 engines are **bank-swapped** by `switchGjmBank`. So a Bank 1 pattern could never sound while Bank 2 was active, and editing a pad changed the pattern. D7 fixes both: the pattern **owns its sounds** and plays through **resident engines** that live outside the bank swap. Record in Bank 1, switch to Bank 2, keep playing and keep the recorded sounds.
 
-### What D1 buys us
+The app already has this pattern: the **global loop pads** are engines that deliberately survive bank switching.
 
-Because track *i* is pad *i*, the early ambiguity ("the sample should be executed by the current pad selected") disappears: **each track owns its pad**. Selecting a pad no longer routes anything — it just highlights that pad's row. Clicking pad 5 in the pad grid can scroll/highlight track 5.
+### Why D8
+
+With self-contained tracks, the captured `PadSettings` fixes the sound — but a pattern still needs a mix. The per-track fader is a **post-capture mixer level**, always visible and always live, so levels can be balanced after recording without touching the captured sound.
 
 ---
 
@@ -35,20 +39,20 @@ Because track *i* is pad *i*, the early ambiguity ("the sample should be execute
 
 | Thing | Where | Relevance |
 |---|---|---|
-| Pattern recorder | `recEvents` / `recQuantised`, `PatternEvent{padIndex, beatTime}` | Closest existing feature, but **wrong foundation** (§9). |
-| Pattern playback | 10 ms `juce::Timer` → `tickPatternPlayback()` | Message-thread timing, fixed 0.8 velocity. Adds up to ~10 ms jitter. |
+| Pattern recorder | `recEvents` / `recQuantised`, `PatternEvent{padIndex, beatTime}` | Closest existing feature, wrong foundation (no velocity, 10 ms timer) — §9. |
 | Velocity | `LoopingSamplerVoice::startNote` → `lgain = rgain = velocity` | Already works in the audio path. |
-| Pad triggering | `synthesizer.noteOn(ch, note, vel)` | How a step fires a pad. |
-| Pad MIDI routing | `PadManager::renderNextBlock` passes **the same** MidiBuffer to **every** pad engine; routing relies on each pad's note range | Not deterministic enough for a sequencer — fixed by §3.4. |
-| MIDI output | **None** — input only | No longer needed (D3). |
-| Audio capture | `liveRenderWriter` taps the **master output** into WAV | Reusable for D6's input recording, but the source must change (§9). |
-| UI space | SampleCard ≈ **720×375**; tab content ≈ **80 px** today | 16 rows now fit once the waveform is reclaimed (§5). |
+| **Resident engines precedent** | `PadManager::globalEngines` (5 "global loop pads" that survive bank switches) | Exactly the mechanism D7 needs, already proven. |
+| **Shared audio buffers** | `MappedSample::audioData` is `std::shared_ptr<juce::AudioBuffer<float>>` | A track can **share the pad's decoded buffer** → detaching costs no duplicate sample RAM. |
+| **FFT thread warning** | `PadAudioEngine::prepareToPlay` unconditionally creates + starts an `FftWorkerThread` | A naive 16-engine sequencer pool would add 16 threads for nothing. Must be gated. |
+| Master volume convention | `PadManager::renderNextBlock` applies master at the end; the metronome beep multiplies by `padManager.getMasterVolume()` itself | The sequencer must apply master the same way, or be mixed before that step. |
+| Audio capture | `liveRenderWriter` taps the master output into WAV | Reusable for D6's input recording; source must change (§9). |
+| UI space | SampleCard ≈ 720×375; tab content ≈ 80 px today | 16 rows fit once the waveform is reclaimed (§5). |
 
 ---
 
 ## 3. Recommended architecture
 
-### 3.1 Timing — PPQ ticks, not floats
+### 3.1 Timing — PPQ ticks
 
 **960 PPQ** so every requested snap divides evenly (1/64 = 60 ticks, 1/32T = 80, 1/16T = 160, 1/8T = 320).
 
@@ -74,10 +78,20 @@ enum class SeqSnap { Quarter, Eighth, EighthT, Sixteenth, SixteenthT,
 
 struct SeqHit { int tick = 0; float velocity = 0.8f; };
 
+// Sound-relevant subset of PadSettings, captured with the track.
+struct SeqSound {
+    bool         hasSound = false;
+    int          sourcePad = 0;        // pad it was captured from (label/default only)
+    juce::String sampleFilePath;
+    PadSettings  settings;             // pitch/loop/one-shot/reverse/bounce/vol/norm/ADSR/EQ/padGain
+    std::shared_ptr<juce::AudioBuffer<float>> audio;   // shared with the source pad engine
+};
+
 struct SeqTrack {
-    int  padIndex = 0;          // 0..15 — track i == pad i
-    bool mute     = false;
-    std::vector<SeqHit> hits;   // absolute ticks, arbitrary count
+    float volume = 1.0f;               // D8: mixer fader, always live
+    bool  mute   = false;
+    SeqSound    sound;                 // D7: self-contained
+    std::vector<SeqHit> hits;          // absolute ticks
 };
 
 struct SeqPattern {
@@ -85,172 +99,166 @@ struct SeqPattern {
     SeqSnap snap = SeqSnap::Sixteenth;
     int     bars = 1;
     int     ppq  = 960;
+    double  bpm  = 120.0;              // bank tempo (D4)
+    float   clickVolume = 0.5f;        // bank click level (D4)
     std::array<SeqTrack, kTracks> tracks;
 };
 ```
 
-Absolute ticks per hit (rather than a fixed step array) is what makes triplets **and** Free mode work with one model. The grid is a *view*: column = `tick / ticksPerStep`; in Free mode the columns are only a visual reference.
+Absolute ticks per hit (not a fixed step array) is what makes triplets **and** Free mode work with one model. The grid is a view: column = `tick / ticksPerStep`.
 
-### 3.3 Playback engine (audio thread, sample-accurate)
+Note `SeqSound::audio` is **runtime only** — the XML stores the path and settings, and the buffer is decoded on load.
 
-The existing 10 ms timer is not good enough. Positions are computed **inside the audio callback**.
+### 3.3 Resident playback pool (D7)
+
+One dedicated engine per track, created **lazily** for tracks that actually have a sound, living outside `switchGjmBank`.
 
 ```cpp
 class SequencerEngine {
 public:
-    void prepareToPlay (double sampleRate);
+    void prepareToPlay (double sampleRate, int blockSize);
+    void releaseResources();
+
     void setPattern (std::shared_ptr<const SeqPattern>);   // lock-free publish
     void start(); void stop();
-    void processBlock (int numSamples, double bpm,
-                       std::array<juce::MidiBuffer, PadManager::kMaxPads>& padEvents);
+
+    // Message thread. Installs/refreshes a track's sound, sharing the pad's buffer.
+    void setTrackSound (int trackIdx, const SeqSound& sound);
+    void setTrackVolume (int trackIdx, float volume);      // D8, live
+
+    // Audio thread. Renders the whole pool into the master mix.
+    void processBlock (int numSamples, juce::AudioBuffer<float>& mixInto);
 private:
+    std::array<std::unique_ptr<PadAudioEngine>, SeqPattern::kTracks> trackEngines;
     std::shared_ptr<const SeqPattern> pattern;
     double playheadTicks = 0.0;
     std::atomic<bool> playing { false };
 };
 ```
 
-Per block: advance the playhead; for each of the 16 tracks find hits in `[startTick, endTick)`; add a note-on **at the exact sample offset** (plus a note-off after a short gate) into `padEvents[track.padIndex]`; wrap at `bars * 4 * PPQ`.
+Per block: advance the playhead; for each track find hits in `[startTick, endTick)`; add note-ons **at the exact sample offset** into that track engine's `MidiBuffer`; render each track engine into the mix; wrap at `bars * 4 * PPQ`.
 
-**Real-time rules:** no allocation, locks or logging in `processBlock`. `MidiBuffer::addEvent` can allocate, so **pre-reserve** every buffer in `prepareToPlay` and `clear()` each block.
+**Two required engine tweaks:**
 
-**This adds no percussion latency.** It runs before `padManager.renderNextBlock` in the same callback, so events land in the synthesisers for the block being output. Sequenced hits are actually tighter than live MIDI, which has to come in through the OS and the `midiCollector` and can wait up to a block; a step carries an exact sample offset and never waits. CPU cost is a handful of comparisons plus a few note-ons per block.
+1. **Gate the FFT thread.** Add something like `PadAudioEngine(bool enableFft = true)` (or a `prepareToPlay` flag). Sequencer engines pass `false` so they skip the `FftWorkerThread` and the spectrum push. Without this, detaching would spawn up to 16 extra threads for a spectrum nobody looks at.
+2. **Share the buffer.** Build the track's `LoopingSamplerSound` from the pad's existing `audioData` shared_ptr using the same dummy-reader trick `preloadPadEngineAsync` already uses — no re-decode, no duplicate RAM.
 
-### 3.4 Index-based routing — this is what makes D3 work
+**Master volume:** the sequencer pool applies `padManager.getMasterVolume()` to its output the same way the metronome beep does, so it stays consistent with the existing convention.
 
-Extend `PadManager::renderNextBlock` with optional per-pad buffers:
+**This adds no percussion latency.** The pool renders in the same `getNextAudioBlock`, and its events carry exact sample offsets. Sequenced hits are tighter than live MIDI, which has to come in through the OS and the `midiCollector`.
 
-```cpp
-void renderNextBlock (juce::AudioBuffer<float>& out,
-                      const juce::MidiBuffer& incoming,   // external MIDI, unchanged
-                      int startSample, int numSamples,
-                      const std::array<juce::MidiBuffer, kMaxPads>* seqEvents = nullptr);
-```
+### 3.4 Capture and re-link (D7)
 
-Each engine renders `incoming` merged with `seqEvents[i]`. A step therefore fires **its own pad by index**, never "whatever pad happens to own note 60".
+- **Capture (automatic):** the first time a track is used (first step placed, or first hit recorded), it snapshots the corresponding pad: `sampleFilePath`, a copy of the sound settings, and a **shared reference** to the decoded buffer.
+- **"Update from pad"** (explicit action): re-captures a track from its pad, for when you *want* it to follow a changed pad sound.
+- Because the snapshot holds a shared_ptr, a later pad change replaces *the pad's* reference — the track keeps the old buffer. Detaching is therefore free of duplication and immune to pad edits.
 
-This is the mechanism behind the stand-alone request:
-
-- **Sequencer → pads is index-based and independent of the MIDI note map.** No collisions, no dependence on a pad's assigned note.
-- **Live MIDI → pads is unchanged** and goes through the existing collector.
-- The two paths meet inside each synthesiser and simply mix. That is what lets the sequencer "stand alone from the pad": once a pattern is approved you can play the 16 pads live — or over MIDI — and the running pattern is unaffected, and vice versa.
-
-### 3.5 Modes: Live / Record / Arrange
-
-Three states for the Seq tab, one at a time:
+### 3.5 Modes
 
 | Mode | Sequencer | Incoming MIDI | Grid |
 |---|---|---|---|
-| **Live** | plays the approved pattern | plays pads live, does **not** touch the pattern | read-only |
-| **Record** | can play or stop | **captured into the matching track** | writes hits |
+| **Live** | plays | plays pads live, does **not** touch the pattern | read-only |
+| **Record** | can play or stop | captured into the matching track (note → pad → track) | writes hits |
 | **Arrange** | stopped (or plays, your call) | ignored for capture | full mouse editing |
 
-- **Record** maps an incoming note to a track via the pad's `midiNote` (the same `findPadForMidiNote` routing the app already uses). Velocity and timing are captured, snapped per the current resolution (or raw in Free).
-- An optional **Lock** (a "pattern approved" padlock) makes Live read-only so a performance cannot disturb an approved take.
-- Re-arranging is therefore explicit: hit **Record**, play the pads, done. No accidental edits during performance.
-- **Note for capture quality:** live recording maps notes → pads, so pads that share a `midiNote` are ambiguous. A small "unique pad notes" validation/warning would help (nice-to-have, not required by index-based *playback*, which is always exact).
+Optional **Lock** ("pattern approved") keeps Live read-only so a performance can't disturb an approved take. Re-arranging is explicit: hit **Record**, play, done.
+
+Recording maps notes to tracks via the pad's `midiNote` (the same `findPadForMidiNote` routing the app already uses), so pads sharing a note are ambiguous — a small "unique pad notes" warning is a nice-to-have.
 
 ### 3.6 Thread safety
 
-UI edits build a **new immutable `SeqPattern`**, published with an atomic `shared_ptr` store; the audio thread loads the pointer once per block. Retired snapshots are freed on the message thread via a small retire list / timer. Never free inline — that would be a use-after-free.
+UI edits build a **new immutable `SeqPattern`**, published with an atomic `shared_ptr` store; the audio thread loads it once per block. Retired snapshots are freed on the message thread. Track sounds (buffer + settings) are installed on the message thread behind the existing `sampleLock`/mute pattern used by `preloadPadEngineAsync`. Never allocate, lock or free inline in `processBlock`.
+
+### 3.7 What this removes
+
+The Revision 3 plan extended `PadManager::renderNextBlock` with per-pad event buffers for deterministic routing. **No longer needed** — the sequencer's own pool has one sound per track with its own note, so it is decoupled from the pad note map by construction. `PadManager` is untouched except for mixing the pool's output.
 
 ---
 
 ## 4. UI
 
-A `SeqControlPanel` mirroring how `RecControlPanel` is structured and routed.
-
 ```
-┌ Seq ──────────────────────────────────────────────────────────────────────┐
-│ [▶][■][● Rec]  Snap:[1/16▾]  Bars:[1▾]  BPM:120  [Live/Arrange]  [Lock]   │
-├──────┬────────────────────────────────────────────────────────────────────┤
-│ 1 ◉  │ ■  ·  ·  ■  ·  ·  ■  ·  ■  ·  ·  ■  ·  ·  ■  ·   →  pad 1          │
-│ 2 ◉  │ ·  ·  ■  ·  ·  ■  ·  ·  ·  ·  ■  ·  ·  ■  ·  ·   →  pad 2          │
-│ 3 ◉  │ …                                                                  │
-│ …    │                                            16 rows, one per pad    │
-│ 16 ◉ │ …                                                                  │
-└──────┴────────────────────────────────────────────────────────────────────┘
-         ▲ fixed row header · horizontally scrollable grid · playhead column
+┌ Seq ──────────────────────────────────────────────────────────────────────────┐
+│ [▶][■][● Rec]  Snap:[1/16▾]  Bars:[1▾]  BPM:120  [Live/Arrange]  [Lock]       │
+│ playing: Bank 1   ← indicator when another bank's sequence is running         │
+├────────────────┬──────────────────────────────────────────────────────────────┤
+│ 1  kick.wav ▬▬ │ ■  ·  ·  ■  ·  ·  ■  ·  ■  ·  ·  ■  ·  ·  ■  ·               │
+│ 2  snare.wav ▬ │ ·  ·  ■  ·  ·  ■  ·  ·  ·  ·  ■  ·  ·  ■  ·  ·               │
+│ 3  hat.wav  ▬▬ │ ■  ·  ■  ·  ■  ·  ■  ·  ■  ·  ■  ·  ■  ·  ■  ·               │
+│ …              │                                    16 rows, one per pad     │
+│ 16 …        ▬  │ …                                                            │
+└────────────────┴──────────────────────────────────────────────────────────────┘
+   fixed row header          horizontally scrollable grid · playhead column
 ```
 
-- **Row header (fixed):** track no., pad marker, the pad's sample name, mute. Selecting a pad anywhere in the app highlights its row.
-- **Grid:** inside a `juce::Viewport`; horizontal scroll for long patterns. 16 rows fit at the default size (§5), so vertical scroll is only a safety net for smaller windows.
-- **Cell interaction:** left-click toggles a hit at the last-used velocity; **vertical drag sets velocity**; right-click clears. Velocity as a brightness ramp and/or a small in-cell bar.
-- **Playhead:** one highlighted column, repainted from an `std::atomic<double>` published by the engine, ~30 fps, **repainting only that column**.
-- **Audition:** clicking a cell fires its pad once so you hear exactly the sound you're sequencing.
-- **Snap combo** holds all 9 options. Changing resolution **never moves existing hits** — add an explicit "Quantise now" later.
-- **BPM** reads/writes the bank tempo (§8).
+- **Row header (fixed):** track no., the **captured** sample name, mute, and a **compact per-track volume fader** (D8) — always visible, always live, double-click to reset to unity. It shows the *captured* sample, not the live pad, so it stays truthful after the pad changes.
+- **Grid:** inside a `juce::Viewport`; horizontal scroll for long patterns. 16 rows fit at the default size (§5).
+- **Cell interaction:** left-click toggles a hit at the last-used velocity; **vertical drag sets velocity**; right-click clears.
+- **Playhead:** one highlighted column, repainted from an `std::atomic<double>` published by the engine, ~30 fps, repainting only that column.
+- **Audition:** clicking a cell fires the track's own engine once — you hear exactly the captured sound.
+- **Snap combo:** all 9 options. Changing resolution never moves existing hits; add an explicit "Quantise now" later.
+- **BPM / click volume:** the bank values (§8).
+- **"playing: Bank N"** indicator, because the pattern playing may not be the one the tab is showing (D2 + D7).
 
 ---
 
 ## 5. Layout
 
-At the default window the tab content area is **≈80 px** because the waveform takes 175 px. Reclaiming the waveform (as the EQ tab already partly does) gives roughly **340 px** in the card.
-
-- 16 rows × 18 px = **288 px**, plus a ~24 px toolbar and a ~16 px ruler ≈ **328 px** — it fits, just.
-- So: **collapse/hide the waveform while Seq is active**, use ~18 px rows, and keep vertical scrolling available as a safety net for smaller windows.
-- Horizontal scrolling handles patterns longer than the card width (at 16th-note resolution, one 4/4 bar = 16 steps, which fits ~720 px comfortably).
-
-This is a much smaller problem than the 20-row version.
+Tab content is ≈80 px today because the waveform takes 175 px. Reclaiming the waveform gives ≈340 px: 16 rows × 18 px = 288 px, plus ~24 px toolbar and ~16 px ruler ≈ 328 px. **It fits**, with vertical scrolling as a safety net for smaller windows. Horizontal scrolling handles long patterns (one 4/4 bar at 16ths = 16 steps, which fits ~720 px).
 
 ---
 
 ## 6. Live recording into the grid
 
-The capture hook already exists in `handleIncomingMidiMessage` (it currently pushes `{flashPad, beatNow}` when armed). For the sequencer, in **Record** mode:
+In **Record** mode, from the existing `handleIncomingMidiMessage` hook:
 
-- Map note → track via `findPadForMidiNote` (pad note → its sample track).
-- Capture `message.getFloatVelocity()` (already available) and the tick from `recSongBeatPos * PPQ`.
+- Map note → track via `findPadForMidiNote`.
+- Capture `message.getFloatVelocity()` and the tick from `recSongBeatPos * PPQ`.
 - Snap per the current resolution; raw tick in Free mode.
-- Hand off to the message thread (lock-free FIFO or `callAsync`) — never write the live pattern from the MIDI callback thread.
+- If the track has no sound yet, capture it from that pad at the same moment.
+- Hand off to the message thread (lock-free FIFO / `callAsync`) — never write the live pattern from the MIDI callback thread.
 
 ---
 
 ## 7. Persistence
 
-Per bank, inside the bank's `.jai`, so a kit carries its groove (D2).
+Per bank, inside the bank's `.jai`, so a kit carries its groove (D2) and its sounds (D7).
 
 ```xml
 <JaibaKit version="1" ...>
   <Pad index="0"> ... </Pad>
   ...
-  <Sequencer snap="3" bars="1" ppq="960" bpm="120" mode="live">
-    <Track pad="0" mute="0">
+  <Sequencer snap="3" bars="1" ppq="960" bpm="120" clickVol="0.5" mode="live">
+    <Track volume="0.80" mute="0">
+      <!-- sound-relevant fields only; no patterns / MIDI routing / zoom -->
+      <Sound pad="0" samplePath="C:/samples/kick.wav" vol="1.0" eqEn="1" ... />
       <Hit tick="0"   vel="0.80"/>
       <Hit tick="240" vel="0.55"/>
-    </Track>
-    <Track pad="1" mute="0">
-      <Hit tick="480" vel="0.70"/>
     </Track>
     ...
   </Sequencer>
 </JaibaKit>
 ```
 
-Touch points:
-- `GjmBank` gains `SeqPattern sequence;`.
-- `GjmManager::parseKitFile` currently returns `std::array<PadSettings,16>`; it must also return the sequence (new `KitData` struct or an out-parameter). `ensureBankReady` / `parseAllBanks` follow.
-- `saveBankKit` writes the `<Sequencer>` block.
-- The session (`.gjm`) references and rewrites each bank's `.jai`, so "Save Session" covers it automatically.
+- The `<Sound>` element reuses the same attribute names as `<Pad>` (so the writer/reader already understand them), but **only the sound-relevant subset** — deliberately excluding `savedPatterns`, MIDI routing, zoom and tab, so a track snapshot never duplicates a pad's patterns.
+- Touch points: `GjmBank` gains `SeqPattern sequence;`; `GjmManager::parseKitFile` must return it too (new `KitData` struct or out-parameter) and `saveBankKit` writes it. The `.gjm` references and rewrites each bank's `.jai`, so "Save Session" covers it.
 
 ---
 
 ## 8. Metronome and tempo ownership (D4)
 
-Sharing the metronome with the sequencer means **tempo must belong to the bank**, not to a pad — otherwise the click and the pattern can disagree. So:
-
-- **BPM → stored with the bank** (in `SeqPattern`). The metronome's beat clock reads it. This replaces the global `recBpmAtomic` as the source of truth for the bank's tempo.
-- **Metronome on/off → transport state** (bank-level UI, not necessarily persisted).
-- **Metronome volume → bank level (confirmed).** With a bank-wide transport, "whose volume is the click?" has no good per-pad answer. A single bank-level click level removes the ambiguity parked in `docs/Click behaviour idea.md`. The per-pad `metVol` field stays in `PadSettings` for file compatibility and is superseded by the bank value.
+- **BPM → bank level** (in `SeqPattern`). The metronome reads it; this replaces the global `recBpmAtomic` as the source of truth for the bank's tempo.
+- **Click volume → bank level** (confirmed). Replaces the per-pad `metVol` as the live value; the per-pad field stays in `PadSettings` for file compatibility and is superseded.
+- **Metronome on/off → transport state.**
+- Because the sequencer pool is resident, the click and the sequence keep running across bank switches.
 
 ---
 
 ## 9. Legacy pattern recorder (D6)
 
-- The **pattern/MIDI-event** half is **not reusable** by the Seq engine — different timing model, no velocity, per-pad storage.
-- But it **is serialised into existing `.jai` kits** (`savedPatterns` XML). Deleting the code now would silently drop any patterns saved in kits. So: **disable/hide the Rec-tab pattern UI, keep the parse/serialise code**, and mark it legacy. Remove only in a later, deliberate commit (optionally with a one-time migration).
-- The **audio-capture** half is genuinely reusable for your future input recording: `AudioFormatWriter::ThreadedWriter`, the writer thread, file naming, and the trim pipeline. Note the current recorder taps the **master output** (§2); input recording means switching the source to `AudioDeviceManager` input channels and enabling inputs in the device setup. Keep that infrastructure.
-- So: **don't remove — disable now, repurpose later.**
+- The **pattern/MIDI-event** half is not reusable (different timing model, no velocity, per-pad storage) — but it **is serialised into existing `.jai` kits**, so deleting it would silently drop saved patterns. **Disable/hide the Rec-tab pattern UI, keep the parse/serialise code**, mark it legacy, remove later in a deliberate commit.
+- The **audio-capture** half is reusable for future input recording (`ThreadedWriter`, writer thread, file naming, trim). Today it taps the **master output**; input recording means switching the source to `AudioDeviceManager` input channels.
+- **Don't remove — disable now, repurpose later.**
 
 ---
 
@@ -258,25 +266,28 @@ Sharing the metronome with the sequencer means **tempo must belong to the bank**
 
 | Phase | Deliverable |
 |---|---|
-| **0** | `SeqPattern` model + `.jai` round-trip (16 tracks). No UI. |
-| **1** | Seq tab shell: 5th tab, panel, waveform reclaimed, 16-row grid, snap combo, click-to-toggle, ruler. **Silent.** |
-| **2** | Audio-thread playback: play/stop, index-based per-pad routing, playhead, audition, bank tempo. |
-| **3** | Velocity editing (drag) + **Record mode** + Free mode + mode switching (§3.5). |
-| **4** | Polish: bars/length, mute, copy/paste, swing, undo, quantise-now, "follow pad selection" highlight, unique-pad-note warning. |
+| **0** | `SeqPattern` model (self-contained tracks + per-track volume) + `.jai` round-trip. No UI. |
+| **1** | Seq tab shell: 5th tab, panel, waveform reclaimed, 16-row grid with row header (sample name + volume fader), snap combo, click-to-toggle, ruler. **Silent.** |
+| **2** | Resident sequencer pool: lazily-created FFT-less engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing + master volume, bank tempo. |
+| **3** | Velocity editing (drag) + **Record mode** + Free mode + mode switching. |
+| **4** | Polish: bars/length, mute, copy/paste, swing, undo, quantise-now, "Update from pad", "playing: Bank N" indicator, unique-pad-note warning, optional global launch strip. |
 
-Phases 0–2 give a working 16-track drum sequencer; 3 completes the "hit + velocity + snap" requirement.
+Phases 0–2 give a working self-contained 16-track sequencer that survives bank switches; 3 completes the "hit + velocity + snap" requirement.
 
 ---
 
 ## 11. Risks
 
-- **RT safety.** Pre-reserve all `MidiBuffer`s in `prepareToPlay`; assert no allocation in `processBlock`.
-- **Note gating.** A step needs a note-off: fixed short gate (e.g. 30 ms) or off-at-next-hit; respect a pad's own one-shot behaviour. Decide in Phase 2.
-- **Snapshot lifetime.** Freeing a retired pattern while the audio thread still holds it is a use-after-free. Retire on the message thread only.
-- **Layout.** 16 rows fit at the default window *only* if the waveform is reclaimed on the Seq tab. Validate in Phase 1.
-- **Scope.** Much reduced now that MIDI output is gone, but still: 16 tracks + velocity + 8 snap resolutions + recording modes.
-- **Tempo migration.** Moving BPM from the global `recBpmAtomic` to per-bank touches the existing Rec/pattern paths — do it in Phase 2 and keep the old atomic as a mirror while both features coexist.
-- **External MIDI clock/sync** is out of scope (internal clock only).
+- **Thread budget.** `PadAudioEngine` spawns an FFT thread per instance. The sequencer pool **must** gate it (§3.3) and create engines **lazily** (only tracks that have a sound), or bank-switching plus detaching could balloon the thread count.
+- **Buffer sharing.** The track must share the pad's `shared_ptr<AudioBuffer>` rather than re-decoding; verify the sound builds correctly from a shared buffer (the `preloadPadEngineAsync` dummy-reader path).
+- **Master volume.** The pool must apply master the same way the metronome does, or be mixed before `PadManager`'s master step — easy to get wrong and it silently skews the mix.
+- **RT safety.** Pre-reserve all `MidiBuffer`s in `prepareToPlay`; no allocation, locks or frees in `processBlock`.
+- **Snapshot lifetime.** Freeing a retired pattern (or a track's shared buffer) while the audio thread still holds it is a use-after-free. Retire on the message thread only.
+- **Note gating.** A step needs a note-off: fixed short gate (e.g. 30 ms), off-at-next-hit, or honour the pad's one-shot/loop setting. Decide in Phase 2.
+- **Broken sample paths.** Self-contained tracks store a path; move the file and the track goes silent (same as pads today). Surface it in the row header (e.g. "missing").
+- **Duplicated settings in the `.jai`.** Each track repeats a subset of pad settings. Small, but the reader/writer must stay in sync with `PadSettings`'s attribute names.
+- **Two behaviours to document.** "Sound captured at record time" vs "live pad" is exactly the kind of thing that confuses later — the row header showing the *captured* name is the mitigation.
+- **Tempo migration.** Moving BPM to per-bank touches the existing Rec/pattern paths — do it in Phase 2, keeping `recBpmAtomic` mirrored while both features coexist.
 
 ---
 
@@ -284,20 +295,21 @@ Phases 0–2 give a working 16-track drum sequencer; 3 completes the "hit + velo
 
 | File | Change |
 |---|---|
-| `src/Sequencer.h` *(new)* | Model (`SeqSnap`, `SeqHit`, `SeqTrack`, `SeqPattern`) + `SequencerEngine` |
-| `src/SequencerGrid.h` *(new)* | 16-row grid, row header, playhead, mode/snap toolbar |
+| `src/Sequencer.h` *(new)* | `SeqSnap`, `SeqHit`, `SeqSound`, `SeqTrack`, `SeqPattern`, `SequencerEngine` |
+| `src/SequencerGrid.h` *(new)* | 16-row grid, row header (name + volume), playhead, mode/snap toolbar |
+| `src/PadAudioEngine.h` | Optional FFT disable (constructor/prepare flag); expose the decoded buffer for sharing |
+| `src/PadManager.h` | Mix the sequencer pool's output (or MainComponent does) |
 | `src/SampleCard.h` | 5th tab button, content routing, waveform reclaim, `setSeqTabVisible` |
-| `src/MainComponent.h/.cpp` | Own engine + transport + modes; call `processBlock`; live capture; bank tempo |
-| `src/PadManager.h` | Optional per-pad event buffers in `renderNextBlock` |
-| `src/GjmManager.h` | `GjmBank::sequence`, parse + save `<Sequencer>`, bank tempo |
+| `src/MainComponent.h/.cpp` | Own the engine + transport + modes; call `processBlock`; capture; bank tempo + click volume |
+| `src/GjmManager.h` | `GjmBank::sequence`, parse + save `<Sequencer>` |
 | `CMakeLists.txt` | List the new headers |
 
-`ConfigurationManager` is **unchanged** — no MIDI output device to persist any more.
+`ConfigurationManager` is unchanged — no MIDI output device to persist.
 
 ---
 
 ## 13. Suggested first move
 
-**Phase 0 + Phase 1, then stop and look.** A Seq tab that reclaims the waveform, draws the 16-row grid with the 9 snap choices and the mode toggle, and lets you click steps in and out — saving and reloading with the kit, but silent. That validates the two real risks (the layout fit and the `.jai` shape) before any audio-thread work, and it is cheap to discard if the interaction doesn't feel right.
+**Phase 0 + Phase 1, then stop and look.** The Seq tab that reclaims the waveform, draws the 16-row grid with its row header (captured sample name + volume fader), the 9 snap choices and the mode toggle, lets you click steps in and out, and saves/reloads with the kit — **silent**. That validates the layout fit, the row-header density and the `.jai` shape before any audio-thread work, and it is cheap to discard if the feel is wrong.
 
-All decisions are now closed. Ready to start Phase 0 + 1 on your word.
+All decisions are closed (D1–D8). Ready to start on your word.
