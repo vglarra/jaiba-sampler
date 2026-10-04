@@ -19,7 +19,10 @@ class SeqControlPanel : public juce::Component,
                         private juce::Timer
 {
 public:
-    static constexpr int kRowH     = 13;
+    static constexpr int kRowHDefault = 13;   // used until the first layout pass
+    // Rows have no upper bound: they grow to fill a maximised window.  The floor
+    // only matters when the window is too short for 16 tracks, which then scrolls.
+    static constexpr int kMinRowH     = 12;
     static constexpr int kRulerH   = 12;
     static constexpr int kHeaderW  = 150;
     static constexpr int kStepW    = 20;
@@ -112,6 +115,7 @@ private:
     {
     public:
         SeqPattern* pattern = nullptr;
+        int rowH = kRowHDefault;      // set by SeqControlPanel::resized()
         std::function<void()> onEdited;
 
         void paint (juce::Graphics& g) override;
@@ -148,6 +152,7 @@ private:
     public:
         SeqPattern* pattern = nullptr;
         const PadSettings* pads = nullptr;
+        int rowH = kRowHDefault;      // kept in step with GridCanvas
         std::function<void()> onEdited;
         int scrollY = 0;
 
@@ -288,6 +293,8 @@ private:
     GridCanvas   gridCanvas;
     HeaderCanvas headerCanvas;
     Ruler        ruler;
+
+    int rowH = kRowHDefault;   // computed in resized() from the space available
 
     void timerCallback() override;
 
@@ -796,16 +803,29 @@ inline void SeqControlPanel::resized()
     headerCanvas.setBounds (area.removeFromLeft (kHeaderW));
     gridViewport.setBounds (area);
 
-    if (pattern != nullptr)
-    {
-        const int w = juce::jmax (1, gridCanvas.visibleSteps()) * kStepW;
-        const int h = SeqPattern::kTracks * kRowH;
-        gridCanvas.setSize (w, h);
-    }
-    else
+    if (pattern == nullptr)
     {
         gridCanvas.setSize (1, 1);
+        return;
     }
+
+    // Fit all 16 tracks into the height available: no vertical scrolling, and the
+    // rows grow when the window does.  Reserve the horizontal scrollbar's height
+    // when the pattern is wider than the viewport, so its arrival cannot push a
+    // vertical scrollbar in as well.
+    const int contentW = juce::jmax (1, gridCanvas.visibleSteps()) * kStepW;
+    const int sbH      = gridViewport.getScrollBarThickness();
+    const int availH   = juce::jmax (1, area.getHeight())
+                       - SequencerLayout::scrollbarReserve (contentW, area.getWidth(), sbH);
+
+    rowH = SequencerLayout::rowHeightFor (availH, SeqPattern::kTracks, kMinRowH);
+
+    gridCanvas.rowH   = rowH;
+    headerCanvas.rowH = rowH;
+
+    gridCanvas.setSize (contentW, SeqPattern::kTracks * rowH);
+    headerCanvas.repaint();
+    gridCanvas.repaint();
 }
 
 inline void SeqControlPanel::paint (juce::Graphics& g)
@@ -826,7 +846,7 @@ inline int SeqControlPanel::GridCanvas::stepAt (int x) const
 inline int SeqControlPanel::GridCanvas::rowAt (int y) const
 {
     if (y < 0) return -1;
-    const int r = y / kRowH;
+    const int r = y / juce::jmax (1, rowH);
     return (r >= 0 && r < SeqPattern::kTracks) ? r : -1;
 }
 
@@ -840,22 +860,22 @@ inline void SeqControlPanel::GridCanvas::paint (juce::Graphics& g)
     const int spb    = juce::jmax (1, pattern->stepsPerBar());
     const int width  = shown * kStepW;
     const int loopW  = steps * kStepW;
-    const int height = SeqPattern::kTracks * kRowH;
+    const int height = SeqPattern::kTracks * rowH;
 
     g.fillAll (juce::Colour (0xFF1B1B1B));
 
     // Row backgrounds (alternating) + hit cells.
     for (int r = 0; r < SeqPattern::kTracks; ++r)
     {
-        const int y = r * kRowH;
+        const int y = r * rowH;
         g.setColour ((r % 2) ? juce::Colour (0xFF202020) : juce::Colour (0xFF252525));
-        g.fillRect (0, y, loopW, kRowH);
+        g.fillRect (0, y, loopW, rowH);
 
         // Dimmed overhang: hits kept here are stored but outside the loop.
         if (shown > steps)
         {
             g.setColour (juce::Colour (0xFF141414));
-            g.fillRect (loopW, y, width - loopW, kRowH);
+            g.fillRect (loopW, y, width - loopW, rowH);
         }
 
         const auto& tr = pattern->tracks[r];
@@ -872,7 +892,7 @@ inline void SeqControlPanel::GridCanvas::paint (juce::Graphics& g)
 
             const auto cell = juce::Rectangle<float> (
                 (float) (s * kStepW + 1), (float) (y + 1),
-                (float) (kStepW - 2), (float) (kRowH - 2));
+                (float) (kStepW - 2), (float) (rowH - 2));
 
             if (s < steps)
             {
@@ -916,7 +936,7 @@ inline void SeqControlPanel::GridCanvas::paint (juce::Graphics& g)
     // Horizontal row separators.
     g.setColour (juce::Colour (0xFF2E2E2E));
     for (int r = 1; r < SeqPattern::kTracks; ++r)
-        g.drawHorizontalLine (r * kRowH, 0.0f, (float) width);
+        g.drawHorizontalLine (r * rowH, 0.0f, (float) width);
 
     // Playhead column (drawn last so it reads over the cells).
     if (playheadColumn >= 0 && playheadColumn < steps)
@@ -965,7 +985,7 @@ inline void SeqControlPanel::GridCanvas::mouseDown (const juce::MouseEvent& e)
 //==============================================================================
 inline int SeqControlPanel::HeaderCanvas::rowAt (int y) const
 {
-    const int r = (y + scrollY) / kRowH;
+    const int r = (y + scrollY) / rowH;
     return (r >= 0 && r < SeqPattern::kTracks) ? r : -1;
 }
 
@@ -980,20 +1000,20 @@ inline void SeqControlPanel::HeaderCanvas::paint (juce::Graphics& g)
 
     for (int r = 0; r < SeqPattern::kTracks; ++r)
     {
-        const int y = r * kRowH - scrollY;
-        if (y + kRowH < 0 || y > getHeight()) continue;
+        const int y = r * rowH - scrollY;
+        if (y + rowH < 0 || y > getHeight()) continue;
 
         const auto& tr = pattern->tracks[r];
         const bool selectedRow = false;
 
         g.setColour ((r % 2) ? juce::Colour (0xFF1C1C1C) : juce::Colour (0xFF212121));
-        g.fillRect (0, y, w, kRowH);
+        g.fillRect (0, y, w, rowH);
 
         // Number
         g.setColour (juce::Colour (0xFF9A9A9A));
         g.setFont (numFont);
         g.drawText (juce::String (r + 1),
-                    juce::Rectangle<int> (0, y, kNumW, kRowH),
+                    juce::Rectangle<int> (0, y, kNumW, rowH),
                     juce::Justification::centred, false);
 
         // Sample name — captured if present, otherwise the live pad (dimmed).
@@ -1008,30 +1028,30 @@ inline void SeqControlPanel::HeaderCanvas::paint (juce::Graphics& g)
         g.setColour (captured ? juce::Colour (0xFFCFCFCF) : juce::Colour (0xFF6E6E6E));
         g.setFont (nameFont);
         g.drawText (name.isEmpty() ? juce::String ("-") : name,
-                    juce::Rectangle<int> (kNumW, y, nameW - 2, kRowH),
+                    juce::Rectangle<int> (kNumW, y, nameW - 2, rowH),
                     juce::Justification::centredLeft, true);
 
         // Volume (drag to adjust)
         const int volX = w - kVolW - kMuteW;
         g.setColour (juce::Colour (0xFF2E2E2E));
-        g.fillRect (volX + 1, y + 2, kVolW - 4, kRowH - 4);
+        g.fillRect (volX + 1, y + 2, kVolW - 4, rowH - 4);
         g.setColour (tr.volume >= 0.999f ? juce::Colour (0xFF8A8A8A) : juce::Colour (0xFF00CF7F));
         g.setFont (nameFont);
         g.drawText (juce::String (juce::roundToInt (tr.volume * 100.0f)) + "%",
-                    juce::Rectangle<int> (volX, y, kVolW, kRowH),
+                    juce::Rectangle<int> (volX, y, kVolW, rowH),
                     juce::Justification::centred, false);
 
         // Mute
         const int muteX = w - kMuteW;
         g.setColour (tr.mute ? juce::Colour (0xFFCC4444) : juce::Colour (0xFF303030));
-        g.fillRect (muteX + 1, y + 2, kMuteW - 3, kRowH - 4);
+        g.fillRect (muteX + 1, y + 2, kMuteW - 3, rowH - 4);
         g.setColour (juce::Colour (0xFFDDDDDD));
         g.setFont (nameFont);
-        g.drawText ("M", juce::Rectangle<int> (muteX, y, kMuteW, kRowH),
+        g.drawText ("M", juce::Rectangle<int> (muteX, y, kMuteW, rowH),
                     juce::Justification::centred, false);
 
         g.setColour (juce::Colour (0xFF2E2E2E));
-        g.drawHorizontalLine (y + kRowH - 1, 0.0f, (float) w);
+        g.drawHorizontalLine (y + rowH - 1, 0.0f, (float) w);
     }
 }
 

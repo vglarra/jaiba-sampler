@@ -176,6 +176,45 @@ int main()
     }
 
     //==========================================================================
+    // Grid layout: 16 tracks fill the available height
+    //==========================================================================
+    {
+        const int tracks = 16;
+        const int minRow = 12;
+
+        // The default card leaves ~217 px under the toolbars and ruler.
+        check (SequencerLayout::rowHeightFor (217, tracks, minRow) == 13,
+               "the default window fits 16 tracks at 13 px");
+
+        // A maximised window must actually grow the rows, not leave a gap.
+        check (SequencerLayout::rowHeightFor (848, tracks, minRow) == 53,
+               "a tall window gives proportionally taller rows");
+        check (SequencerLayout::rowHeightFor (400, tracks, minRow) == 25,
+               "rows scale with the window");
+
+        // Short window: floor applies, and the grid scrolls rather than squashing.
+        check (SequencerLayout::rowHeightFor (100, tracks, minRow) == minRow,
+               "a short window floors the row height instead of squashing");
+        check (SequencerLayout::rowHeightFor (0, tracks, minRow) == minRow,
+               "a zero-height window still yields usable rows");
+        // The guard is against division by zero, not a special value: it must
+        // return something usable rather than trapping.
+        check (SequencerLayout::rowHeightFor (400, 0, minRow) >= minRow,
+               "a zero track count does not divide by zero");
+
+        // The property that matters: the rows never overflow the space.
+        for (int h : { 200, 217, 400, 848, 1200 })
+            check (tracks * SequencerLayout::rowHeightFor (h, tracks, minRow) <= h,
+                   "16 rows always fit inside the available height");
+
+        // Horizontal scrollbar is only charged for when the content is too wide.
+        check (SequencerLayout::scrollbarReserve (800, 700, 8) == 8,
+               "a wide pattern reserves the scrollbar's height");
+        check (SequencerLayout::scrollbarReserve (700, 700, 8) == 0,
+               "a pattern that fits reserves nothing");
+    }
+
+    //==========================================================================
     // Time signature decides the grid's bar length
     //==========================================================================
     {

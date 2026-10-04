@@ -78,6 +78,26 @@ namespace TempoSourceDefaults
 }
 
 //==============================================================================
+// Grid layout helpers.
+namespace SequencerLayout
+{
+    /** Row height that fits `tracks` rows into `availH`.  Rows fill the space, so
+        there is no upper bound; `minRowH` only applies when the window is too
+        short, in which case the grid scrolls instead of squashing. */
+    inline int rowHeightFor (int availH, int tracks, int minRowH)
+    {
+        return juce::jmax (minRowH, availH / juce::jmax (1, tracks));
+    }
+
+    /** Height to reserve for a horizontal scrollbar: only needed when the content
+        is wider than the viewport. */
+    inline int scrollbarReserve (int contentW, int viewW, int barThickness)
+    {
+        return contentW > viewW ? juce::jmax (0, barThickness) : 0;
+    }
+}
+
+//==============================================================================
 // Tempo field interaction: drag to set, double-click to reset.
 namespace SequencerTempo
 {
