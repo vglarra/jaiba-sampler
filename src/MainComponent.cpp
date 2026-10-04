@@ -533,6 +533,7 @@ MainComponent::MainComponent()
     sampleCard.onSyncClickToggled = [this] (bool on) { setSeqSyncEnabled (on); };
     sampleCard.onSeqVolumeChanged = [this] (float v) { setSeqMasterVolume (v); };
     sampleCard.onSeqTimeSigChanged = [this] (int num, int den) { setClickTimeSig (num, den); };
+    sampleCard.onSeqClearRequested = [this] { clearSequencerAction(); };
 
     publishSeqPattern();
     refreshSeqTempoUI();
@@ -5487,6 +5488,46 @@ void MainComponent::applyClickSettings()
 // Changing the signature only re-derives the bar length: hits are stored in ticks
 // and are never re-quantised or dropped, so switching back to the original
 // signature restores the pattern exactly, hits past the shorter loop included.
+// Wipe the pattern back to a blank slate: no steps, 1 bar of 4/4, snap 1/16 and
+// 120 BPM.  Destructive, so it always confirms first.
+void MainComponent::clearSequencerAction()
+{
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::AlertWindow::QuestionIcon)
+            .withTitle ("Clear sequencer")
+            .withMessage ("Remove every step from all 16 tracks?\n\n"
+                          "Snap returns to 1/16, Bars to 1, the signature to 4/4 and "
+                          "the tempo to 120 BPM.  This cannot be undone.")
+            .withButton ("Clear")
+            .withButton ("Cancel"),
+        [this] (int r)
+        {
+            if (r == 1) clearSequencer();
+        });
+}
+
+void MainComponent::clearSequencer()
+{
+    stopSequencer();
+
+    // A default-constructed pattern IS the cleared state: no hits, no captured
+    // sounds, volumes/mutes back to default, snap 1/16, 1 bar, 4/4, 120 BPM.
+    seqPattern = SeqPattern{};
+    seqPattern.mode = SeqMode::Arrange;
+
+    sampleCard.refreshSequencer();
+    applyClickSettings();
+    publishSeqPattern();
+    markKitDirty();
+
+    // "= 120" goes through the normal tempo path, so whatever source this bank
+    // follows is what changes -- identical to dragging the BPM readout.
+    metronomeStandaloneChanged (metronomeStandalone.load (std::memory_order_relaxed), 120.0);
+
+    sampleCard.showTrimToast ("Sequencer cleared - 1 bar, 4/4, 120 BPM", false);
+}
+
 void MainComponent::setClickTimeSig (int num, int den)
 {
     num = juce::jlimit (1, 32, num);

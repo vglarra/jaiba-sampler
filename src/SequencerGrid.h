@@ -64,6 +64,7 @@ public:
     std::function<void (bool)>  onSyncClickToggled;   // lock the click to the sequencer
     std::function<void (float)> onSeqVolumeChanged;   // master level for the pool
     std::function<void (int, int)> onTimeSigChanged;  // accent grouping (num, den)
+    std::function<void ()>      onClearRequested;     // wipe the pattern
 
     SeqControlPanel();
     ~SeqControlPanel() override = default;
@@ -298,6 +299,9 @@ private:
 
     // Metronome accent grouping.
     juce::ComboBox   sigBox { "Sig" };
+
+    // Wipe the pattern back to a blank 120 BPM 4/4 bar (confirmed by the owner).
+    juce::TextButton clearButton { "Clear" };
 
     /** The time signatures offered, in menu order. */
     static juce::StringArray timeSigChoices()
@@ -591,6 +595,12 @@ inline SeqControlPanel::SeqControlPanel()
     };
     addAndMakeVisible (sigBox);
 
+    clearButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xFF5A2A2A));
+    clearButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFFE0C0C0));
+    clearButton.setTooltip ("Clear the sequencer: blank pattern, 1 bar, 4/4, 120 BPM");
+    clearButton.onClick = [this] { if (onClearRequested) onClearRequested(); };
+    addAndMakeVisible (clearButton);
+
     // ---- Tap tempo (same accumulator as the Rec tab) ----
     tapButton.setButtonText ("Tap");
     tapButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF4A3A00));
@@ -850,6 +860,7 @@ inline void SeqControlPanel::resized()
         seqVolumeSlider.setBounds (bar.removeFromLeft (90).reduced (0, 3));
         bar.removeFromLeft (8);
         sigBox.setBounds (bar.removeFromLeft (66).reduced (1, 0));
+        clearButton.setBounds (bar.removeFromRight (54).reduced (1));
     }
 
     // ---- Row 2: pattern + song ----

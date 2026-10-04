@@ -269,6 +269,8 @@ private:
     void setSeqSyncEnabled (bool on);
     void setSeqMasterVolume (float volume);
     void setClickTimeSig (int num, int den);     // pattern's signature (grid + accent)
+    void clearSequencerAction ();                // confirm, then wipe the pattern
+    void clearSequencer ();
     void applyClickSettings ();                  // push the active pattern's signature out
 
     // ---- Live capture (Record mode, Phase 3c) --------------------------------

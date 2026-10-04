@@ -176,6 +176,41 @@ int main()
     }
 
     //==========================================================================
+    // Clear: a default-constructed pattern IS the cleared state
+    //==========================================================================
+    {
+        // Build a heavily-used pattern, then reset it the way Clear does.
+        SeqPattern used;
+        used.bpm     = 137.0;
+        used.bars    = 4;
+        used.sigNum  = 7;
+        used.sigDen  = 8;
+        used.snap    = SeqSnap::ThirtySecond;
+        used.mode    = SeqMode::Record;
+        used.locked  = true;
+        used.tracks[2].volume = 0.3f;
+        used.tracks[2].mute   = true;
+        used.tracks[2].hits.push_back ({ 240, 0.4f });
+        used.tracks[5].sound.hasSound = true;
+
+        used = SeqPattern{};
+
+        check (used.bpm == 120.0, "clear returns the tempo to 120");
+        check (used.bars == 1, "clear returns Bars to 1");
+        check (used.sigNum == 4 && used.sigDen == 4, "clear returns the signature to 4/4");
+        check (used.snap == SeqSnap::Sixteenth, "clear returns Snap to 1/16");
+        check (! used.hasAnyHits(), "clear removes every step");
+        check (used.tracks[2].hits.empty(), "and every track's hits");
+        check (used.tracks[2].volume == 1.0f && ! used.tracks[2].mute,
+               "clear returns track levels and mutes to default");
+        check (! used.tracks[5].sound.hasSound, "clear unlinks captured sounds");
+        check (! used.locked && used.mode == SeqMode::Arrange,
+               "clear unlocks and returns to an editable mode");
+        check (used.stepsPerBar() == 16 && used.totalTicks() == 3840,
+               "the cleared grid is one 4/4 bar of 16 steps");
+    }
+
+    //==========================================================================
     // Live capture (Record mode): note-on -> tick -> step
     //==========================================================================
     {
