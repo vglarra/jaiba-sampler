@@ -384,5 +384,5 @@ The metronome controls from the Rec tab were then mirrored onto the Seq tab (Met
 **All decisions are closed (D1–D9). Phase 2 is two pieces:**
 
 1. **Session tempo sources** (§8) — ✅ **done** (commit `9575c14`). `Tempos` + per-bank `tempoGroup` in the session, resolution on bank switch/kit load, tap writing the resolved source, and the tempo-source selector with named songs (default "Song 1"). Old sessions load unchanged. Rename and delete are in; the default song can't be deleted.
-2. **The resident playback pool** — the larger one, and the next piece: FFT-gated engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing. Start by gating `PadAudioEngine`'s FFT thread as an isolated change with its own build check.
+2. **The resident playback pool** — ✅ **core done** (commit `d460a61`). Lazy FFT-less engines outside the bank swap, sounds shared from the pads' decoded buffers, sample-accurate scheduling, capture-from-pad on first use, reconcile on session load, Play/Stop and a playhead. Still to come: an explicit "Update from pad" action, and per-track sound loading for a stored path whose pad is no longer present (currently such a track stays silent until its pad reloads).
 
