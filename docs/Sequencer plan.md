@@ -425,7 +425,82 @@ overhang showing notes kept past a shortened loop, and the Clear / Erase pair.
 | **Global launch strip** | Optional, not started. |
 | **Bars/length beyond the presets** | The Bars combo offers fixed counts; arbitrary lengths are not settable. |
 
-## 13b. Historical status
+## 14. Next up (ready to pick up)
+
+Two pieces of work, in this order.  Neither is started.
+
+### 14.1 The "something becomes ready later" sweep
+
+Four separate bugs have now been reported that were all the same shape: a piece of
+knowledge existed in one code path and was missing from a second one that needed it.
+
+| Report | The second place that had drifted |
+|---|---|
+| OneShot not reaching the sequencer | `oneShotEnabledChanged` pushed to the live sounds but never called `captureSampleCardToPadSettings`, so `padSettings` kept the old value |
+| Loop with a short trim ignored | the sound *install* applied the start/end region; the live *update* path did not |
+| Clear Bank Kit left the pattern | `clearCurrentBankKit` emptied the pads but not `seqPattern` |
+| Fresh sample / loaded kit silent until a pad was clicked | the capture ran once from the pad's decoded buffer, which arrives on a background thread, and nothing retried it |
+
+The last one is the dangerous family, because it is **timing-dependent**: it looks
+intermittent, and it appears to fix itself when an unrelated action happens to
+re-run the work.  The question to ask of every async completion in the app --
+pad preloads, sample loads, background decodes, bank parsing -- is: **"who is
+waiting for this, and do they get told?"**  Candidates worth auditing:
+`preloadPadEngineAsync`, `loadSampleFileAsync`, `parseAllBanks`, `ensureBankReady`,
+`reconcileTrackSounds`, and every listener in `SampleCard::Listener`.
+
+A cheap invariant to aim for, and the one that fixed the last bug: make the work
+**idempotent and retryable** (do nothing when already done) and call it from every
+place that *might* be the moment the data arrives -- rather than picking one place
+and hoping it is the right one.
+
+### 14.2 Edit a detached track directly (the real fix)
+
+Today the Control panel is bound to the **selected pad**, so a detached track's own
+sound cannot be edited: the round trip is detach -> "Edit in pad N" -> edit ->
+detach again.  That works but is indirect, and it is why the track menu only offers
+Loop and OneShot.
+
+The goal: select a track and have the Control panel edit **it**, exactly as if it
+were an independent sample pad.  That removes the round trip and makes the track
+menu's Loop/OneShot entries unnecessary.
+
+**The precedent already exists.**  `padSelectionSource` /
+`selectedGlobalPadIndex` already lets the panel target something that is not a kit
+pad, and `captureSampleCardToPadSettings` (MainComponent.cpp, "Active tab") already
+branches on it -- routing global pads to `captureGlobalPadFromSampleCard()`.  A
+sequencer track is a third target of the same kind, not a new mechanism.
+
+Sketch:
+
+1. Extend the selection source with `SequencerTrack` plus a `selectedTrackIndex`.
+   The panel's `pad()` equivalent resolves to that track's engine rather than
+   `padManager.getEngine(padManager.selectedPadIndex)`.
+2. Branch `captureSampleCardToPadSettings` a third way: write into
+   `seqPattern.tracks[i].sound.settings` instead of `padManager.padSettings[i]`,
+   then call `seqEngine.updateTrackFromPad(i, settings)` -- which already exists and
+   already applies shape and mix live.
+3. Reading: `updateUIFromSettings` needs the track's settings, and the waveform
+   needs the track's audio via `SequencerEngine` rather than the pad's.
+4. Loading a sample while a track is the target must install into that track's
+   engine (`setTrackSound`) and go through the same background decode, not into a
+   pad.
+5. Selection UI: clicking a row header selects that track (it currently auditions);
+   the header should show which track is selected, and the Control panel should make
+   it obvious it is editing a track and not a pad.
+
+**The invasive part is step 2's neighbourhood, not the routing itself.**  Several
+listeners write *straight to the selected pad's engine*, bypassing
+`captureSampleCardToPadSettings` entirely -- `oneShotEnabledChanged` and
+`loopEnabledChanged` both do (`pad().getSynthesiser()...`, `pad().loopEnabled`).
+Every one of those has to learn about the third target or it will silently edit the
+pad while the panel shows a track.  Enumerating them is the first task, and the
+14.1 sweep is the natural way to do it -- which is why the sweep comes first.
+
+Once this lands, "Edit in pad N" becomes redundant.  Keep it (it is still useful for
+moving a sound onto a pad deliberately) but stop needing it.
+
+## 15. Historical status
 
 **Phase 0 + 1 are done** (commit `522bbe6`): the `SeqPattern` model round-trips through the kit, and the Seq tab draws the 16-row grid with its row header, the 9 snap choices, per-track volume and the mode toggle, saving and reloading with the kit. Still **silent** — Play/Stop and Rec are disabled with tooltips.
 
