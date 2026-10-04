@@ -353,9 +353,9 @@ Bank-level (confirmed): `SeqPattern::clickVolume`. The per-pad `metVol` stays in
 |---|---|
 | **0** | `SeqPattern` model (self-contained tracks + per-track volume) + `.jai` round-trip. No UI. |
 | **1** | Seq tab shell: 5th tab, panel, waveform reclaimed, 16-row grid with row header (sample name + volume fader), snap combo, click-to-toggle, ruler. **Silent.** |
-| **2** | Resident sequencer pool: lazily-created FFT-less engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing + master volume. **Plus session tempo sources** (§8): `<Tempos>` + per-bank `tempoGroup` in the session, resolution on bank switch, tap writing the resolved source, and the tempo-source selector UI. |
-| **3** | Velocity editing (drag) + **Record mode** + Free mode + mode switching. |
-| **4** | Polish: bars/length, mute, copy/paste, swing, undo, quantise-now, "Update from pad", "playing: Bank N" indicator, unique-pad-note warning, optional global launch strip. |
+| **2** | Resident sequencer pool: lazily-created FFT-less engines, shared buffers, capture-from-pad, play/stop, playhead, audition, mixing + master volume. **Plus session tempo sources** (§8). **Done** except audition — and mixing went further than planned: a metronome that phase-locks to the sequencer, an accented click with a time signature, and a Seq master level. |
+| **3** | Velocity editing (drag) + **Record mode** + Free mode + mode switching. **Done** except the second half of Free mode: capture already records unquantised when Snap is Free, but shift-drag arbitrary placement is not built. |
+| **4** | Polish: bars/length, mute, copy/paste, swing, undo, quantise-now, "Update from pad", "playing: Bank N" indicator, unique-pad-note warning, optional global launch strip. **Mute and "Update from pad" are done** (the latter richer than planned: a per-track link state with detach / re-link / load-sample / push-to-pad). The rest is outstanding. |
 
 Phases 0–2 give a working self-contained 16-track sequencer that survives bank switches; 3 completes the "hit + velocity + snap" requirement.
 
@@ -394,6 +394,38 @@ Phases 0–2 give a working self-contained 16-track sequencer that survives bank
 ---
 
 ## 13. Status
+
+**Phases 0-3 are substantially complete**; Phase 4 is mostly open.  Everything below
+ships with tests (`tests/run_tests.sh`, 166 model + 26 audio checks).
+
+Built, in order: the model and Seq tab shell; session tempo sources; the resident
+playback pool; a step gate that makes a step a real duration and honours the pad's
+OneShot; per-track link state with detach / re-link / load-sample / push-to-pad;
+Live/Record/Arrange plus Lock; velocity drag editing; live capture into the grid;
+Erase and Reset; and a time signature that sets the grid's bar length rather than
+only the click.
+
+Beyond the plan, because playing with it asked for them: a metronome that
+phase-locks to the sequencer (so Play drops in on the beat), an accented click with
+a selectable time signature, a draggable BPM readout, a Seq master level, a dimmed
+overhang showing notes kept past a shortened loop, and the Clear / Erase pair.
+
+### Outstanding
+
+| Item | Notes |
+|---|---|
+| **Audition** | Clicking a cell still only toggles it; it does not preview the sound. |
+| **Free mode placement** | Capture is unquantised at Snap = Free, but shift-drag arbitrary placement is not built. |
+| **A detached track's trim/EQ** | Only Loop and OneShot are in the track menu; anything else needs the push-to-pad round trip. |
+| **Missing sample on load** | A stored track whose pad is gone stays silent: there is no re-decode path for it. Detaching and pushing both need the file present. |
+| **Count-in** | Record starts the transport; there is no count-in. |
+| **Copy/paste, swing, undo, quantise-now** | Not started. |
+| **"playing: Bank N" indicator** | Not started. |
+| **Unique-pad-note warning** | Not started — pads sharing a MIDI note are ambiguous to capture. |
+| **Global launch strip** | Optional, not started. |
+| **Bars/length beyond the presets** | The Bars combo offers fixed counts; arbitrary lengths are not settable. |
+
+## 13b. Historical status
 
 **Phase 0 + 1 are done** (commit `522bbe6`): the `SeqPattern` model round-trips through the kit, and the Seq tab draws the 16-row grid with its row header, the 9 snap choices, per-track volume and the mode toggle, saving and reloading with the kit. Still **silent** — Play/Stop and Rec are disabled with tooltips.
 
