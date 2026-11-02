@@ -1314,6 +1314,28 @@ void MainComponent::updateDeviceInfo()
     // app startup, so try on each 500 ms tick while armed.
     maybeRestoreMidiDevice();
 
+    // Auto-detect the two drum boards by their fixed USB names and keep them
+    // open across unplug/replug. Message-thread only; no audio-thread work.
+    updateAutoMidiInputs();
+
+    // Periodic autosave: survives a hard power-off, not just a clean quit.
+    // Only writes when something is dirty; a kit is a few KB of XML.
+    {
+        // getMillisecondCounter() is time since boot, not since app start —
+        // arm the interval on the first tick or the first save would fire
+        // immediately on launch.
+        const juce::uint32 nowMs = juce::Time::getMillisecondCounter();
+        if (lastAutosaveMs == 0)
+            lastAutosaveMs = nowMs;
+
+        const bool dirty = kitIsDirty || gjmManager.isDirty || gjmManager.anyBankDirty();
+        if (dirty && nowMs - lastAutosaveMs >= 30000)
+        {
+            lastAutosaveMs = nowMs;
+            autosaveCurrentSetup();
+        }
+    }
+
     // ── Deferred diagnostic prints (written by audio thread, printed here on message thread) ─
     {
         const juce::int64 latUs = pad().lastMidiLatencyUs.exchange(-1, std::memory_order_relaxed);
@@ -1364,15 +1386,11 @@ void MainComponent::updateDeviceInfo()
         audioDeviceInfoLabel.setText(info, juce::dontSendNotification);
         
         juce::String midiInfo = "MIDI: ";
-        if (midiInput != nullptr && !currentMidiDeviceName.isEmpty())
-        {
-            midiInfo += currentMidiDeviceName + " (Connected)";
-        }
-        else
-        {
-            midiInfo += "No device selected";
-        }
-        
+        midiInfo << "R:" << (autoMidiConnected[0] ? "OK" : "--")
+                 << "  L:" << (autoMidiConnected[1] ? "OK" : "--");
+        if (midiInput != nullptr && currentMidiDeviceName.isNotEmpty())
+            midiInfo << "  +" << currentMidiDeviceName;
+
         midiDeviceInfoLabel.setText(midiInfo, juce::dontSendNotification);
         
         // Reset counter to avoid overflow
@@ -1511,6 +1529,11 @@ void MainComponent::updateMidiDeviceList()
     
     for (auto& device : devices)
     {
+        // The two drum boards are auto-detected by their fixed USB names and
+        // held open permanently; offering them here would open a port twice.
+        if (device.name.startsWithIgnoreCase ("Jaiba "))
+            continue;
+
         midiInputNames.add(device.name);
     }
     
@@ -1638,14 +1661,15 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
         }
     }
 
-    // Channel filter: drop messages on wrong channel (0 = any).
-    // Skip filter entirely when a G pad is displayed — G pads default to midiChannel=1
-    // and would incorrectly block all MIDI from kit pads on other channels while the
-    // SampleCard shows a G pad.  The per-pad synthesizer note-range already handles routing.
-    if (padSelectionSource == PadSelectionSource::Bank)
+    // Routing filter: a NOTE-ON must be accepted by at least one kit pad
+    // (matching note + channel; a pad channel of 0 accepts any channel).
+    // This used to be keyed to the *currently displayed* pad's channel, so
+    // selecting a Ch-3 pad silently muted the Ch-1 drum controller. Note-offs
+    // and aftertouch always pass through so a pad edit mid-hold can't leave a
+    // stuck note.
+    if (padSelectionSource == PadSelectionSource::Bank && message.isNoteOn())
     {
-        const int selectedChannel = sampleCard.getMidiChannel();
-        if (selectedChannel != 0 && message.getChannel() != selectedChannel)
+        if (padManager.findPadForMidiNote(message.getNoteNumber(), message.getChannel()) < 0)
             return;
     }
 
@@ -2249,7 +2273,9 @@ void MainComponent::showKitMenu()
         });
 }
 
-void MainComponent::saveKitToFile (const juce::File& file)
+// Serialises the current pad map + sequencer pattern. Does not touch the
+// "current kit" identity, so it can also be used for background autosaves.
+bool MainComponent::writeKitXmlToFile (const juce::File& file)
 {
     // Flush current SampleCard state so norm/EQ/gain changes made since the
     // last change-event (especially deferred async norm scans) are captured.
@@ -2276,22 +2302,31 @@ void MainComponent::saveKitToFile (const juce::File& file)
         seqPattern.saveToXml (*seqEl);
     }
 
-    if (root->writeTo (file))
+    return root->writeTo (file);
+}
+
+void MainComponent::saveKitToFile (const juce::File& file)
+{
+    if (! writeKitXmlToFile (file))
     {
-        currentKitFile = file;
-        kitIsDirty = false;
-        gjmManager.banks[gjmManager.activeBank].isDirty = false;
-        kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
-        kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
-        kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
-        sampleCard.showTrimToast ("Kit saved: " + file.getFileName(), false);
-    }
-    else
         juce::AlertWindow::showMessageBoxAsync (
             juce::MessageBoxIconType::WarningIcon,
             "Save Failed",
             "Could not write to:\n" + file.getFullPathName(),
             "OK", nullptr);
+        return;
+    }
+
+    currentKitFile = file;
+    kitIsDirty = false;
+    gjmManager.banks[gjmManager.activeBank].isDirty = false;
+    configManager->saveLastKitPath (file.getFullPathName());
+
+    kitNameLabel.setText(file.getFileNameWithoutExtension(), juce::dontSendNotification);
+    kitNameLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF1A3050));
+    kitNameLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFB8DEFF));
+    if (! quietSave)
+        sampleCard.showTrimToast ("Kit saved: " + file.getFileName(), false);
 }
 
 void MainComponent::loadKitFromFile (const juce::File& file)
@@ -2438,6 +2473,11 @@ void MainComponent::loadKitFromFile (const juce::File& file)
 
     // Refresh the bank label (kit name may have just changed).
     updateGjmUI();
+
+    // Remember it for the next launch. Loading a standalone kit supersedes any
+    // previously loaded session, otherwise the session would win on restart.
+    configManager->saveLastKitPath (file.getFullPathName());
+    configManager->saveLastSessionPath (juce::String());
 }
 
 void MainComponent::newKitAction()
@@ -2688,6 +2728,8 @@ void MainComponent::loadGjmFromFile (const juce::File& file)
         return;
     }
     // loadManifest() sets isUntitled=false, isDirty=false, isLoaded=true
+    // Remember it so the whole setup comes back on the next launch.
+    configManager->saveLastSessionPath (file.getFullPathName());
 
     // Disable bank nav while the background parse job runs
     globalControlsBar.setMaxBank (GjmManager::kNumBanks);
@@ -2829,7 +2871,9 @@ void MainComponent::saveGjmToFile (const juce::File& file)
             b.isDirty = false;
 
         configManager->saveLastKitFolder (file.getParentDirectory().getFullPathName());
-        sampleCard.showTrimToast ("Session saved: " + file.getFileName(), false);
+        configManager->saveLastSessionPath (file.getFullPathName());
+        if (! quietSave)
+            sampleCard.showTrimToast ("Session saved: " + file.getFileName(), false);
         updateGjmUI();
     }
     else
@@ -6797,15 +6841,17 @@ void MainComponent::handleMidiLearn(int noteNumber)
 // Session persistence methods
 void MainComponent::loadLastSession()
 {
-    // App starts fresh — no samples or kit loaded automatically.
-    // Only audio and MIDI device selections are restored (system-level settings).
+    // Audio settings are restored by JUCE's device manager; MIDI below; then
+    // the last kit/session is reloaded a moment after construction so the
+    // pad map and samples survive a restart.
 
     // ── Restore MIDI device ────────────────────────────────────────────────────────
     // getAvailableDevices() can be empty this early in construction, so if the
     // saved device isn't found yet we arm a retry (maybeRestoreMidiDevice, run on
-    // the 500 ms timer) instead of giving up.
+    // the 500 ms timer) instead of giving up. (The two Jaiba boards need no
+    // restore at all — they are auto-detected by name on the same timer.)
     juce::String savedDevice = configManager->getMidiDevice();
-    if (savedDevice.isNotEmpty())
+    if (savedDevice.isNotEmpty() && ! savedDevice.startsWithIgnoreCase ("Jaiba "))
     {
         midiRestoreName = savedDevice;
         midiRestoreAttempts = 0;
@@ -6829,6 +6875,16 @@ void MainComponent::loadLastSession()
 
     // ── Restore FFT visualizer sensitivity (defaults to 1.0 if never saved) ─────────
     fftVisualizer.setSensitivity(configManager->getVizSensitivity());
+
+    // Reload the last saved setup after construction finishes: loadKitFromFile/
+    // loadGjmFromFile touch the UI and start background preload jobs, which is
+    // not safe from inside the constructor's initial setup.
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::Timer::callAfterDelay (700, [safeThis]() mutable
+    {
+        if (safeThis != nullptr)
+            safeThis->restoreLastSavedSetup();
+    });
 }
 
 void MainComponent::saveOutgoingSampleState()
@@ -7484,39 +7540,14 @@ bool MainComponent::hasAnySamplesLoaded() const
 
 void MainComponent::requestQuit()
 {
-    if (!gjmManager.isDirty && !kitIsDirty && !gjmManager.anyBankDirty())
-    {
-        juce::JUCEApplication::getInstance()->systemRequestedQuit();
-        return;
-    }
+    // Persist the whole setup before exiting. The old "Save Session?" prompt
+    // lost pad/MIDI-learn edits whenever the user closed without saving; the
+    // instrument now comes back exactly as it was. (A crash/power cut is
+    // covered by the 30 s periodic autosave in updateDeviceInfo.)
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+    autosaveCurrentSetup();
 
-    juce::AlertWindow::showAsync (
-        juce::MessageBoxOptions()
-            .withIconType (juce::AlertWindow::QuestionIcon)
-            .withTitle ("Save Session?")
-            .withMessage ("You have unsaved changes. Save the session before closing?")
-            .withButton ("Save Session")
-            .withButton ("Close Without Saving")
-            .withButton ("Cancel"),
-        [this] (int result)
-        {
-            if (result == 1)
-            {
-                // Save session (may open a file dialog if untitled)
-                saveSessionAction (false);
-                // Quit after save — for titled sessions this is instant
-                // (no dialog), so we can quit immediately.
-                // For untitled sessions the file dialog is async; the user
-                // will close the app again after saving.
-                if (!gjmManager.isUntitled)
-                    juce::JUCEApplication::getInstance()->systemRequestedQuit();
-            }
-            else if (result == 2)
-            {
-                juce::JUCEApplication::getInstance()->systemRequestedQuit();
-            }
-            // result == 0 or 3 = Cancel — do nothing
-        });
+    juce::JUCEApplication::getInstance()->systemRequestedQuit();
 }
 
 bool MainComponent::isValidMidiDevice(const juce::String& deviceName)
@@ -7550,6 +7581,14 @@ void MainComponent::maybeRestoreMidiDevice()
     if (midiInput != nullptr || midiRestoreName.isEmpty())
         return;
 
+    // Jaiba boards are auto-detected; a stale manual selection pointing at one
+    // must not open a second handle on the same port.
+    if (midiRestoreName.startsWithIgnoreCase ("Jaiba "))
+    {
+        midiRestoreName.clear();
+        return;
+    }
+
     if (++midiRestoreAttempts > 40)   // ~20 s of 500 ms ticks, then give up
     {
         midiRestoreName.clear();
@@ -7570,6 +7609,144 @@ void MainComponent::maybeRestoreMidiDevice()
             }
             return;
         }
+    }
+}
+
+//==============================================================================
+// Dual-board MIDI + setup persistence
+//==============================================================================
+juce::String MainComponent::autoMidiNamePrefix (int slot)
+{
+    return slot == 0 ? juce::String ("Jaiba Right") : juce::String ("Jaiba Left");
+}
+
+// Keeps both drum boards open. Their USB product strings are fixed in firmware
+// ("Jaiba Right" / "Jaiba Left"), so a name match is enough — no ALSA client
+// id is stored anywhere, and replug/reconnect just works on the next tick.
+// Both inputs feed the existing single midiCollector, so no extra buffering
+// and no added latency.
+void MainComponent::updateAutoMidiInputs()
+{
+    auto devices = juce::MidiInput::getAvailableDevices();
+
+    for (int slot = 0; slot < kNumAutoMidiInputs; ++slot)
+    {
+        const auto prefix = autoMidiNamePrefix (slot);
+
+        const juce::MidiDeviceInfo* match = nullptr;
+        for (auto& d : devices)
+            if (d.name.startsWithIgnoreCase (prefix)) { match = &d; break; }
+
+        if (autoMidiInputs[slot] != nullptr)
+        {
+            if (match == nullptr)
+            {
+                // Board went away (powered off / unplugged). Close it so the
+                // next tick can reopen as soon as it enumerates again.
+                autoMidiInputs[slot]->stop();
+                autoMidiInputs[slot].reset();
+                autoMidiConnected[slot] = false;
+                DBG ("Auto MIDI: " + prefix + " disconnected");
+
+                // The note-off for a held pad died with the board. Panic so a
+                // power cycle can't leave a note stuck on.
+                padManager.stopAllPads();
+                padManager.stopAllGlobalPads();
+            }
+        }
+        else if (match != nullptr)
+        {
+            juce::ScopedLock lock (midiLock);
+            autoMidiInputs[slot] = juce::MidiInput::openDevice (match->identifier, this);
+            if (autoMidiInputs[slot] != nullptr)
+            {
+                autoMidiInputs[slot]->start();
+                autoMidiConnected[slot] = true;
+                DBG ("Auto MIDI: " + prefix + " connected as " + match->name);
+            }
+        }
+    }
+}
+
+juce::File MainComponent::getAutosaveFile() const
+{
+    // Sibling of JaibaSampler.settings, so it follows the same per-user folder.
+    const auto dir = configManager->getPropertiesFile()->getFile().getParentDirectory();
+    return dir.getChildFile ("last-session.jai");
+}
+
+// Writes the current pad map/kit/session in place. Called on quit and every
+// 30 s while dirty, so a power cut loses at most half a minute of edits.
+void MainComponent::autosaveCurrentSetup()
+{
+    // A sample change mutes/rebuilds the engine; capturing now would persist a
+    // half-applied state. The next tick/quit will pick it up.
+    if (pad().muteOutput.load (std::memory_order_relaxed))
+        return;
+
+    captureSampleCardToPadSettings (padManager.selectedPadIndex);
+
+    const bool sessionNamed = !gjmManager.isUntitled && gjmManager.gjmFile.existsAsFile();
+    const bool kitNamed     = currentKitFile.existsAsFile();
+    const bool dirty        = kitIsDirty || gjmManager.isDirty || gjmManager.anyBankDirty();
+
+    // Nothing has been edited since the last load/save — leave the files alone.
+    if (! dirty)
+        return;
+
+    juce::File target;
+    bool isSession = false;
+
+    if (sessionNamed)          { target = gjmManager.gjmFile; isSession = true; }
+    else if (kitNamed)         { target = currentKitFile; }
+    else                       { target = getAutosaveFile(); }
+
+    DBG ("Autosave -> " + target.getFullPathName());
+
+    // Keep one previous good copy in case a write is interrupted.
+    if (target.existsAsFile())
+        target.copyFileTo (target.getSiblingFile (target.getFileName() + ".bak"));
+
+    // Suppress the "saved" toast for background saves.
+    struct QuietScope { bool& f; explicit QuietScope (bool& b) : f (b) { f = true; }
+                        ~QuietScope() { f = false; } } quiet (quietSave);
+
+    if (isSession)
+    {
+        saveGjmToFile (target);
+    }
+    else if (kitNamed)
+    {
+        saveKitToFile (target);
+    }
+    else
+    {
+        if (writeKitXmlToFile (target))
+        {
+            configManager->saveLastKitPath (target.getFullPathName());
+            kitIsDirty = false;
+            gjmManager.banks[gjmManager.activeBank].isDirty = false;
+        }
+    }
+}
+
+// Restores the last setup: a named session (all banks) first, then a single
+// kit, then nothing (first run).
+void MainComponent::restoreLastSavedSetup()
+{
+    const juce::File session (configManager->getLastSessionPath());
+    DBG ("Startup restore: session=" + session.getFullPathName()
+         + " kit=" + configManager->getLastKitPath());
+    if (session.existsAsFile())
+    {
+        loadGjmFromFile (session);
+        return;
+    }
+
+    const juce::File kit (configManager->getLastKitPath());
+    if (kit.existsAsFile())
+    {
+        loadKitFromFile (kit);
     }
 }
 

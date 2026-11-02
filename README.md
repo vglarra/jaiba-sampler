@@ -2,6 +2,21 @@
 
 A standalone MIDI-triggered audio sampler built with JUCE.
 
+## Jaiba two-board setup
+
+- The drum is two USB-MIDI devices with fixed names, `Jaiba Right` and
+  `Jaiba Left`. The app auto-detects both on every launch, retries while one is
+  absent, and reopens after a replug — there is no device selection to lose.
+- Both streams are merged. MIDI notes are disjoint (right 60–76, left 78–90),
+  so sampler pad *i* uses note `60 + 2*i`.
+- The last loaded session/kit is restored on startup. The setup autosaves on
+  quit and every 30 s while dirty, so pad mappings and MIDI-learned notes
+  survive restarts.
+- `~/Documents/sounds/jaiva-kits/jaiba-16-map.jai` is an empty kit with all 16
+  pads mapped to the right notes — load it once and add samples.
+- The MIDI Input dialog is only for an extra/manual controller; the two drum
+  boards never need to be selected there.
+
 ## Building
 
 This project uses JUCE as a git submodule, so clone with `--recursive`

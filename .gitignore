@@ -46,3 +46,6 @@ CLAUDE.md
 *.swo
 *~
 Thumbs.db
+
+# Release build tree (Ninja single-config)
+build-release/

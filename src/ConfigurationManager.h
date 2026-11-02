@@ -313,6 +313,31 @@ public:
         return propertiesFile->getValue("midiDevice");
     }
 
+    // Files restored on startup so the pad map/samples survive a restart.
+    // The MIDI side needs no keys: the two boards are auto-detected by their
+    // fixed USB names ("Jaiba Right" / "Jaiba Left").
+    void saveLastKitPath(const juce::String& path)
+    {
+        propertiesFile->setValue("lastKitPath", path);
+        flush();
+    }
+
+    juce::String getLastKitPath()
+    {
+        return propertiesFile->getValue("lastKitPath");
+    }
+
+    void saveLastSessionPath(const juce::String& path)
+    {
+        propertiesFile->setValue("lastSessionPath", path);
+        flush();
+    }
+
+    juce::String getLastSessionPath()
+    {
+        return propertiesFile->getValue("lastSessionPath");
+    }
+
     int getPitchOffset()
     {
         if (propertiesFile->containsKey("pitchOffsetCents"))

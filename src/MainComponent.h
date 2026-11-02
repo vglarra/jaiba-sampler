@@ -536,6 +536,16 @@ private:
     
     //==============================================================================
     // MIDI components
+    //
+    // The drum is two USB-MIDI devices with fixed names ("Jaiba Right" /
+    // "Jaiba Left"). They are auto-detected and opened together, so the USB
+    // side survives replug/reboot with no saved port id. Both streams feed the
+    // same lock-free collector — no extra buffering, no added latency.
+    static constexpr int kNumAutoMidiInputs = 2;
+    std::unique_ptr<juce::MidiInput> autoMidiInputs[kNumAutoMidiInputs];
+    bool autoMidiConnected[kNumAutoMidiInputs] { false, false };
+    static juce::String autoMidiNamePrefix (int slot);
+
     std::unique_ptr<juce::MidiInput> midiInput;
     juce::StringArray midiInputNames;
     juce::String currentMidiDeviceName;
@@ -546,6 +556,11 @@ private:
     // the 500 ms timer until the saved device appears (or we give up).
     juce::String midiRestoreName;
     int midiRestoreAttempts = 0;
+
+    // Last periodic autosave (ms since launch), see updateDeviceInfo().
+    juce::uint32 lastAutosaveMs = 0;
+    // Suppresses "saved" toasts during background autosaves.
+    bool quietSave = false;
     
     // MIDI Learn mode
     bool isLearningMode = false;
@@ -737,6 +752,11 @@ private:
     }
     void startMidiInput(const juce::String& deviceName) override
     {
+        // Jaiba boards are managed by updateAutoMidiInputs(); never open one
+        // through the manual path or the same ALSA port would be opened twice.
+        if (deviceName.startsWithIgnoreCase ("Jaiba "))
+            return;
+
         juce::ScopedLock lock(midiLock);
         
         auto devices = juce::MidiInput::getAvailableDevices();
@@ -788,6 +808,11 @@ private:
     bool isValidMidiDevice(const juce::String& deviceName);
     void midiDeviceChanged(const juce::String& newDevice);
     void maybeRestoreMidiDevice();
+    void updateAutoMidiInputs();
+    void restoreLastSavedSetup();
+    void autosaveCurrentSetup();
+    juce::File getAutosaveFile() const;
+    bool writeKitXmlToFile (const juce::File& file);
 
     //==============================================================================
     // Recording engine

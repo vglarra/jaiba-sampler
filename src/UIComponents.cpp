@@ -113,7 +113,8 @@ MidiSelectorComponent::MidiSelectorComponent(OwnerInterface& owner, const juce::
     : owner(owner)
 {
     addAndMakeVisible(instructionLabel);
-    instructionLabel.setText("Select MIDI Input Device:", juce::dontSendNotification);
+    instructionLabel.setText("Jaiba Right / Left connect automatically. Extra MIDI input:",
+                             juce::dontSendNotification);
     instructionLabel.setJustificationType(juce::Justification::centredLeft);
     
     addAndMakeVisible(deviceCombo);
@@ -204,9 +205,9 @@ void MidiSelectorComponent::updateStatusLabel()
     juce::String statusText;
     // In JUCE 8, if the unique_ptr is not null, the device is open
     if (!owner.getCurrentMidiDeviceName().isEmpty())
-        statusText = "Status: Connected and ready";
+        statusText = "Status: extra input connected";
     else
-        statusText = "Status: Not connected";
+        statusText = "Status: no extra input (Jaiba boards are automatic)";
     
     statusLabel.setText(statusText, juce::dontSendNotification);
 }
