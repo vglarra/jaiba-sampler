@@ -538,13 +538,17 @@ private:
     // MIDI components
     //
     // The drum is two USB-MIDI devices with fixed names ("Jaiba Right" /
-    // "Jaiba Left"). They are auto-detected and opened together, so the USB
-    // side survives replug/reboot with no saved port id. Both streams feed the
-    // same lock-free collector — no extra buffering, no added latency.
-    static constexpr int kNumAutoMidiInputs = 2;
+    // "Jaiba Left"), plus the Teensy knob hub ("Jaiba Knobs"). They are
+    // auto-detected and opened together, so the USB side survives
+    // replug/reboot with no saved port id. All streams feed the same
+    // lock-free collector — no extra buffering, no added latency.
+    static constexpr int kNumAutoMidiInputs = 3;
     std::unique_ptr<juce::MidiInput> autoMidiInputs[kNumAutoMidiInputs];
-    bool autoMidiConnected[kNumAutoMidiInputs] { false, false };
+    bool autoMidiConnected[kNumAutoMidiInputs] { false, false, false };
     static juce::String autoMidiNamePrefix (int slot);
+
+    // 14-bit pitch CC pair from the hub: CC20 = MSB, CC52 = LSB.
+    std::atomic<int> pitch14Msb_ { 0 };
 
     std::unique_ptr<juce::MidiInput> midiInput;
     juce::StringArray midiInputNames;
@@ -809,6 +813,10 @@ private:
     void midiDeviceChanged(const juce::String& newDevice);
     void maybeRestoreMidiDevice();
     void updateAutoMidiInputs();
+    void handleKnobControlChange(int cc, int value);
+    void applyKnobControl(int cc, int value);
+    void applyKnobPitch14(int value);
+    void applyEqBand(int band, float freq, float gainDb, float q);
     void restoreLastSavedSetup();
     void autosaveCurrentSetup();
     juce::File getAutosaveFile() const;

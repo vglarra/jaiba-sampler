@@ -2,20 +2,38 @@
 
 A standalone MIDI-triggered audio sampler built with JUCE.
 
-## Jaiba two-board setup
+## Jaiba three-device setup
 
-- The drum is two USB-MIDI devices with fixed names, `Jaiba Right` and
-  `Jaiba Left`. The app auto-detects both on every launch, retries while one is
-  absent, and reopens after a replug — there is no device selection to lose.
-- Both streams are merged. MIDI notes are disjoint (right 60–76, left 78–90),
-  so sampler pad *i* uses note `60 + 2*i`.
+- The drum is three USB-MIDI devices with fixed names: `Jaiba Right`,
+  `Jaiba Left`, and the Teensy knob hub `Jaiba Knobs`. The app auto-detects
+  all three on every launch, retries while one is absent, and reopens after a
+  replug — there is no device selection to lose.
+- The two sensor streams are merged. MIDI notes are disjoint (right 60–76,
+  left 78–90), so sampler pad *i* uses note `60 + 2*i`.
+- The knob hub sends CC only. Its fixed map is applied to the **currently
+  selected pad** (and the global master/panic):
+
+  | Control | CC | Sampler target |
+  |---|---|---|
+  | Selected Pad Pitch | 20 (MSB) / 52 (LSB), 14-bit | `pitchCents`, ±4800 |
+  | Master Volume | 7 | master gain |
+  | Selected Pad Volume | 22 | pad `volumeLevel` |
+  | Filter Cutoff | 23 | EQ band 1 frequency, 20 Hz–20 kHz |
+  | Resonance | 24 | EQ band 1 Q, 0.5–10 |
+  | Attack | 25 | ADSR attack, 0–2000 ms |
+  | Release | 26 | ADSR release, 0–5000 ms |
+  | Panic | 27 | all notes off |
+- The map is only applied to the `Jaiba Knobs` input; a manual controller on
+  the MIDI Input dialog does not move these controls.
 - The last loaded session/kit is restored on startup. The setup autosaves on
-  quit and every 30 s while dirty, so pad mappings and MIDI-learned notes
-  survive restarts.
+  quit and every 30 s while dirty, so pad mappings, knob-driven parameters and
+  MIDI-learned notes survive restarts.
 - `~/Documents/sounds/jaiva-kits/jaiba-16-map.jai` is an empty kit with all 16
   pads mapped to the right notes — load it once and add samples.
-- The MIDI Input dialog is only for an extra/manual controller; the two drum
-  boards never need to be selected there.
+- The MIDI Input dialog is only for an extra/manual controller; the three
+  Jaiba devices never need to be selected there.
+- Losing the knob hub does not panic the sensor notes; losing a sensor board
+  still panics the drums so a held note cannot stick.
 
 ## Building
 
@@ -42,6 +60,8 @@ cmake --build build --config Debug
 - ADSR envelope
 - Waveform display
 - 16-pad sampler with individual settings
+- Three-device auto-detect: right sensor, left sensor, knob hub
+- Knob-hub fixed CC map (pitch, volumes, EQ, ADSR, panic)
 - EQ and filtering
 - Normalization
 - Trim functionality

@@ -113,7 +113,7 @@ MidiSelectorComponent::MidiSelectorComponent(OwnerInterface& owner, const juce::
     : owner(owner)
 {
     addAndMakeVisible(instructionLabel);
-    instructionLabel.setText("Jaiba Right / Left connect automatically. Extra MIDI input:",
+    instructionLabel.setText("Jaiba Right / Left / Knobs connect automatically. Extra MIDI input:",
                              juce::dontSendNotification);
     instructionLabel.setJustificationType(juce::Justification::centredLeft);
     
@@ -207,7 +207,7 @@ void MidiSelectorComponent::updateStatusLabel()
     if (!owner.getCurrentMidiDeviceName().isEmpty())
         statusText = "Status: extra input connected";
     else
-        statusText = "Status: no extra input (Jaiba boards are automatic)";
+        statusText = "Status: no extra input (Jaiba boards + knobs are automatic)";
     
     statusLabel.setText(statusText, juce::dontSendNotification);
 }

@@ -1387,7 +1387,8 @@ void MainComponent::updateDeviceInfo()
         
         juce::String midiInfo = "MIDI: ";
         midiInfo << "R:" << (autoMidiConnected[0] ? "OK" : "--")
-                 << "  L:" << (autoMidiConnected[1] ? "OK" : "--");
+                 << "  L:" << (autoMidiConnected[1] ? "OK" : "--")
+                 << "  K:" << (autoMidiConnected[2] ? "OK" : "--");
         if (midiInput != nullptr && currentMidiDeviceName.isNotEmpty())
             midiInfo << "  +" << currentMidiDeviceName;
 
@@ -1566,7 +1567,7 @@ void MainComponent::showMidiDeviceSettings()
 }
 
 
-void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const juce::MidiMessage& message)
+void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
 {
     // Drop high-frequency background messages immediately — zero work, zero latency.
     if (message.isMidiClock() || message.isActiveSense())
@@ -1575,6 +1576,21 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* /*source*/, const
     // Trigger MIDI activity LED — writes an atomic flag + schedules async repaint.
     // Safe to call from any thread. No blocking I/O.
     midiActivityLight.triggerActivity();
+
+    // Knob hub ("Jaiba Knobs"): fixed CC map. Handle it only for that input so
+    // a generic controller on the manual MIDI port cannot move these controls.
+    if (message.isController())
+    {
+        if (source != nullptr
+            && autoMidiInputs[2] != nullptr
+            && source == autoMidiInputs[2].get())
+        {
+            handleKnobControlChange(message.getControllerNumber(),
+                                    message.getControllerValue());
+            return;
+        }
+        // Other controllers keep the existing pass-through to the collector.
+    }
 
     // Stamp high-resolution tick for MIDI-to-audio latency measurement.
     // Audio thread reads this in getNextAudioBlock() and prints the delta once.
@@ -7617,7 +7633,9 @@ void MainComponent::maybeRestoreMidiDevice()
 //==============================================================================
 juce::String MainComponent::autoMidiNamePrefix (int slot)
 {
-    return slot == 0 ? juce::String ("Jaiba Right") : juce::String ("Jaiba Left");
+    if (slot == 0) return "Jaiba Right";
+    if (slot == 1) return "Jaiba Left";
+    return "Jaiba Knobs";
 }
 
 // Keeps both drum boards open. Their USB product strings are fixed in firmware
@@ -7648,10 +7666,14 @@ void MainComponent::updateAutoMidiInputs()
                 autoMidiConnected[slot] = false;
                 DBG ("Auto MIDI: " + prefix + " disconnected");
 
-                // The note-off for a held pad died with the board. Panic so a
-                // power cycle can't leave a note stuck on.
-                padManager.stopAllPads();
-                padManager.stopAllGlobalPads();
+                // The note-off for a held sensor pad died with the board. Panic
+                // the drums only for the two sensor slots; losing the knob hub
+                // must not silence the sensors.
+                if (slot < 2)
+                {
+                    padManager.stopAllPads();
+                    padManager.stopAllGlobalPads();
+                }
             }
         }
         else if (match != nullptr)
@@ -7665,6 +7687,145 @@ void MainComponent::updateAutoMidiInputs()
                 DBG ("Auto MIDI: " + prefix + " connected as " + match->name);
             }
         }
+    }
+}
+
+//==============================================================================
+// Knob hub fixed control map
+//==============================================================================
+// The ESP32 UI assigns one of its fixed controls to a knob; the hub sends that
+// control's CC. The sampler owns the mapping from CC to parameter/action:
+//
+//   CC 20/52   selected pad pitch (14-bit: 20 = MSB, 52 = LSB)
+//   CC 7       master volume
+//   CC 22      selected pad volume
+//   CC 23      filter cutoff (EQ band 1 frequency)
+//   CC 24      resonance (EQ band 1 Q)
+//   CC 25      attack (ADSR, selected pad)
+//   CC 26      release (ADSR, selected pad)
+//   CC 27      panic
+//
+// Only the hub's input is routed here, so a generic controller on the manual
+// MIDI port cannot move these controls.
+void MainComponent::handleKnobControlChange(int cc, int value)
+{
+    value = juce::jlimit(0, 127, value);
+
+    if (cc == 20)
+    {
+        pitch14Msb_.store(value, std::memory_order_relaxed);
+        return;
+    }
+
+    if (cc == 52)
+    {
+        const int msb = pitch14Msb_.load(std::memory_order_relaxed);
+        const int fourteenBit = (msb << 7) | value;
+        juce::MessageManager::callAsync([this, fourteenBit]
+        {
+            applyKnobPitch14(fourteenBit);
+        });
+        return;
+    }
+
+    if (cc == 7 || (cc >= 22 && cc <= 27))
+    {
+        juce::MessageManager::callAsync([this, cc, value]
+        {
+            applyKnobControl(cc, value);
+        });
+    }
+}
+
+void MainComponent::applyKnobPitch14(int value)
+{
+    // 0..16383 with centre 8192 maps to the SampleCard's -4800..+4800 cents.
+    constexpr int centre = 8192;
+    constexpr int halfRange = 8191;
+    const int cents = juce::jlimit(-4800, 4800,
+        (int)(((juce::int64)value - centre) * 4800 / halfRange));
+
+    sampleCard.setPitchOffsetFromMidi(cents);
+}
+
+void MainComponent::applyEqBand(int band, float freq, float gainDb, float q)
+{
+    if (band < 0 || band > 2) return;
+
+    float freqs[3] = { sampleCard.getEqBandFreq(0),
+                       sampleCard.getEqBandFreq(1),
+                       sampleCard.getEqBandFreq(2) };
+    float gains[3] = { sampleCard.getEqBandGain(0),
+                       sampleCard.getEqBandGain(1),
+                       sampleCard.getEqBandGain(2) };
+    float qs[3]    = { sampleCard.getEqBandQ(0),
+                       sampleCard.getEqBandQ(1),
+                       sampleCard.getEqBandQ(2) };
+
+    freqs[band] = freq;
+    gains[band] = gainDb;
+    qs[band]    = q;
+
+    // Enabling the EQ makes the knob audible even on a pad whose EQ was off.
+    sampleCard.setEqParams(true,
+                           freqs[0], gains[0], qs[0],
+                           freqs[1], gains[1], qs[1],
+                           freqs[2], gains[2], qs[2]);
+}
+
+void MainComponent::applyKnobControl(int cc, int value)
+{
+    switch (cc)
+    {
+        case 7:   // master volume
+            masterVolumeKnob.setValue(value / 127.0, juce::sendNotificationSync);
+            break;
+
+        case 22:  // selected pad volume
+            sampleCard.setVolumeFromMidi(value / 127.0f);
+            break;
+
+        case 23:  // filter cutoff — 20 Hz .. 20 kHz, logarithmic
+        {
+            const float freq = 20.0f * std::pow(1000.0f, value / 127.0f);
+            applyEqBand(0, freq, sampleCard.getEqBandGain(0),
+                        sampleCard.getEqBandQ(0));
+            break;
+        }
+
+        case 24:  // resonance — 0.5 .. 10
+        {
+            const float q = 0.5f + (value / 127.0f) * 9.5f;
+            applyEqBand(0, sampleCard.getEqBandFreq(0),
+                        sampleCard.getEqBandGain(0), q);
+            break;
+        }
+
+        case 25:  // attack — 0 .. 2000 ms
+            sampleCard.setAdsrParams(true,
+                                     (value / 127.0f) * 2000.0f,
+                                     sampleCard.getAdsrDecayMs(),
+                                     sampleCard.getAdsrSustain(),
+                                     sampleCard.getAdsrReleaseMs());
+            break;
+
+        case 26:  // release — 0 .. 5000 ms
+            sampleCard.setAdsrParams(true,
+                                     sampleCard.getAdsrAttackMs(),
+                                     sampleCard.getAdsrDecayMs(),
+                                     sampleCard.getAdsrSustain(),
+                                     (value / 127.0f) * 5000.0f);
+            break;
+
+        case 27:  // panic
+            padManager.stopAllPads();
+            padManager.stopAllGlobalPads();
+            if (auto* device = deviceManager.getCurrentAudioDevice())
+                midiCollector.reset(device->getCurrentSampleRate());
+            break;
+
+        default:
+            break;
     }
 }
 

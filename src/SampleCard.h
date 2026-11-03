@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -2104,6 +2104,15 @@ juce::TextButton::ConnectedOnRight);
                               juce::dontSendNotification);
     }
 
+    // MIDI-knob entry point: moves the knob with a notification so
+    // MainComponent::volumeChanged() updates the engine + settings.
+    // setVolume() above is the quiet restore path used during pad switches.
+    void setVolumeFromMidi(float volume)
+    {
+        volumeKnob.setValue(juce::jlimit(0.0f, 1.0f, volume),
+                            juce::sendNotificationSync);
+    }
+
     // Start point — in seconds. Pass 0 to reset to the beginning.
     double getStartPointSeconds() const
     {
@@ -2372,6 +2381,18 @@ juce::TextButton::ConnectedOnRight);
             pitchOffset = cents;
             updatePitchDisplay(pitchOffset);
         }
+    }
+
+    // MIDI-knob entry point: same display update, but fires the listener so
+    // MainComponent pushes the pitch to the live sounds + settings.
+    // setPitchOffset() above is the quiet restore path used on pad switch.
+    void setPitchOffsetFromMidi(int cents)
+    {
+        cents = juce::jlimit(-4800, 4800, cents);
+        if (cents == pitchOffset) return;
+        pitchOffset = cents;
+        updatePitchDisplay(pitchOffset);
+        listeners.call([this](Listener& l) { l.pitchOffsetChanged(pitchOffset); });
     }
 
     // notify=false: update the UI display only — no listener fired.
