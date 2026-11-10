@@ -270,7 +270,7 @@ MainComponent::MainComponent()
     baseTuningLabel.setJustificationType(juce::Justification::centred);
     baseTuningLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFCECECE));
     baseTuningLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
-    baseTuningLabel.setFont(juce::Font(11.0f));
+    baseTuningLabel.setFont(juce::Font(14.0f));
     baseTuningLabel.setTooltip("Base tuning: A4 reference frequency. Drag up/down (Shift = coarse 1 Hz steps)");
     baseTuningLabel.onHzChanged = [this](double newHz)
     {
@@ -318,13 +318,13 @@ MainComponent::MainComponent()
 
     masterVolumeLabel.setText("Master Vol", juce::dontSendNotification);
     masterVolumeLabel.setJustificationType(juce::Justification::centredRight);
-    masterVolumeLabel.setFont(juce::Font(12.0f));
+    masterVolumeLabel.setFont(juce::Font(14.0f));
     masterVolumeLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
     addAndMakeVisible(masterVolumeLabel);
 
     masterVolValueLabel.setText("70%", juce::dontSendNotification);
     masterVolValueLabel.setJustificationType(juce::Justification::centredLeft);
-    masterVolValueLabel.setFont(juce::Font(10.0f));
+    masterVolValueLabel.setFont(juce::Font(13.0f));
     masterVolValueLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
     addAndMakeVisible(masterVolValueLabel);
 
@@ -363,12 +363,12 @@ MainComponent::MainComponent()
       fftVisualizer.setVisible(false);
       addAndMakeVisible(fftVisualizer);
 
-      // Start in fullscreen visualizer mode by default — matches vizMode's
-      // initial value (true). User can click VIZ to switch to sample editing.
-      vizToggleButton.setToggleState(true, juce::dontSendNotification);
-      sampleCard.setVisible(false);
-      fftVisualizer.setVisible(true);
-      fftVisualizer.startVisualizer();
+      // Always start on the sample view (card + controls), never in the
+      // visualizer. The VIZ button still switches to it on demand.
+      vizToggleButton.setToggleState(false, juce::dontSendNotification);
+      sampleCard.setVisible(true);
+      fftVisualizer.setVisible(false);
+      fftVisualizer.stopVisualizer();
 
       // Persist the SENS knob value as it's changed (in-memory; flushed with
       // the rest of the settings store).
@@ -545,6 +545,13 @@ MainComponent::MainComponent()
     publishSeqPattern();
     refreshSeqTempoUI();
     applySeqOptions();
+
+    // Restore the last UI theme (defaults to Dark).
+    UiTheme startTheme = UiTheme::Dark;
+    if (configManager != nullptr
+        && configManager->getPropertiesFile()->getValue ("uiTheme") == "terminal")
+        startTheme = UiTheme::Terminal;
+    applyUiTheme (startTheme);
 }
 
 MainComponent::~MainComponent()
@@ -929,15 +936,15 @@ void MainComponent::releaseResources()
 //==============================================================================
 void MainComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xFF1E1E1E));
+    g.fillAll(Theme::background());
 
     // Line above footer (footer is 50px from bottom)
-    g.setColour(juce::Colour(0xFF404040));
+    g.setColour(Theme::outline());
     auto footerY = getHeight() - 55;
     g.drawHorizontalLine(footerY, 20, getWidth() - 20);
 
     // Draw dark outline around top-level buttons
-    g.setColour(juce::Colour(0xFF0A0A0A));
+    g.setColour(Theme::outline());
     g.drawRect(menuButton.getBounds(), 1);
     g.drawRect(kitButton.getBounds(), 1);
     g.drawRect(kitPrevButton.getBounds(), 1);
@@ -980,15 +987,26 @@ void MainComponent::resized()
 
     constexpr int kTopBarH   = 90;
     constexpr int kGlobCtrlH = 40;
-    constexpr int kPadRowH   = 120;
-    constexpr int kCardMinH  = 250;
-    constexpr int kFooterH   = 50;
+    constexpr int kPadRowMax = 62;    // preferred pad row height (rectangular pads, another 20% lower)
+    constexpr int kPadRowMin = 50;    // smallest still-finger-sized pad row
+    constexpr int kCardMinH  = 150;
     constexpr int kHMargin   = 20;
     constexpr int kGap       = 10;
 
-    // Card height fills whatever space is left between the two pad rows.
-    const int fixedRowsH   = kTopBarH + kGlobCtrlH + kPadRowH + kGap + kGap + kPadRowH + kFooterH;
-    const int dynamicCardH = juce::jmax(kCardMinH, getHeight() - fixedRowsH);
+    // On the 11.6" touch panel the window is only ~650-720 px tall, so the pad
+    // rows shrink a little when needed instead of letting the sample card push
+    // the footer off the bottom of the window.
+    const auto fixedRowsFor = [&](int padH)
+    {
+        return kTopBarH + kGlobCtrlH + padH + padH + kGap + kGap;
+    };
+
+    int padRowH = kPadRowMax;
+    while (padRowH > kPadRowMin && getHeight() - fixedRowsFor (padRowH) < kCardMinH)
+        --padRowH;
+
+    const int fixedRowsH   = fixedRowsFor (padRowH);
+    const int dynamicCardH = juce::jmax (kCardMinH, getHeight() - fixedRowsH);
 
     // Consume from top (full width — no horizontal margins yet)
     auto strip = getLocalBounds();
@@ -999,28 +1017,37 @@ void MainComponent::resized()
     {
         auto topBar = strip.removeFromTop (kTopBarH).reduced (kHMargin, 0);
 
-        menuButton.setBounds (topBar.removeFromLeft (60).withSizeKeepingCentre (56, 30));
-        topBar.removeFromLeft (4);
+        // Touch-friendly heights (was 56x30 / 48x30 / 58x30).
+        menuButton.setBounds (topBar.removeFromLeft (88).withSizeKeepingCentre (88, 46));
+        topBar.removeFromLeft (8);
 
-        // Right side: Reset+Hz+MasterVol+knob+val%+MIDI+TestTone = 358 px
-        constexpr int kRightW = 52+6+70+6+62+4+28+4+32+4+22+6+62; // 358
+        // Right side: Reset+Hz+MasterVol+knob+val%+MIDI+TestTone = 470 px
+        constexpr int kRightW = 68+8+84+8+70+6+48+6+40+6+30+8+72+8+88; // 550
         auto rightSide = topBar.removeFromRight (kRightW);
-        resetButton.setBounds       (rightSide.removeFromLeft (52).withSizeKeepingCentre (48, 30));
+        resetButton.setBounds       (rightSide.removeFromLeft (68).withSizeKeepingCentre (68, 46));
+        rightSide.removeFromLeft (8);
+        baseTuningLabel.setBounds   (rightSide.removeFromLeft (84).withSizeKeepingCentre (84, 40));
+        rightSide.removeFromLeft (8);
+        masterVolumeLabel.setBounds (rightSide.removeFromLeft (70).withSizeKeepingCentre (70, 22));
         rightSide.removeFromLeft (6);
-        baseTuningLabel.setBounds   (rightSide.removeFromLeft (70).withSizeKeepingCentre (68, 24));
+        masterVolumeKnob.setBounds  (rightSide.removeFromLeft (48).withSizeKeepingCentre (48, 48));
         rightSide.removeFromLeft (6);
-        masterVolumeLabel.setBounds (rightSide.removeFromLeft (62).withSizeKeepingCentre (62, 16));
-        rightSide.removeFromLeft (4);
-        masterVolumeKnob.setBounds  (rightSide.removeFromLeft (28).withSizeKeepingCentre (28, 28));
-        rightSide.removeFromLeft (4);
-        masterVolValueLabel.setBounds (rightSide.removeFromLeft (32).withSizeKeepingCentre (30, 16));
-        rightSide.removeFromLeft (4);
-        midiActivityLight.setBounds (rightSide.removeFromLeft (22).withSizeKeepingCentre (20, 20));
+        masterVolValueLabel.setBounds (rightSide.removeFromLeft (40).withSizeKeepingCentre (40, 20));
         rightSide.removeFromLeft (6);
-        testToneButton.setBounds    (rightSide.removeFromLeft (62).withSizeKeepingCentre (58, 30));
+        midiActivityLight.setBounds (rightSide.removeFromLeft (30).withSizeKeepingCentre (30, 30));
+        rightSide.removeFromLeft (8);
+        vizToggleButton.setBounds   (rightSide.removeFromLeft (72).withSizeKeepingCentre (72, 40));
+        rightSide.removeFromLeft (8);
+        testToneButton.setBounds    (rightSide.removeFromLeft (88).withSizeKeepingCentre (88, 46));
 
-        // First-row title fills the gap between the Menu button and the right-side controls.
-        appTitleLabel.setBounds (topBar.reduced (8, 0));
+        // The device / MIDI / CPU status is written into the native window
+        // title bar, and the app name already shows there, so the in-window
+        // title and status labels are all hidden.
+        audioDeviceInfoLabel.setVisible (false);
+        midiDeviceInfoLabel.setVisible (false);
+        cpuUsageLabel.setVisible (false);
+        appTitleLabel.setVisible (false);
+        appTitleLabel.setBounds (0, 0, 0, 0);
     }
 
     // =========================================================
@@ -1056,10 +1083,10 @@ void MainComponent::resized()
     }
 
     // =========================================================
-    // TOP TRIANGLE PAD ROW  (kPadRowH, full width)
+    // TOP TRIANGLE PAD ROW  (padRowH, full width)
     // =========================================================
     const int topPadRowY = strip.getY();
-    strip.removeFromTop (kPadRowH);
+    strip.removeFromTop (padRowH);
 
     strip.removeFromTop (kGap);
 
@@ -1099,39 +1126,10 @@ void MainComponent::resized()
     strip.removeFromTop (kGap);
 
     // =========================================================
-    // BOTTOM TRIANGLE PAD ROW  (kPadRowH, full width)
+    // BOTTOM TRIANGLE PAD ROW  (padRowH, full width)
     // =========================================================
-    const int bottomPadRowBottom = strip.getY() + kPadRowH;
-    strip.removeFromTop (kPadRowH);
-
-    // =========================================================
-    // FOOTER  (kFooterH, anchored to bottom, with horizontal margins)
-    // =========================================================
-    {
-        auto footerArea = getLocalBounds().removeFromBottom (kFooterH).reduced (kHMargin, 0);
-
-        vizToggleButton.setBounds (footerArea.removeFromRight (60).reduced (0, 10));
-
-        auto leftFooter = footerArea.withTrimmedRight (130);
-        constexpr int kRowH2       = 20;
-        const int     vertPadding  = (footerArea.getHeight() - kRowH2 * 2) / 2;
-
-        auto audioRow = leftFooter.removeFromTop (kRowH2).translated (0, vertPadding);
-        audioRow.removeFromLeft (5);
-        audioDeviceInfoLabel.setBounds (audioRow);
-        audioDeviceInfoLabel.setFont (juce::Font (10.0f));
-        audioDeviceInfoLabel.setJustificationType (juce::Justification::left);
-
-        auto midiRow = leftFooter.removeFromTop (kRowH2).translated (0, vertPadding);
-        midiRow.removeFromLeft (5);
-        midiDeviceInfoLabel.setBounds (midiRow);
-        midiDeviceInfoLabel.setFont (juce::Font (10.0f));
-        midiDeviceInfoLabel.setJustificationType (juce::Justification::left);
-
-        cpuUsageLabel.setBounds (footerArea.removeFromRight (120).reduced (5));
-        cpuUsageLabel.setFont (juce::Font (11.0f, juce::Font::bold));
-        cpuUsageLabel.setJustificationType (juce::Justification::right);
-    }
+    const int bottomPadRowBottom = strip.getY() + padRowH;
+    strip.removeFromTop (padRowH);
 
     // =========================================================
     // PAD GRID  — transparent component, spans both pad rows
@@ -1140,7 +1138,7 @@ void MainComponent::resized()
     {
         const int padGridTop = topPadRowY;
         const int padGridH   = bottomPadRowBottom - padGridTop;
-        padGrid.setRowHeight (kPadRowH);
+        padGrid.setRowHeight (padRowH);
         padGrid.setBounds    (0, padGridTop, getWidth(), padGridH);
     }
 
@@ -1151,7 +1149,7 @@ void MainComponent::resized()
     if (!printed)
     {
         printed = true;
-        const int total = kTopBarH + kGlobCtrlH + kPadRowH + kGap + dynamicCardH + kGap + kPadRowH + kFooterH;
+        const int total = kTopBarH + kGlobCtrlH + padRowH + kGap + dynamicCardH + kGap + padRowH;
     }
 
     isResizing = false;
@@ -1371,12 +1369,12 @@ void MainComponent::updateDeviceInfo()
         
         if (auto* currentDevice = deviceManager.getCurrentAudioDevice())
         {
-            info += "Device: " + currentDevice->getName() + "\n";
-            info += "Sample Rate: " + juce::String(currentDevice->getCurrentSampleRate()) + " Hz\n";
-            info += "Buffer Size: " + juce::String(currentDevice->getCurrentBufferSizeSamples()) + " samples\n";
-            
+            // One compact line: this label now lives in the top bar.
             auto activeOutputs = currentDevice->getActiveOutputChannels();
-            info += "Outputs: " + juce::String(activeOutputs.countNumberOfSetBits()) + " channels\n";
+            info << currentDevice->getName()
+                 << "  \u00B7  " << juce::String (currentDevice->getCurrentSampleRate() / 1000.0, 1) << " kHz"
+                 << "  \u00B7  " << juce::String (currentDevice->getCurrentBufferSizeSamples()) << " smp"
+                 << "  \u00B7  " << juce::String (activeOutputs.countNumberOfSetBits()) << " out";
         }
         else
         {
@@ -1393,7 +1391,20 @@ void MainComponent::updateDeviceInfo()
             midiInfo << "  +" << currentMidiDeviceName;
 
         midiDeviceInfoLabel.setText(midiInfo, juce::dontSendNotification);
-        
+
+        // Put the same status into the native window title bar, e.g.
+        //   Jaiba Sampler  |  48.0 kHz  128 smp  |  MIDI: R:OK L:OK K:--  |  CPU: 1.3%
+        {
+            juce::String title ("Jaiba Sampler");
+            if (auto* dev = deviceManager.getCurrentAudioDevice())
+                title << "  |  " << juce::String (dev->getCurrentSampleRate() / 1000.0, 1) << " kHz"
+                      << "  " << juce::String (dev->getCurrentBufferSizeSamples()) << " smp";
+            title << "  |  " << midiInfo
+                  << "  |  CPU: " << juce::String (lastCPU, 1) << "%";
+            if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
+                dw->setName (title);
+        }
+
         // Reset counter to avoid overflow
         if (cpuUpdateCounter >= 1000) cpuUpdateCounter = 0;
     }
@@ -3379,6 +3390,49 @@ void MainComponent::applyAudioSettingsToEngine (PadAudioEngine& engine, const Pa
 
 //==============================================================================
 // New UI functionality implementations
+void MainComponent::applyUiTheme (UiTheme theme)
+{
+    uiTheme = theme;
+    Theme::current = theme;
+
+    // Capture every neutral (grey/white) label colour once, so switching back
+    // to the dark theme restores the originals. Coloured labels are untouched.
+    if (themedLabels.empty())
+    {
+        std::function<void (juce::Component&)> collect = [&] (juce::Component& c)
+        {
+            if (auto* label = dynamic_cast<juce::Label*> (&c))
+            {
+                const auto colour = label->findColour (juce::Label::textColourId);
+                if (colour.getRed() == colour.getGreen() && colour.getGreen() == colour.getBlue())
+                    themedLabels.push_back ({ label, colour });
+            }
+            for (auto* child : c.getChildren())
+                collect (*child);
+        };
+        collect (*this);
+    }
+
+    for (auto& entry : themedLabels)
+        entry.first->setColour (juce::Label::textColourId,
+                                theme == UiTheme::Terminal ? Theme::text() : entry.second);
+
+    std::function<void (juce::Component&)> repaintTree = [&] (juce::Component& c)
+    {
+        c.repaint();
+        for (auto* child : c.getChildren())
+            repaintTree (*child);
+    };
+    repaintTree (*this);
+
+    if (configManager != nullptr)
+    {
+        configManager->getPropertiesFile()->setValue ("uiTheme",
+            theme == UiTheme::Terminal ? "terminal" : "dark");
+        configManager->flush();
+    }
+}
+
 void MainComponent::showSettingsMenu()
 {
     // Buffer size submenu — shows current size and lets user pick from common values.
@@ -3401,11 +3455,17 @@ void MainComponent::showSettingsMenu()
         bufferMenu.addItem(10 + i, label);
     }
 
+    juce::PopupMenu themeMenu;
+    themeMenu.addItem (20, "Dark (default)", true, uiTheme == UiTheme::Dark);
+    themeMenu.addItem (21, "Terminal Green", true, uiTheme == UiTheme::Terminal);
+
     juce::PopupMenu menu;
     menu.addItem(1, "Audio Settings");
     menu.addItem(2, "MIDI Settings");
     menu.addSeparator();
     menu.addSubMenu("Buffer Size", bufferMenu);
+    menu.addSeparator();
+    menu.addSubMenu("Theme", themeMenu);
 
     menu.showMenuAsync(juce::PopupMenu::Options()
                        .withTargetComponent(&menuButton)
@@ -3419,6 +3479,10 @@ void MainComponent::showSettingsMenu()
                            else if (result == 2)
                            {
                                showMidiDeviceSettings();
+                           }
+                           else if (result == 20 || result == 21)
+                           {
+                               applyUiTheme (result == 21 ? UiTheme::Terminal : UiTheme::Dark);
                            }
                            else if (result >= 10 && result <= 13)
                            {
@@ -7901,6 +7965,8 @@ void MainComponent::restoreLastSavedSetup()
     if (session.existsAsFile())
     {
         loadGjmFromFile (session);
+        // Always open on the sample view regardless of the tab saved in the session.
+        sampleCard.setActiveTabQuiet (0);
         return;
     }
 
@@ -7908,6 +7974,7 @@ void MainComponent::restoreLastSavedSetup()
     if (kit.existsAsFile())
     {
         loadKitFromFile (kit);
+        sampleCard.setActiveTabQuiet (0);
     }
 }
 

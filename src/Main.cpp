@@ -63,8 +63,21 @@ private:
             fflush(stdout);
             
             setResizable(true, true);
-            centreWithSize(getWidth(), getHeight());
-            printf("DEBUG: centreWithSize completed\n");
+
+            // Touch panel: open maximised inside the screen work area instead of
+            // centring a fixed-size window that can end up taller than the screen
+            // (which pushed the top bar and the footer off-screen).
+            const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+            if (display != nullptr)
+            {
+                const auto area = display->userArea;
+                setBounds (area.getX(), area.getY(), area.getWidth(), area.getHeight());
+                printf("DEBUG: setBounds to work area %d x %d\n", area.getWidth(), area.getHeight());
+            }
+            else
+            {
+                centreWithSize (getWidth(), getHeight());
+            }
             fflush(stdout);
 
             setVisible(true);

@@ -21,6 +21,7 @@
 #include "GlobalLoopColumn.h"
 #include "LevelMeter.h"
 #include "FftVisualizerView.h"
+#include "Theme.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
@@ -228,6 +229,10 @@ private:
 
     bool hasAnySamplesLoaded() const;
     void showSettingsMenu();
+
+    // ===== UI theme (Dark / Terminal Green) =====
+    void applyUiTheme (UiTheme theme);
+    UiTheme currentUiTheme() const { return uiTheme; }
     void showKitMenu();
     void newKitAction();
     void clearBankKitAction();       // confirm + wipe only the current bank's kit
@@ -582,7 +587,7 @@ private:
     // Fullscreen FFT audio visualizer — toggled via vizToggleButton in the footer.
     FftVisualizerView fftVisualizer;
     juce::TextButton  vizToggleButton { "VIZ" };
-    bool              vizMode = true;
+    bool              vizMode = false;
 
     //==============================================================================
     // Sine wave generation
@@ -886,6 +891,10 @@ private:
     void tickPatternPlayback();  // only used by "Play Pattern" preview button
     void saveCurrentPattern();   // shows input dialog, saves to padManager.getSettings(recTargetPad)
     void loadPatternFromPad();   // shows popup menu, loads into recQuantised
+
+    // ===== UI theme =====
+    UiTheme uiTheme = UiTheme::Dark;
+    std::vector<std::pair<juce::Label*, juce::Colour>> themedLabels;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

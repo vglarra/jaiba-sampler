@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "Theme.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -642,7 +643,31 @@ juce::TextButton::ConnectedOnRight);
         waveformViewport.setViewedComponent(waveformContainer.get(), false);
         waveformViewport.setScrollBarsShown(true, false); // Show vertical scroll bar? false, show horizontal? true
         waveformViewport.setScrollOnDragEnabled(false); // Disabled so waveform can capture mouse for marker drag
+        waveformViewport.setLookAndFeel(&bigScrollbarLAF);
         addAndMakeVisible(waveformViewport);
+
+        // ===== Waveform zoom buttons =====
+        for (auto* b : { &waveAmpPlusButton, &waveAmpMinusButton,
+                         &waveTimePlusButton, &waveTimeMinusButton })
+        {
+            b->setRepeatSpeed (300, 70);   // press-and-hold keeps zooming
+            addAndMakeVisible (*b);
+        }
+
+        waveAmpPlusButton.onClick  = [this] { if (waveformComponent) waveformComponent->nudgeWaveAmpZoom (1.25f); };
+        waveAmpMinusButton.onClick = [this] { if (waveformComponent) waveformComponent->nudgeWaveAmpZoom (0.8f); };
+        waveTimePlusButton.onClick = [this]
+        {
+            if (waveformComponent && waveformComponent->onZoomChanged)
+                waveformComponent->onZoomChanged (1.25, waveformViewport.getViewPositionX()
+                                                        + waveformViewport.getWidth() / 2);
+        };
+        waveTimeMinusButton.onClick = [this]
+        {
+            if (waveformComponent && waveformComponent->onZoomChanged)
+                waveformComponent->onZoomChanged (0.8, waveformViewport.getViewPositionX()
+                                                       + waveformViewport.getWidth() / 2);
+        };
 
         // Keep zoom indicator aligned with scroll position; save scroll state on every change
         waveformViewport.onScrollChanged = [this](int scrollX)
@@ -1248,6 +1273,17 @@ juce::TextButton::ConnectedOnRight);
         seqTabButton.onClick = [this] { setActiveTab(4); };
         addAndMakeVisible(seqTabButton);
 
+        // Touch-sized < / > to step through the tab pages without hitting a
+        // specific (small) tab button.
+        for (auto* nav : { &tabPrevButton, &tabNextButton })
+        {
+            nav->setColour(juce::TextButton::buttonColourId,   juce::Colour(0xFF333333));
+            nav->setColour(juce::TextButton::textColourOffId,  juce::Colour(0xFFCCCCCC));
+            addAndMakeVisible(*nav);
+        }
+        tabPrevButton.onClick = [this] { changeControlsPage(-1); };
+        tabNextButton.onClick = [this] { changeControlsPage(+1); };
+
         seqContent = std::make_unique<SeqControlPanel>();
         seqContent->onEdited = [this] { if (onSequenceEdited) onSequenceEdited(); };
         // Metro controls on the Seq tab drive the same listeners the Rec tab uses,
@@ -1639,6 +1675,7 @@ juce::TextButton::ConnectedOnRight);
     
     ~SampleCard() override
     {
+        waveformViewport.setLookAndFeel (nullptr);
         // Stop background tune analysis before destruction
         if (tuneThread != nullptr)
         {
@@ -1793,14 +1830,37 @@ juce::TextButton::ConnectedOnRight);
         // The Seq tab needs the vertical space for its 16-row grid, so the
         // waveform is dropped entirely while it is active (restored on other tabs).
         const bool seqTabActive = (activeTab == 4);
+        // The ADSR tab gives its knobs more room by shrinking the waveform,
+        // EQ splits 50/50, the Seq tab hides the waveform entirely.
+        const int nonWaveOverhead = (activeTab == 1) ? 252 : 200;
         const int waveformHeight = (activeTab == 2)
             ? juce::jmax(kMinWaveformH, (getHeight() - 120) / 2)
-            : (seqTabActive ? 0 : juce::jmax(kMinWaveformH, getHeight() - 200));
+            : (seqTabActive ? 0 : juce::jmax(kMinWaveformH, getHeight() - nonWaveOverhead));
         
         // ===== CRITICAL FIX #1: Reserve scrollbar space in viewport bounds =====
         // Viewport needs extra height to accommodate scrollbar without squishing content
         auto waveformRect = area.removeFromTop(waveformHeight + (waveformHeight > 0 ? SCROLLBAR_HEIGHT : 0));
         waveformViewport.setBounds(waveformRect);
+
+        // Zoom buttons overlay the waveform box: amplitude +/- on the right,
+        // wave-length +/- at the bottom (above the horizontal scrollbar).
+        {
+            constexpr int bs = 29;              // 20% smaller than 36
+            const int gap = bs;                 // invisible button between the pair
+            const int bottomY = waveformRect.getBottom() - SCROLLBAR_HEIGHT - bs - 6;
+
+            waveAmpPlusButton.setBounds  (waveformRect.getRight() - bs - 6,
+                                          waveformRect.getCentreY() - bs - gap / 2, bs, bs);
+            waveAmpMinusButton.setBounds (waveformRect.getRight() - bs - 6,
+                                          waveformRect.getCentreY() + gap / 2, bs, bs);
+            waveTimeMinusButton.setBounds (waveformRect.getX() + 8, bottomY, bs, bs);
+            waveTimePlusButton.setBounds  (waveformRect.getX() + 8 + bs + gap, bottomY, bs, bs);
+
+            const bool show = (waveformHeight > 0);
+            for (auto* b : { &waveAmpPlusButton, &waveAmpMinusButton,
+                             &waveTimePlusButton, &waveTimeMinusButton })
+                b->setVisible (show);
+        }
         emptyStateLabel.setBounds(waveformRect);   // overlays the waveform area
         fixedViewportWidth = waveformRect.getWidth();
         
@@ -1827,9 +1887,9 @@ juce::TextButton::ConnectedOnRight);
         // Add 5px margin between waveform and controls
         area.removeFromTop(5);
 
-        // ===== TAB BAR (24px) =====
+        // ===== TAB BAR (40px, touch) =====
         {
-            auto tabBar = area.removeFromTop(24);
+            auto tabBar = area.removeFromTop(40);
             applyTabStyle(controlsTabButton, activeTab == 0);
             applyTabStyle(adsrTabButton,     activeTab == 1);
             applyTabStyle(eqTabButton,       activeTab == 2);
@@ -1837,18 +1897,18 @@ juce::TextButton::ConnectedOnRight);
             applyTabStyle(seqTabButton,      activeTab == 4);
             // Widths trimmed from the original 80/80/80/60 to make room for the Seq
             // tab without colliding with the EQ controls docked on the right.
-            controlsTabButton.setBounds(tabBar.removeFromLeft(76).reduced(1, 2));
-            adsrTabButton.setBounds    (tabBar.removeFromLeft(54).reduced(1, 2));
-            eqTabButton.setBounds      (tabBar.removeFromLeft(46).reduced(1, 2));
-            recTabButton.setBounds     (tabBar.removeFromLeft(46).reduced(1, 2));
-            seqTabButton.setBounds     (tabBar.removeFromLeft(46).reduced(1, 2));
+            controlsTabButton.setBounds(tabBar.removeFromLeft(104).reduced(1, 3));
+            adsrTabButton.setBounds    (tabBar.removeFromLeft(80).reduced(1, 3));
+            eqTabButton.setBounds      (tabBar.removeFromLeft(68).reduced(1, 3));
+            recTabButton.setBounds     (tabBar.removeFromLeft(68).reduced(1, 3));
+            seqTabButton.setBounds     (tabBar.removeFromLeft(68).reduced(1, 3));
             // ADSR and EQ on/off buttons share the same right-aligned slot (44px).
             // Only one is ever visible at a time — updateTabVisibility() enforces this.
             auto rightToggleSlot = tabBar.withLeft(tabBar.getRight() - 44);
-            adsrEnableButton.setBounds(rightToggleSlot.reduced(1, 2));
-            eqEnableButton.setBounds(tabBar.removeFromRight(44).reduced(1, 2));
+            adsrEnableButton.setBounds(rightToggleSlot.reduced(1, 3));
+            eqEnableButton.setBounds(tabBar.removeFromRight(44).reduced(1, 3));
             // Filter mode selector — left of EQ enable button (~108px), only shown on EQ tab
-            filterModeButton.setBounds(tabBar.removeFromRight(108).reduced(1, 2));
+            filterModeButton.setBounds(tabBar.removeFromRight(108).reduced(1, 3));
             // Normalize controls — left of filter mode button; only shown on EQ tab
             // Layout (right→left removal): gainLabel | Norm | 0 | -6 | -12
             normGainLabel.setBounds           (tabBar.removeFromRight(52).reduced(1, 2));
@@ -1894,138 +1954,95 @@ juce::TextButton::ConnectedOnRight);
             DBG("[LAYOUT] Tab button height: 20px — applying to all Controls tab buttons");
             layoutPrinted = true;
         }
-        constexpr int kBtnH = 20;
+        // ===== PAGED CONTROLS (touch) =====
+        // < > in the tab bar step through three groups of controls, each drawn
+        // at finger size instead of 25 buttons squeezed into three 20px rows.
+        constexpr int kBtnH   = 44;
+        constexpr int kRowH   = 52;
+        constexpr int kColGap = 10;
 
-        // ===== ROW 1: Playback controls (24px) =====
-        auto row1 = tabContentArea.removeFromTop(24);
+        auto pageArea = tabContentArea;
+        auto row = pageArea.removeFromTop (kRowH);
 
-        {
-            // Pitch controls: Down | Pitch display | Up  (180px, kBtnH tall, vertically centred)
-            const int pitchCtrlW = 180;
-            auto pitchArea = row1.removeFromLeft(pitchCtrlW);
-            auto pitchControlArea = pitchArea.withSizeKeepingCentre(pitchCtrlW, kBtnH);
-            pitchDownButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
-            pitchLabel.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
-            pitchUpButton.setBounds(pitchControlArea.removeFromLeft(60).reduced(2));
-        }
-        row1.removeFromLeft(4); // gap
-        {
-            // Pitch Step cycling button — label hidden at this row height
-            auto col = row1.removeFromLeft(60);
-            pitchStepLabel.setBounds({});  // no room at 24px row height
-            pitchStepButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        row1.removeFromLeft(4); // gap between step and toggle buttons
-        {
-            // Tune button — pitch detection (right of pitch controls)
-            auto col = row1.removeFromLeft(62);
-            tuneButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        {
-            // Freeze button
-            auto col = row1.removeFromLeft(62);
-            freezeButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        {
-            // Loop button
-            auto col = row1.removeFromLeft(62);
-            loopButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        {
-            // One Shot button — right of Loop
-            auto col = row1.removeFromLeft(62);
-            oneShotButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        {
-            // Rev (reverse) button — right of One Shot
-            auto col = row1.removeFromLeft(62);
-            reverseButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        {
-            // Bnc (bounce/ping-pong) button — right of Rev
-            auto col = row1.removeFromLeft(62);
-            bounceButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        {
-            // MNFreeze (MIDI Note Freeze) button — right of Bnc
-            // Slightly wider column so "MNFreeze" text fits without truncation.
-            auto col = row1.removeFromLeft(76);
-            mnFreezeButton.setBounds(col.withSizeKeepingCentre(72, kBtnH));
-        }
+        // Carousel layout: < [page buttons] >
+        auto nextColumn = row.removeFromRight (60);
+        tabPrevButton.setBounds (row.removeFromLeft (60).reduced (2, 4));
+        row.removeFromLeft (kColGap);
 
-        // 4px gap between rows (matches tab-bar gap)
-        tabContentArea.removeFromTop(4);
+        auto put = [&row] (juce::Component& c, int w)
+        {
+            c.setBounds (row.removeFromLeft (w).reduced (2, 4));
+            row.removeFromLeft (kColGap);
+        };
 
-        // ===== ROW 2: Marker controls (24px) =====
-        auto row2 = tabContentArea.removeFromTop(24);
-        transientCountLabel.setBounds({});  // hidden — no room at uniform row height
+        pitchStepLabel.setBounds ({});
+        transientCountLabel.setBounds ({});
 
-        {
-            // "CRA" — transient detection toggle
-            auto col = row2.removeFromLeft(44);
-            detectionToggleButton.setBounds(col.withSizeKeepingCentre(42, kBtnH));
-        }
-        {
-            // "< T" — snap start to PREV transient
-            auto col = row2.removeFromLeft(38);
-            prevTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
-        }
-        {
-            // "T >" — snap start to NEXT transient
-            auto col = row2.removeFromLeft(38);
-            nextTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
-        }
-        {
-            // Start knob — 60px column: left 30px = "Start" label, right 30px = knob
-            auto col = row2.removeFromLeft(60);
-            startKnobLabel.setBounds(col.removeFromLeft(30).withSizeKeepingCentre(28, kBtnH));
-            startKnob.setBounds(col.withSizeKeepingCentre(kBtnH, kBtnH));
-        }
-        {
-            // End knob — 60px column: left 30px = "End" label, right 30px = knob
-            auto col = row2.removeFromLeft(60);
-            endKnobLabel.setBounds(col.removeFromLeft(30).withSizeKeepingCentre(28, kBtnH));
-            endKnob.setBounds(col.withSizeKeepingCentre(kBtnH, kBtnH));
-        }
-        {
-            // "< T" — snap end to PREV transient
-            auto col = row2.removeFromLeft(38);
-            prevEndTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
-        }
-        {
-            // "T >" — snap end to NEXT transient
-            auto col = row2.removeFromLeft(38);
-            nextEndTransientButton.setBounds(col.withSizeKeepingCentre(36, kBtnH));
-        }
-        {
-            // Sens knob — 90px column: left 30px = "Sens" label, 20px = knob, right 35px = value
-            auto col = row2.removeFromLeft(90);
-            sensLabel.setBounds(col.removeFromLeft(30).withSizeKeepingCentre(28, kBtnH));
-            sensKnob.setBounds(col.removeFromLeft(20).withSizeKeepingCentre(kBtnH, kBtnH));
-            sensValueLabel.setBounds(col.withSizeKeepingCentre(33, kBtnH));
-        }
-        {
-            // Grid snap button — moved here from Row 1
-            auto col = row2.removeFromLeft(62);
-            gridSnapButton.setBounds(col.withSizeKeepingCentre(58, kBtnH));
-        }
-        {
-            // Grid resolution cycling button — moved here from Row 1
-            auto col = row2.removeFromLeft(52);
-            gridResolutionButton.setBounds(col.withSizeKeepingCentre(50, kBtnH));
-        }
-        // Vol knob is now in the top row — skip its row2 layout
 
-        // 4px gap then Row 3: Trim button (24px)
-        tabContentArea.removeFromTop(4);
+        switch (controlsPage)
         {
-            auto row3 = tabContentArea.removeFromTop(24);
-            trimButton.setBounds(row3.removeFromLeft(62).withSizeKeepingCentre(58, kBtnH));
+            case 0:   // PITCH / TRIM / GRID
+            {
+                auto pitchArea = row.removeFromLeft (200);
+                pitchDownButton.setBounds (pitchArea.removeFromLeft (62).reduced (2, 4));
+                pitchLabel.setBounds      (pitchArea.removeFromLeft (72).reduced (2, 4));
+                pitchUpButton.setBounds   (pitchArea.removeFromLeft (62).reduced (2, 4));
+                row.removeFromLeft (kColGap);
+                put (pitchStepButton, 90);
+                put (tuneButton, 110);
+                put (trimButton, 110);
+                put (gridSnapButton, 120);
+                put (gridResolutionButton, 110);
+                break;
+            }
+            case 1:   // PLAYBACK MODES
+            {
+                put (freezeButton, 130);
+                put (loopButton, 130);
+                put (oneShotButton, 130);
+                put (reverseButton, 130);
+                put (bounceButton, 130);
+                put (mnFreezeButton, 150);
+                break;
+            }
+            default:  // MARKERS / SENSITIVITY
+            {
+                put (detectionToggleButton, 80);
+                put (prevTransientButton, 76);
+                put (nextTransientButton, 76);
+
+                auto startArea = row.removeFromLeft (130);
+                startKnobLabel.setBounds (startArea.removeFromLeft (66).reduced (2, 4));
+                startKnob.setBounds      (startArea.removeFromLeft (56).reduced (2, 4));
+                row.removeFromLeft (kColGap);
+
+                auto endArea = row.removeFromLeft (130);
+                endKnobLabel.setBounds (endArea.removeFromLeft (66).reduced (2, 4));
+                endKnob.setBounds      (endArea.removeFromLeft (56).reduced (2, 4));
+                row.removeFromLeft (kColGap);
+
+                put (prevEndTransientButton, 76);
+                put (nextEndTransientButton, 76);
+
+                auto sensArea = row.removeFromLeft (190);
+                sensLabel.setBounds      (sensArea.removeFromLeft (56).reduced (2, 4));
+                sensKnob.setBounds       (sensArea.removeFromLeft (64).reduced (2, 4));
+                sensValueLabel.setBounds (sensArea.removeFromLeft (64).reduced (2, 4));
+                break;
+            }
         }
 
+        (void) kBtnH;
+        (void) nextColumn;  // bounds applied below
+        tabNextButton.setBounds (nextColumn.reduced (2, 4));
         } // end if (activeTab == 0)
 
         updateTabVisibility();
+        applyControlsPageVisibility();
+
+        // The carousel arrows live in the Controls row, so hide them elsewhere.
+        tabPrevButton.setVisible (activeTab == 0);
+        tabNextButton.setVisible (activeTab == 0);
 
         // ===== Footer — fixed at absolute bottom regardless of active tab =====
         footerBounds = { 10, footerY, getWidth() - 20, kFooterH };
@@ -2052,11 +2069,11 @@ juce::TextButton::ConnectedOnRight);
     void paint(juce::Graphics& g) override
     {
         // Draw card background
-        g.setColour(juce::Colour(0xFF636363));
+        g.setColour(Theme::card());
         g.fillRoundedRectangle(getLocalBounds().toFloat(), 8.0f);
 
         // Draw card border
-        g.setColour(juce::Colour(0xFF5A5A5A));
+        g.setColour(Theme::cardBorder());
         g.drawRoundedRectangle(getLocalBounds().toFloat(), 8.0f, 1.5f);
 
         // Draw footer background — slightly darker than card to visually frame the info row.
@@ -3022,7 +3039,7 @@ juce::TextButton::ConnectedOnRight);
         };
 
         // Scrollbar height constant (Windows default ~14px, macOS ~15px)
-        static constexpr int SCROLLBAR_HEIGHT = 14;
+        static constexpr int SCROLLBAR_HEIGHT = 24;
         // High-resolution WaveformComponent that renders directly from audio data
         // In SampleCard.h - Replace the WaveformComponent class with this fixed version
 
@@ -3081,24 +3098,48 @@ juce::TextButton::ConnectedOnRight);
                 repaint();
             }
 
+            // ===== CROSSHAIR (touch readout) =====
+            bool  crosshairVisible = false;
+            float crosshairX = 0.0f;
+            float crosshairY = 0.0f;
+
+            void updateCrosshair (const juce::MouseEvent& e)
+            {
+                crosshairVisible = true;
+                crosshairX = (float) e.x;
+                crosshairY = (float) e.y;
+                repaint();
+            }
+
+            void mouseMove  (const juce::MouseEvent& e) override { updateCrosshair (e); }
+
+            void mouseExit  (const juce::MouseEvent&) override
+            {
+                if (crosshairVisible)
+                {
+                    crosshairVisible = false;
+                    repaint();
+                }
+            }
+
             void paint(juce::Graphics& g) override
             {
                 auto bounds = getLocalBounds();
                 
                 // Fill background — light gray
-                g.setColour(juce::Colour(0xFFE0E0E0));
+                g.setColour(Theme::waveBackground());
                 g.fillRect(bounds);
 
                 // Draw border
-                g.setColour(juce::Colour(0xFFB0B0B0));
+                g.setColour(Theme::waveBorder());
                 g.drawRect(bounds, 2);
 
                 // Loading indicator — shown while background thread reads the new file
                 if (isLoading)
                 {
-                    g.setColour(juce::Colour(0xFFD0D0D0));
+                    g.setColour(Theme::waveLoading());
                     g.fillRect(bounds);
-                    g.setColour(juce::Colour(0xFF555555));
+                    g.setColour(Theme::waveLine());
                     g.setFont(juce::Font(13.0f, juce::Font::italic));
                     g.drawText("Loading...", bounds, juce::Justification::centred, true);
                     return;
@@ -3117,9 +3158,9 @@ juce::TextButton::ConnectedOnRight);
                 // setAudioPeaks(). Until they arrive paint() shows a brief placeholder.
                 if (!peaksReady.load())
                 {
-                    g.setColour(juce::Colour(0xFFD0D0D0));
+                    g.setColour(Theme::waveLoading());
                     g.fillRect(bounds);
-                    g.setColour(juce::Colour(0xFF555555));
+                    g.setColour(Theme::waveLine());
                     g.setFont(juce::Font(13.0f, juce::Font::italic));
                     g.drawText("Building waveform...", bounds, juce::Justification::centred, true);
                     return;
@@ -3203,8 +3244,8 @@ juce::TextButton::ConnectedOnRight);
                         getPeaksForPixel(x, samplesPerPixel, leftMin, leftMax, rightMin, rightMax);
 
                         // Apply display gain — peaks > 1.0 will be clamped by jlimit (shows clipping)
-                        leftMax  *= displayGain; leftMin  *= displayGain;
-                        rightMax *= displayGain; rightMin *= displayGain;
+                        leftMax  *= displayGain * waveAmpZoom; leftMin  *= displayGain * waveAmpZoom;
+                        rightMax *= displayGain * waveAmpZoom; rightMin *= displayGain * waveAmpZoom;
 
                         float xPos = waveformBounds.getX() + x;
 
@@ -3231,28 +3272,28 @@ juce::TextButton::ConnectedOnRight);
                     
                     // Left channel — dark charcoal gradient, lighter at edges
                     {
-                        juce::ColourGradient grad(juce::Colour(0xFF606060), 0.0f, (float)leftTop,
-                                                  juce::Colour(0xFF606060), 0.0f, (float)leftBottom, false);
-                        grad.addColour(0.5, juce::Colour(0xFF1A1A1A));
+                        juce::ColourGradient grad(Theme::traceEdge(), 0.0f, (float)leftTop,
+                                                  Theme::traceEdge(), 0.0f, (float)leftBottom, false);
+                        grad.addColour(0.5, Theme::traceCentre());
                         g.setGradientFill(grad);
                         g.strokePath(leftPath, juce::PathStrokeType(1.5f));
                     }
 
                     // Right channel — same gradient in its vertical range
                     {
-                        juce::ColourGradient grad(juce::Colour(0xFF606060), 0.0f, (float)rightTop,
-                                                  juce::Colour(0xFF606060), 0.0f, (float)rightBottom, false);
-                        grad.addColour(0.5, juce::Colour(0xFF1A1A1A));
+                        juce::ColourGradient grad(Theme::traceEdge(), 0.0f, (float)rightTop,
+                                                  Theme::traceEdge(), 0.0f, (float)rightBottom, false);
+                        grad.addColour(0.5, Theme::traceCentre());
                         g.setGradientFill(grad);
                         g.strokePath(rightPath, juce::PathStrokeType(1.5f));
                     }
 
                     // Channel divider
-                    g.setColour(juce::Colour(0xFF555555));
+                    g.setColour(Theme::waveLine());
                     g.drawHorizontalLine(renderTop + halfHeight,
                                         waveformBounds.getX(), waveformBounds.getRight());
 
-                    g.setColour(juce::Colour(0xFF555555));
+                    g.setColour(Theme::waveLine());
                     g.setFont(juce::Font(10.0f));
                     g.drawText("L", waveformBounds.getX() + 5, leftTop + 2, 20, 15,
                             juce::Justification::left);
@@ -3273,7 +3314,7 @@ juce::TextButton::ConnectedOnRight);
                         getPeaksForPixel(x, samplesPerPixel, minVal, maxVal, dummyR1, dummyR2);
 
                         // Apply display gain
-                        maxVal *= displayGain; minVal *= displayGain;
+                        maxVal *= displayGain * waveAmpZoom; minVal *= displayGain * waveAmpZoom;
 
                         float xPos      = waveformBounds.getX() + x;
                         float centerY   = renderTop + renderHeight * 0.5f;
@@ -3288,16 +3329,16 @@ juce::TextButton::ConnectedOnRight);
                     
                     // Dark charcoal gradient — lighter at top/bottom edges, darkest in center
                     {
-                        juce::ColourGradient grad(juce::Colour(0xFF606060), 0.0f, (float)renderTop,
-                                                  juce::Colour(0xFF606060), 0.0f, (float)renderBottom, false);
-                        grad.addColour(0.5, juce::Colour(0xFF1A1A1A));
+                        juce::ColourGradient grad(Theme::traceEdge(), 0.0f, (float)renderTop,
+                                                  Theme::traceEdge(), 0.0f, (float)renderBottom, false);
+                        grad.addColour(0.5, Theme::traceCentre());
                         g.setGradientFill(grad);
                         g.strokePath(waveformPath, juce::PathStrokeType(1.5f));
                     }
                 }
                 
                 // Draw center line
-                g.setColour(juce::Colour(0xFF555555).withAlpha(0.5f));
+                g.setColour(Theme::waveLine().withAlpha(0.5f));
                 g.drawHorizontalLine(renderCenter, waveformBounds.getX(), waveformBounds.getRight());
 
                 // ===== TIME RULER AND GRID LINES =====
@@ -3336,21 +3377,21 @@ juce::TextButton::ConnectedOnRight);
                             if (minorPx < 2.0f && !isMajor) continue; // skip minor when too dense
                             float x = waveformBounds.getX() + (float)(t / originalDuration * actualWaveformWidth);
                             if (x >= waveformBounds.getRight()) break;
-                            g.setColour(juce::Colour(0xFF000000).withAlpha(isMajor ? 0.15f : 0.08f));
+                            g.setColour(Theme::gridLine(isMajor));
                             g.drawVerticalLine((int)(x + 0.5f), waveformBounds.getY(), waveformBounds.getBottom());
                         }
                     }
 
                     // --- Ruler background — slightly darker than waveform ---
-                    g.setColour(juce::Colour(0xFFC8C8C8));
+                    g.setColour(Theme::waveRulerBackground());
                     g.fillRect(rulerBounds);
-                    g.setColour(juce::Colour(0xFFAAAAAA));
+                    g.setColour(Theme::waveRulerText());
                     g.drawRect(rulerBounds, 1);
 
                     g.setFont(juce::Font(9.0f));
 
                     // "0" at origin
-                    g.setColour(juce::Colour(0xFF2A2A2A));
+                    g.setColour(Theme::rulerLabel());
                     g.drawVerticalLine(rulerBounds.getX(),
                                        rulerBounds.getBottom() - 8, rulerBounds.getBottom() - 1);
                     g.drawText("0", rulerBounds.getX() + 2, rulerBounds.getY(),
@@ -3364,7 +3405,7 @@ juce::TextButton::ConnectedOnRight);
                         float x = rulerBounds.getX() + (float)(t / originalDuration * actualWaveformWidth);
                         if (x >= rulerBounds.getRight()) break;
 
-                        g.setColour(isMajor ? juce::Colour(0xFF2A2A2A) : juce::Colour(0xFF555555));
+                        g.setColour(Theme::tickColour(isMajor));
                         int tickH = isMajor ? 8 : 4;
                         g.drawVerticalLine((int)(x + 0.5f),
                                            rulerBounds.getBottom() - tickH, rulerBounds.getBottom() - 1);
@@ -3378,7 +3419,7 @@ juce::TextButton::ConnectedOnRight);
                             else
                                 label = juce::String(rounded, majorInterval < 0.1 ? 2 : 1);
 
-                            g.setColour(juce::Colour(0xFF2A2A2A));
+                            g.setColour(Theme::rulerLabel());
                             g.drawText(label, (int)(x + 0.5f) - 15, rulerBounds.getY(),
                                        30, rulerHeight - 4, juce::Justification::centred, false);
                         }
@@ -3549,6 +3590,55 @@ juce::TextButton::ConnectedOnRight);
                     g.setFont(juce::Font(16.0f, juce::Font::bold));
                     g.drawText("RECORDING...", bounds, juce::Justification::centred, false);
                 }
+
+                // ===== CROSSHAIR READOUT — time + amplitude under the finger =====
+                if (crosshairVisible)
+                {
+                    const auto crossColour = Theme::crosshair();
+
+                    const float cx = juce::jlimit ((float) waveformBounds.getX(),
+                                                   (float) waveformBounds.getRight(),
+                                                   crosshairX);
+                    const float cy = juce::jlimit ((float) waveformBounds.getY(),
+                                                   (float) waveformBounds.getBottom(),
+                                                   crosshairY);
+
+                    g.setColour (crossColour.withAlpha (0.85f));
+                    g.drawLine (cx, (float) waveformBounds.getY(),
+                                cx, (float) waveformBounds.getBottom(), 1.0f);
+                    g.drawLine ((float) waveformBounds.getX(), cy,
+                                (float) waveformBounds.getRight(), cy, 1.0f);
+
+                    double timeSec = 0.0;
+                    if (originalDuration > 0.0 && actualWaveformWidth > 0.0f)
+                        timeSec = (double) (cx - (float) waveformBounds.getX())
+                                / (double) actualWaveformWidth * originalDuration;
+
+                    const float halfHt  = juce::jmax (1.0f, (float) waveformBounds.getHeight() * 0.5f);
+                    const float centreY = (float) waveformBounds.getCentreY();
+                    const float amp     = juce::jlimit (-1.0f, 1.0f, (centreY - cy) / halfHt);
+                    const float db      = juce::Decibels::gainToDecibels (std::abs (amp), -60.0f);
+
+                    juce::String readout;
+                    readout << juce::String (timeSec, 3) << " s    "
+                            << (db >= 0.0f ? "+" : "") << juce::String (db, 1) << " dB";
+
+                    g.setFont (juce::Font (11.0f, juce::Font::bold));
+                    const int tw = (int) std::ceil (g.getCurrentFont().getStringWidthFloat (readout)) + 14;
+                    const int bx = (int) juce::jlimit ((float) bounds.getX() + 4.0f,
+                                                       (float) bounds.getRight() - (float) tw - 4.0f,
+                                                       cx + 10.0f);
+                    const int by = (int) juce::jlimit ((float) bounds.getY() + 4.0f,
+                                                       (float) bounds.getBottom() - 22.0f,
+                                                       cy - 26.0f);
+
+                    const juce::Rectangle<int> box (bx, by, tw, 18);
+                    g.setColour (juce::Colour (0xE6000000));
+                    g.fillRoundedRectangle (box.toFloat(), 3.0f);
+                    g.setColour (crossColour);
+                    g.drawRoundedRectangle (box.toFloat(), 3.0f, 1.0f);
+                    g.drawText (readout, box.reduced (5, 0), juce::Justification::centredLeft, false);
+                }
             }
 
             void setPitchFactor(double factor, int semitones)
@@ -3662,6 +3752,13 @@ juce::TextButton::ConnectedOnRight);
             // Visual gain scaling — multiplies peak values before Y mapping so clipping shows as flat lines.
             void setDisplayGain(float gain) { displayGain = gain; repaint(); }
 
+            // Vertical (amplitude) zoom from the on-screen +/- buttons.
+            void nudgeWaveAmpZoom (float factor)
+            {
+                waveAmpZoom = juce::jlimit (0.1f, 20.0f, waveAmpZoom * factor);
+                repaint();
+            }
+
             // Set pre-computed peak data (computed on background thread before callAsync).
             // After this call paint() has everything it needs — zero disk I/O on message thread.
             void setAudioPeaks(std::unique_ptr<WaveformPeakBin[]> peaks,
@@ -3766,6 +3863,8 @@ juce::TextButton::ConnectedOnRight);
 
             void mouseDown(const juce::MouseEvent& event) override
             {
+                updateCrosshair (event);
+
                 if (event.getNumberOfClicks() > 1)
                     return; // double-click handled by mouseDoubleClick
 
@@ -3776,12 +3875,22 @@ juce::TextButton::ConnectedOnRight);
                 float endX   = bounds.getX() + endMarkerNormalized   * actualWidth;
                 float dStart = std::abs((float)event.x - startX);
                 float dEnd   = std::abs((float)event.x - endX);
-                currentDragTarget = (dStart <= dEnd) ? DragTarget::Start : DragTarget::End;
-                updateMarkerFromMouse(event.x);
+
+                // Only grab a marker when the touch lands near it; everywhere else
+                // the drag drives the crosshair readout instead of jumping a marker.
+                constexpr float grabRadius = 16.0f;
+                currentDragTarget = (juce::jmin (dStart, dEnd) <= grabRadius)
+                                        ? ((dStart <= dEnd) ? DragTarget::Start : DragTarget::End)
+                                        : DragTarget::None;
+
+                if (currentDragTarget != DragTarget::None)
+                    updateMarkerFromMouse(event.x);
             }
 
             void mouseDrag(const juce::MouseEvent& event) override
             {
+                updateCrosshair (event);
+
                 if (currentDragTarget != DragTarget::None)
                     updateMarkerFromMouse(event.x);
             }
@@ -3944,6 +4053,7 @@ juce::TextButton::ConnectedOnRight);
             double zoomLevel   = 1.0;  // Current zoom level for indicator display
             int    viewScrollX = 0;    // Viewport scroll offset — updated via setScrollOffset()
             float  displayGain = 1.0f; // Visual gain scaling (set by EQ tab gain knob)
+            float  waveAmpZoom = 1.0f; // Extra vertical zoom from the +/- buttons
 
             // Playhead — written from SampleCard's 60fps timer, read only in paint()
             float playheadNormalized  = -1.0f;  // -1 = hidden
@@ -4438,6 +4548,30 @@ void adjustPitchUp()
         bool        isEmptyPad = false;
 
     // Custom LookAndFeel for the bold + button
+        // Transparent waveform zoom button: only a thin outline + the sign, so
+        // the waveform stays visible behind it.
+        struct WaveZoomButton : public juce::TextButton
+        {
+            using juce::TextButton::TextButton;
+
+            void paintButton (juce::Graphics& g, bool highlighted, bool down) override
+            {
+                auto b = getLocalBounds().toFloat().reduced (1.0f);
+
+                auto colour = Theme::isTerminal() ? juce::Colour (0xFF41FF7A)
+                                                  : juce::Colour (0xFFE0E0E0);
+                if (down)         colour = colour.brighter (0.35f);
+                if (highlighted)  colour = colour.brighter (0.15f);
+
+                g.setColour (colour.withAlpha (down ? 1.0f : 0.8f));
+                g.drawRoundedRectangle (b, 5.0f, 1.5f);
+
+                g.setFont (juce::Font (14.0f, juce::Font::bold));
+                g.setColour (colour);
+                g.drawText (getButtonText(), b, juce::Justification::centred, false);
+            }
+        };
+
         struct BoldPlusButtonLAF : public juce::LookAndFeel_V4
     {
         juce::Font getTextButtonFont(juce::TextButton&, int) override
@@ -4468,6 +4602,13 @@ void adjustPitchUp()
     juce::TextButton prevButton{"Prev"};
     juce::TextButton nextButton{"Next"};
     juce::TextButton learnButton{"Learn"};  // MIDI Learn button
+    // Finger-sized horizontal scrollbar for the waveform viewport.
+    struct BigScrollbarLAF : public juce::LookAndFeel_V4
+    {
+        int getDefaultScrollbarWidth() override { return 22; }
+    };
+    BigScrollbarLAF bigScrollbarLAF;
+
     WaveformViewport waveformViewport;
     std::unique_ptr<juce::Component> waveformContainer;
     std::unique_ptr<WaveformComponent> waveformComponent;
@@ -4998,11 +5139,22 @@ void adjustPitchUp()
 
     // ===== TAB BAR =====
     int activeTab = 0;  // 0=Controls, 1=ADSR, 2=EQ, 3=Rec, 4=Seq
+    int controlsPage = 0;  // 0=Pitch, 1=Play, 2=Markers (< > page the Controls tab)
+    static constexpr int kNumControlsPages = 3;
+    juce::TextButton tabPrevButton     { "<" };
+    juce::TextButton tabNextButton     { ">" };
     juce::TextButton controlsTabButton { "Controls" };
     juce::TextButton adsrTabButton     { "ADSR" };
     juce::TextButton eqTabButton       { "EQ" };
     juce::TextButton recTabButton      { "Rec" };
     juce::TextButton seqTabButton      { "Seq" };
+
+    // Waveform zoom buttons (touch): +/- amplitude on the right edge,
+    // +/- wave length along the bottom edge.
+    WaveZoomButton waveAmpPlusButton  { "+" };
+    WaveZoomButton waveAmpMinusButton { "-" };
+    WaveZoomButton waveTimePlusButton { "+" };
+    WaveZoomButton waveTimeMinusButton{ "-" };
     juce::Label      eqPlaceholderLabel;
     std::unique_ptr<RecControlPanel> recContent;
     std::unique_ptr<SeqControlPanel> seqContent;
@@ -5308,6 +5460,43 @@ void adjustPitchUp()
         listeners.call([this](Listener& l) { l.activeTabChanged(activeTab); });
     }
 
+    // Step through the pages of the Controls tab (only that tab is paged).
+    void changeControlsPage(int direction)
+    {
+        if (direction == 0 || activeTab != 0)
+            return;
+
+        controlsPage = (controlsPage + direction + kNumControlsPages) % kNumControlsPages;
+        resized();
+        repaint();
+    }
+
+    // Only the controls that belong to the current Controls page stay visible.
+    void applyControlsPageVisibility()
+    {
+        const bool controlsTab = (activeTab == 0);
+        auto show = [controlsTab] (std::initializer_list<juce::Component*> comps, bool onPage)
+        {
+            for (auto* c : comps)
+                if (c != nullptr)
+                    c->setVisible (controlsTab && onPage);
+        };
+
+        show ({ &pitchDownButton, &pitchLabel, &pitchUpButton, &pitchStepButton,
+                &tuneButton, &trimButton, &gridSnapButton, &gridResolutionButton },
+              controlsPage == 0);
+
+        show ({ &freezeButton, &loopButton, &oneShotButton, &reverseButton,
+                &bounceButton, &mnFreezeButton },
+              controlsPage == 1);
+
+        show ({ &detectionToggleButton, &prevTransientButton, &nextTransientButton,
+                &startKnobLabel, &startKnob, &endKnobLabel, &endKnob,
+                &prevEndTransientButton, &nextEndTransientButton,
+                &sensLabel, &sensKnob, &sensValueLabel },
+              controlsPage == 2);
+    }
+
 public:
     // Quiet restore from session — no listener fired.
     void setActiveTabQuiet(int tab)
@@ -5609,24 +5798,32 @@ private:
 
     void layoutAdsrTabContent(juce::Rectangle<int>& area)
     {
-        // Env toggle button now lives in the tab bar row — no row needed here.
-        // Row B (60px): 4 ADSR knobs — fills the full content area directly.
-        auto rowB = area.removeFromTop(60);
-        const int labelH = 13;
+        // Env toggle button lives in the tab bar row.
+        // Names and values sit to the sides of the knobs instead of below them,
+        // so the knobs can use the full height of the tab content area.
+        // The row fills the whole content area, so the knobs sit flush on the
+        // footer line instead of leaving an empty strip underneath.
+        const int knobRowH = juce::jmax (48, area.getHeight());
+        auto rowB = area.removeFromTop (knobRowH);
 
         juce::Slider* knobs[] = { &adsrAtkKnob, &adsrDcyKnob, &adsrSusKnob, &adsrRelKnob };
         juce::Label*  vals[]  = { &adsrAtkValueLabel, &adsrDcyValueLabel, &adsrSusValueLabel, &adsrRelValueLabel };
         juce::Label*  lbls[]  = { &adsrAtkLabel, &adsrDcyLabel, &adsrSusLabel, &adsrRelLabel };
 
+        const int colW = juce::jmin (240, juce::jmax (120, rowB.getWidth() / 4));
+
         for (int i = 0; i < 4; ++i)
         {
-            auto col = rowB.removeFromLeft(60);
-            lbls[i]->setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            vals[i]->setBounds(col.removeFromBottom(labelH).reduced(2, 0));
-            knobs[i]->setBounds(col.reduced(2));
+            auto col = rowB.removeFromLeft (colW).reduced (4, 2);
+
+            // Name on the left, value on the right, knob in the middle.
+            const int sideW = 44;   // narrow side columns leave the knob the full height
+            lbls[i]->setBounds (col.removeFromLeft (sideW));
+            vals[i]->setBounds (col.removeFromRight (sideW));
+
+            knobs[i]->setBounds (col.reduced (2));
         }
 
-        area.removeFromTop(5); // keep spacing consistent with Controls tab
     }
 
     void layoutEqTabContent(juce::Rectangle<int>& area)
