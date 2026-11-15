@@ -3604,8 +3604,11 @@ juce::TextButton::ConnectedOnRight);
                 {
                     const float phX = waveformBounds.getX() + playheadNormalized * actualWaveformWidth;
 
-                    // Thin black vertical line spanning full waveform height
-                    g.setColour(juce::Colour(0xFF000000));
+                    // Vertical line spanning the full waveform height. Black on
+                    // the light "paper" waveform of the Dark theme, but the
+                    // terminal themes have a black panel, so use the accent there.
+                    g.setColour (Theme::isTerminal() ? Theme::accent()
+                                                     : juce::Colour (0xFF000000));
                     g.drawLine(phX, (float)waveformBounds.getY(),
                                phX, (float)waveformBounds.getBottom(), 1.5f);
 
