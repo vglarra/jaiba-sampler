@@ -648,14 +648,28 @@ juce::TextButton::ConnectedOnRight);
 
         // ===== Waveform zoom buttons =====
         for (auto* b : { &waveAmpPlusButton, &waveAmpMinusButton,
-                         &waveTimePlusButton, &waveTimeMinusButton })
+                         &waveTimePlusButton, &waveTimeMinusButton,
+                         &waveAmpResetButton, &waveTimeResetButton })
         {
             b->setRepeatSpeed (300, 70);   // press-and-hold keeps zooming
             addAndMakeVisible (*b);
         }
 
-        waveAmpPlusButton.onClick  = [this] { if (waveformComponent) waveformComponent->nudgeWaveAmpZoom (1.25f); };
-        waveAmpMinusButton.onClick = [this] { if (waveformComponent) waveformComponent->nudgeWaveAmpZoom (0.8f); };
+        waveAmpPlusButton.onClick  = [this]
+        {
+            if (waveformComponent) waveformComponent->nudgeWaveAmpZoom (1.25f);
+            updateZoomInfo();
+        };
+        waveAmpMinusButton.onClick = [this]
+        {
+            if (waveformComponent) waveformComponent->nudgeWaveAmpZoom (0.8f);
+            updateZoomInfo();
+        };
+        waveAmpResetButton.onClick = [this]
+        {
+            if (waveformComponent) waveformComponent->resetWaveAmpZoom();
+            updateZoomInfo();
+        };
         waveTimePlusButton.onClick = [this]
         {
             if (waveformComponent && waveformComponent->onZoomChanged)
@@ -668,12 +682,31 @@ juce::TextButton::ConnectedOnRight);
                 waveformComponent->onZoomChanged (0.8, waveformViewport.getViewPositionX()
                                                        + waveformViewport.getWidth() / 2);
         };
+        waveTimeResetButton.onClick = [this]
+        {
+            waveformZoomLevel = 1.0;
+            if (waveformComponent != nullptr)
+                waveformComponent->setZoomLevel (1.0);
+            updateWaveformSize (false);   // also resets scroll to 0
+            updateZoomInfo();
+            if (onZoomStateChanged)
+                onZoomStateChanged (1.0, 0.0f);
+        };
+
+        // Footer zoom readout (time zoom · amplitude zoom)
+        zoomInfoLabel.setJustificationType (juce::Justification::centredLeft);
+        zoomInfoLabel.setFont (juce::Font (11.0f, juce::Font::bold));
+        zoomInfoLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFCECECE));
+        zoomInfoLabel.setText ("Zoom 100%  \u00B7  Amp 100%", juce::dontSendNotification);
+        addAndMakeVisible (zoomInfoLabel);
 
         // Keep zoom indicator aligned with scroll position; save scroll state on every change
         waveformViewport.onScrollChanged = [this](int scrollX)
         {
             if (waveformComponent != nullptr)
                 waveformComponent->setScrollOffset(scrollX);
+            updateZoomInfo();
+
             if (onZoomStateChanged)
                 onZoomStateChanged(waveformZoomLevel, getScrollPositionNormalized());
         };
@@ -928,27 +961,36 @@ juce::TextButton::ConnectedOnRight);
             notifyEndPointChanged();
         };
 
-        // Zoom: mouse wheel → zoom centered on cursor position
+        // Zoom: the marked region is what matters, so every zoom step keeps the
+        // start/end markers in view — both of them while they fit, otherwise the
+        // view centres on their midpoint instead of on the cursor.
         waveformComponent->onZoomChanged = [this](double factor, int mouseXInComponent)
         {
-            const int mouseXInContainer = mouseXInComponent + 2; // waveformComponent is at x=2 in container
-            const int viewScrollX       = waveformViewport.getViewPositionX();
-            const int oldContainerWidth = waveformContainer->getWidth();
+            juce::ignoreUnused (mouseXInComponent);
 
             waveformZoomLevel = juce::jlimit(1.0, 100.0, waveformZoomLevel * factor);
             updateWaveformSize(true); // preserve scroll — we set it below
 
             const int newContainerWidth = waveformContainer->getWidth();
             const int viewportW         = waveformViewport.getWidth();
-            if (oldContainerWidth > 0)
+            const int maxScroll         = juce::jmax (0, newContainerWidth - viewportW);
+
+            if (waveformComponent != nullptr && viewportW > 0)
             {
-                double ratio   = (double)mouseXInContainer / (double)oldContainerWidth;
-                int newAbsX    = (int)(ratio * newContainerWidth);
-                int screenX    = mouseXInContainer - viewScrollX; // cursor relative to viewport left
-                int newScrollX = newAbsX - screenX;
-                newScrollX = juce::jlimit(0, juce::jmax(0, newContainerWidth - viewportW), newScrollX);
-                waveformViewport.setViewPosition(newScrollX, 0);
+                const int actualW = waveformComponent->getMarkerPixelWidth();
+                constexpr int margin = 14;
+
+                int x0 = 4 + (int) std::round (waveformComponent->getStartMarkerNormalized() * actualW);
+                int x1 = 4 + (int) std::round (waveformComponent->getEndMarkerNormalized()   * actualW);
+                if (x1 < x0)
+                    std::swap (x0, x1);
+
+                juce::ignoreUnused (margin);
+                const int target = (x0 + x1) / 2 - viewportW / 2;   // centre the marked region
+
+                waveformViewport.setViewPosition (juce::jlimit (0, maxScroll, target), 0);
             }
+
             if (onZoomStateChanged)
                 onZoomStateChanged(waveformZoomLevel, getScrollPositionNormalized());
         };
@@ -958,6 +1000,7 @@ juce::TextButton::ConnectedOnRight);
         {
             waveformZoomLevel = 1.0;
             updateWaveformSize(false); // also resets scroll to 0
+            updateZoomInfo();
             if (onZoomStateChanged)
                 onZoomStateChanged(1.0, 0.0f);
         };
@@ -1849,16 +1892,27 @@ juce::TextButton::ConnectedOnRight);
             const int gap = bs;                 // invisible button between the pair
             const int bottomY = waveformRect.getBottom() - SCROLLBAR_HEIGHT - bs - 6;
 
-            waveAmpPlusButton.setBounds  (waveformRect.getRight() - bs - 6,
-                                          waveformRect.getCentreY() - bs - gap / 2, bs, bs);
-            waveAmpMinusButton.setBounds (waveformRect.getRight() - bs - 6,
-                                          waveformRect.getCentreY() + gap / 2, bs, bs);
-            waveTimeMinusButton.setBounds (waveformRect.getX() + 8, bottomY, bs, bs);
-            waveTimePlusButton.setBounds  (waveformRect.getX() + 8 + bs + gap, bottomY, bs, bs);
+            // Right column: amplitude + / − kept close together, with the R
+            // reset beside the pair instead of pushing them apart.
+            constexpr int tightGap = 4;
+            const int rightX  = waveformRect.getRight() - bs - 6;
+            const int pairH   = 2 * bs + tightGap;
+            const int pairTop = waveformRect.getCentreY() - pairH / 2;
+
+            waveAmpPlusButton.setBounds  (rightX, pairTop, bs, bs);
+            waveAmpMinusButton.setBounds (rightX, pairTop + bs + tightGap, bs, bs);
+            waveAmpResetButton.setBounds (rightX - bs - tightGap,
+                                          pairTop + (pairH - bs) / 2, bs, bs);
+
+            // Bottom row: wave-length − / + / R.
+            const int bx = waveformRect.getX() + 8;
+            waveTimeMinusButton.setBounds (bx, bottomY, bs, bs);
+            waveTimePlusButton.setBounds  (bx + bs + gap, bottomY, bs, bs);
+            waveTimeResetButton.setBounds (bx + 2 * (bs + gap), bottomY, bs, bs);
 
             const bool show = (waveformHeight > 0);
-            for (auto* b : { &waveAmpPlusButton, &waveAmpMinusButton,
-                             &waveTimePlusButton, &waveTimeMinusButton })
+            for (auto* b : { &waveAmpPlusButton, &waveAmpMinusButton, &waveAmpResetButton,
+                             &waveTimePlusButton, &waveTimeMinusButton, &waveTimeResetButton })
                 b->setVisible (show);
         }
         emptyStateLabel.setBounds(waveformRect);   // overlays the waveform area
@@ -2051,9 +2105,11 @@ juce::TextButton::ConnectedOnRight);
         const int rowW = bottomRow.getWidth();
         const int pitchIndicatorWidth = static_cast<int>(rowW * 0.22);
         const int durationWidth       = static_cast<int>(rowW * 0.12);
-        const int filenameWidth       = rowW - pitchIndicatorWidth - durationWidth - 8;
+        const int zoomWidth           = 170;
+        const int filenameWidth       = rowW - pitchIndicatorWidth - durationWidth - zoomWidth - 8;
 
         sampleNameLabel.setBounds (bottomRow.removeFromLeft(filenameWidth).reduced(3, 0));
+        zoomInfoLabel.setBounds   (bottomRow.removeFromLeft(zoomWidth).reduced(3, 0));
         bottomInfoLabel.setBounds (bottomRow.removeFromRight(pitchIndicatorWidth).reduced(3, 0));
         durationLabel.setBounds   (bottomRow.removeFromRight(durationWidth).reduced(3, 0));
         // remaining 8px is a spacer between filename and duration
@@ -2725,11 +2781,10 @@ juce::TextButton::ConnectedOnRight);
                     originalSampleRate = reader->sampleRate;
                 }
                 
-                // CRITICAL FIX #2: Reset scroll position BEFORE anything else
-                // Reset zoom on new sample load
-                waveformZoomLevel = 1.0;
+                // Keep the zoom configuration when switching pads — only the
+                // scroll position resets so the new sample starts at its left.
                 if (waveformComponent != nullptr)
-                    waveformComponent->setZoomLevel(1.0);
+                    waveformComponent->setZoomLevel(waveformZoomLevel);
                 waveformViewport.setViewPosition(0, 0);
                 
                 // CRITICAL FIX #3: Force waveform component to invalidate ALL cache
@@ -2740,6 +2795,7 @@ juce::TextButton::ConnectedOnRight);
                 
                 // CRITICAL FIX #4: Update container size AFTER file is set
                 updateWaveformSize();
+                updateZoomInfo();
 
                 // Reset start/end points when a new file is loaded
                 resetStartPoint();
@@ -3759,6 +3815,14 @@ juce::TextButton::ConnectedOnRight);
                 repaint();
             }
 
+            float getWaveAmpZoom() const { return waveAmpZoom; }
+
+            void resetWaveAmpZoom()
+            {
+                waveAmpZoom = 1.0f;
+                repaint();
+            }
+
             // Set pre-computed peak data (computed on background thread before callAsync).
             // After this call paint() has everything it needs — zero disk I/O on message thread.
             void setAudioPeaks(std::unique_ptr<WaveformPeakBin[]> peaks,
@@ -3858,12 +3922,21 @@ juce::TextButton::ConnectedOnRight);
             std::function<void(float)> onEndMarkerDragged;
 
             // Zoom callbacks
+            // Exposed so the zoom logic can keep the marked region in view.
+            float getStartMarkerNormalized() const { return startMarkerNormalized; }
+            float getEndMarkerNormalized()   const { return endMarkerNormalized; }
+            int   getMarkerPixelWidth()      const
+            {
+                auto b = getLocalBounds().reduced (2);
+                return getActualWaveformWidth (b.getWidth());
+            }
+
             std::function<void(double factor, int mouseXInComponent)> onZoomChanged;
             std::function<void()> onZoomReset;
 
             void mouseDown(const juce::MouseEvent& event) override
             {
-                updateCrosshair (event);
+                    updateCrosshair (event);
 
                 if (event.getNumberOfClicks() > 1)
                     return; // double-click handled by mouseDoubleClick
@@ -5155,6 +5228,9 @@ void adjustPitchUp()
     WaveZoomButton waveAmpMinusButton { "-" };
     WaveZoomButton waveTimePlusButton { "+" };
     WaveZoomButton waveTimeMinusButton{ "-" };
+    WaveZoomButton waveAmpResetButton  { "R" };
+    WaveZoomButton waveTimeResetButton { "R" };
+    juce::Label    zoomInfoLabel;
     juce::Label      eqPlaceholderLabel;
     std::unique_ptr<RecControlPanel> recContent;
     std::unique_ptr<SeqControlPanel> seqContent;
@@ -5794,6 +5870,19 @@ private:
         // Seq tab content
         if (seqContent != nullptr)
             seqContent->setVisible(activeTab == 4);
+    }
+
+    // Footer readout: horizontal (time) and vertical (amplitude) zoom.
+    void updateZoomInfo()
+    {
+        const int z = (int) std::round (waveformZoomLevel * 100.0);
+        const int a = (int) std::round ((waveformComponent != nullptr
+                                            ? waveformComponent->getWaveAmpZoom()
+                                            : 1.0f) * 100.0f);
+
+        zoomInfoLabel.setText ("Zoom " + juce::String (z) + "%  \u00B7  Amp "
+                                   + juce::String (a) + "%",
+                               juce::dontSendNotification);
     }
 
     void layoutAdsrTabContent(juce::Rectangle<int>& area)
