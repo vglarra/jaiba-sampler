@@ -1878,8 +1878,10 @@ juce::TextButton::ConnectedOnRight);
         // The ADSR tab gives its knobs more room by shrinking the waveform,
         // EQ splits 50/50, the Seq tab hides the waveform entirely.
         const int nonWaveOverhead = (activeTab == 1) ? 252 : 200;
+
+        // EQ tab: 50/50 normally, biased towards the graph when expanded.
         const int waveformHeight = (activeTab == 2)
-            ? juce::jmax(kMinWaveformH, (getHeight() - 120) / 2)
+            ? juce::jmax(kMinWaveformH, (int) ((getHeight() - 120) * (expandedView ? 0.42 : 0.5)))
             : (seqTabActive ? 0 : juce::jmax(kMinWaveformH, getHeight() - nonWaveOverhead));
         
         // ===== CRITICAL FIX #1: Reserve scrollbar space in viewport bounds =====
@@ -1968,10 +1970,12 @@ juce::TextButton::ConnectedOnRight);
             // Normalize controls — left of filter mode button; only shown on EQ tab
             // Layout (right→left removal): gainLabel | Norm | 0 | -6 | -12
             normGainLabel.setBounds           (tabBar.removeFromRight(52).reduced(1, 2));
-            normButton.setBounds              (tabBar.removeFromRight(42).reduced(1, 2));
-            normTargetZeroButton.setBounds    (tabBar.removeFromRight(30).reduced(1, 2));
-            normTargetMinus6Button.setBounds  (tabBar.removeFromRight(30).reduced(1, 2));
-            normTargetMinus12Button.setBounds (tabBar.removeFromRight(36).reduced(1, 2));
+            // Wide enough for the full "Norm" label at the default button font.
+            normButton.setBounds              (tabBar.removeFromRight(58).reduced(1, 2));
+            // Normalisation target buttons match the EQ on/off button's size.
+            normTargetZeroButton.setBounds    (tabBar.removeFromRight(44).reduced(1, 3));
+            normTargetMinus6Button.setBounds  (tabBar.removeFromRight(44).reduced(1, 3));
+            normTargetMinus12Button.setBounds (tabBar.removeFromRight(44).reduced(1, 3));
             // EQ Reset — leftmost of the EQ controls group, right-adjacent to -12 button.
             eqResetButton.setBounds           (tabBar.removeFromRight(52).reduced(1, 2));
         }
@@ -2019,16 +2023,23 @@ juce::TextButton::ConnectedOnRight);
 
         auto pageArea = tabContentArea;
         auto row = pageArea.removeFromTop (kRowH);
+        // Controls stay on a single row; the extra card height goes to the waveform.
+        auto row2 = juce::Rectangle<int>();
+        juce::Rectangle<int>* curRow = &row;
 
         // Carousel layout: < [page buttons] >
         auto nextColumn = row.removeFromRight (60);
         tabPrevButton.setBounds (row.removeFromLeft (60).reduced (2, 4));
         row.removeFromLeft (kColGap);
 
-        auto put = [&row] (juce::Component& c, int w)
+        auto put = [&] (juce::Component& c, int w)
         {
-            c.setBounds (row.removeFromLeft (w).reduced (2, 4));
-            row.removeFromLeft (kColGap);
+            if (curRow == &row && row2.getHeight() > 0 && row.getWidth() < w + kColGap)
+                curRow = &row2;
+
+            c.setBounds (curRow->removeFromLeft (juce::jmin (w, juce::jmax (0, curRow->getWidth())))
+                            .reduced (2, 4));
+            curRow->removeFromLeft (kColGap);
         };
 
         pitchStepLabel.setBounds ({});
@@ -2039,11 +2050,9 @@ juce::TextButton::ConnectedOnRight);
         {
             case 0:   // PITCH / TRIM / GRID
             {
-                auto pitchArea = row.removeFromLeft (200);
-                pitchDownButton.setBounds (pitchArea.removeFromLeft (62).reduced (2, 4));
-                pitchLabel.setBounds      (pitchArea.removeFromLeft (72).reduced (2, 4));
-                pitchUpButton.setBounds   (pitchArea.removeFromLeft (62).reduced (2, 4));
-                row.removeFromLeft (kColGap);
+                put (pitchDownButton, 62);
+                put (pitchLabel, 72);
+                put (pitchUpButton, 62);
                 put (pitchStepButton, 90);
                 put (tuneButton, 110);
                 put (trimButton, 110);
@@ -2067,23 +2076,15 @@ juce::TextButton::ConnectedOnRight);
                 put (prevTransientButton, 76);
                 put (nextTransientButton, 76);
 
-                auto startArea = row.removeFromLeft (130);
-                startKnobLabel.setBounds (startArea.removeFromLeft (66).reduced (2, 4));
-                startKnob.setBounds      (startArea.removeFromLeft (56).reduced (2, 4));
-                row.removeFromLeft (kColGap);
-
-                auto endArea = row.removeFromLeft (130);
-                endKnobLabel.setBounds (endArea.removeFromLeft (66).reduced (2, 4));
-                endKnob.setBounds      (endArea.removeFromLeft (56).reduced (2, 4));
-                row.removeFromLeft (kColGap);
-
+                put (startKnobLabel, 66);
+                put (startKnob, 56);
+                put (endKnobLabel, 66);
+                put (endKnob, 56);
                 put (prevEndTransientButton, 76);
                 put (nextEndTransientButton, 76);
-
-                auto sensArea = row.removeFromLeft (190);
-                sensLabel.setBounds      (sensArea.removeFromLeft (56).reduced (2, 4));
-                sensKnob.setBounds       (sensArea.removeFromLeft (64).reduced (2, 4));
-                sensValueLabel.setBounds (sensArea.removeFromLeft (64).reduced (2, 4));
+                put (sensLabel, 56);
+                put (sensKnob, 64);
+                put (sensValueLabel, 64);
                 break;
             }
         }
@@ -4823,6 +4824,7 @@ void adjustPitchUp()
     // Listener list
     juce::ListenerList<Listener> listeners;
     int fixedViewportWidth = 700;  // Will be updated in resized()
+    bool expandedView = false;
     double waveformZoomLevel = 1.0;
 
     // ===== REC TAB PANEL =====
@@ -5665,6 +5667,17 @@ public:
         if (seqContent != nullptr) seqContent->setMetronomeBpm (bpm);
     }
 
+    // True when MainComponent has compacted the pad rows + bank bar, giving the
+    // card extra vertical room; tabs then grow into the freed space.
+    void setExpandedView (bool shouldBeExpanded)
+    {
+        if (expandedView == shouldBeExpanded)
+            return;
+        expandedView = shouldBeExpanded;
+        resized();
+        repaint();
+    }
+
     // Current horizontal zoom factor (1.0 = 100%).
     double getWaveformZoomLevel() const { return waveformZoomLevel; }
 
@@ -5923,15 +5936,15 @@ private:
 
     void layoutEqTabContent(juce::Rectangle<int>& area)
     {
-        // Left column: gain knob with its name beside it (same idea as ADSR),
-        // so the knob can use the full height of the EQ content area.
-        const int colW = juce::jlimit (96, 170, area.getWidth() / 7);
+        // Narrow left column: the "Gain" label sits above the knob instead of
+        // beside it, so the EQ graph gets the width the label used to take.
+        constexpr int labelH = 14;
+        const int colW = juce::jlimit (72, 108, area.getHeight() * 3 / 5);
         auto gainCol = area.removeFromLeft (colW);
         area.removeFromLeft (6);   // gap before EQDisplay
 
-        auto knobArea = gainCol.reduced (2);
-        eqGainLabel.setBounds (knobArea.removeFromLeft (46));
-        eqGainKnob.setBounds  (knobArea.reduced (2));
+        eqGainLabel.setBounds (gainCol.removeFromTop (labelH).reduced (2, 0));
+        eqGainKnob.setBounds  (gainCol.reduced (2));
 
         // EQDisplay fills the remaining area.
         if (eqDisplay != nullptr)

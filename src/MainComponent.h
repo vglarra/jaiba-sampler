@@ -450,6 +450,7 @@ private:
     GlobalLoopColumn  globalLoopColumn;
 
     // UI Components
+
     juce::TextButton menuButton{ "Menu" };
     juce::TextButton kitButton     { "Kit" };
     juce::Label      kitNameLabel;              // shiny display showing the loaded kit name

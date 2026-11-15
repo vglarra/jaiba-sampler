@@ -259,6 +259,8 @@ MainComponent::MainComponent()
     addAndMakeVisible(menuButton);
     menuButton.addListener(this);
 
+
+
     // Kit button — save / load bank kits (.jai files)
     kitButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF2A4A6A));
     kitButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
@@ -1031,6 +1033,8 @@ void MainComponent::resized()
 
     constexpr int kTopBarH   = 90;
     constexpr int kGlobCtrlH = 40;
+    // Bank control row runs permanently at the taller, touch-friendly height.
+    constexpr int bankRowH = 52;
     constexpr int kPadRowMax = 62;    // preferred pad row height (rectangular pads, another 20% lower)
     constexpr int kPadRowMin = 50;    // smallest still-finger-sized pad row
     constexpr int kCardMinH  = 150;
@@ -1042,15 +1046,22 @@ void MainComponent::resized()
     // the footer off the bottom of the window.
     const auto fixedRowsFor = [&](int padH)
     {
-        return kTopBarH + kGlobCtrlH + padH + padH + kGap + kGap;
+        return kTopBarH + bankRowH + padH + padH + kGap + kGap;
     };
 
     int padRowH = kPadRowMax;
     while (padRowH > kPadRowMin && getHeight() - fixedRowsFor (padRowH) < kCardMinH)
         --padRowH;
 
+    // The two pad rows always run at about half height, freeing card space.
+    padRowH = juce::jmax (28, padRowH / 2);
+
     const int fixedRowsH   = fixedRowsFor (padRowH);
     const int dynamicCardH = juce::jmax (kCardMinH, getHeight() - fixedRowsH);
+
+    // The pad rows are always compact, so the card always uses its expanded
+    // tab rules; the bank row toggle only trades card height for bigger controls.
+    sampleCard.setExpandedView (true);
 
     // Consume from top (full width — no horizontal margins yet)
     auto strip = getLocalBounds();
@@ -1098,32 +1109,36 @@ void MainComponent::resized()
     // GLOBAL CONTROLS BAR  (40 px, full width)
     // =========================================================
     {
-        auto globRow = strip.removeFromTop (kGlobCtrlH);
+        auto globRow = strip.removeFromTop (bankRowH);
         globalControlsBar.setBounds (globRow);
 
         // Kit button + name display: placed after bank controls in the same row.
         // GlobalControlsBar uses reduced(8,0) internally; bank controls = 260px
         // (36 Down + 4 + 180 label + 4 + 36 Up). Keep in sync with its resized().
         auto kitArea = globRow.reduced (8, 0);
-        kitArea.removeFromLeft (260);      // skip bank controls
+        kitArea.removeFromLeft (globalControlsBar.getBankSpanWidth());   // skip bank controls
         kitArea.removeFromLeft (4);        // gap after bankDownBtn
-        kitButton.setBounds    (kitArea.removeFromLeft (44).withSizeKeepingCentre (40, 20));
+        constexpr int ctrlH  = 24;
+        constexpr int kitBtnW = 74;
+        kitButton.setBounds    (kitArea.removeFromLeft (kitBtnW).withSizeKeepingCentre (kitBtnW - 4, ctrlH));
         kitArea.removeFromLeft (4);
+        kitNameLabel.setFont (juce::Font (14.0f, juce::Font::bold));
+        gjmStatusLabel.setFont (juce::Font (12.0f, juce::Font::bold));
         // Reserve space for < > buttons (24px each) + 2px gap + 4px trailing gap = 54px
         constexpr int kNavBtnW = 24;
         constexpr int kNavReserve = kNavBtnW + 2 + kNavBtnW + 4;
         const int labelW = juce::jmin (180, kitArea.getWidth() - kNavReserve - 4);
-        kitNameLabel.setBounds   (kitArea.removeFromLeft (labelW).withSizeKeepingCentre (labelW, 20));
+        kitNameLabel.setBounds   (kitArea.removeFromLeft (labelW).withSizeKeepingCentre (labelW, ctrlH));
         kitArea.removeFromLeft (4);
-        kitPrevButton.setBounds  (kitArea.removeFromLeft (kNavBtnW).withSizeKeepingCentre (kNavBtnW, 20));
+        kitPrevButton.setBounds  (kitArea.removeFromLeft (kNavBtnW).withSizeKeepingCentre (kNavBtnW, ctrlH));
         kitArea.removeFromLeft (2);
-        kitNextButton.setBounds  (kitArea.removeFromLeft (kNavBtnW).withSizeKeepingCentre (kNavBtnW, 20));
+        kitNextButton.setBounds  (kitArea.removeFromLeft (kNavBtnW).withSizeKeepingCentre (kNavBtnW, ctrlH));
 
         // GJM status label — fills whatever space remains to the right of kit controls
         kitArea.removeFromLeft (10);
         if (kitArea.getWidth() > 30)
             gjmStatusLabel.setBounds (kitArea.withSizeKeepingCentre (
-                juce::jmin (220, kitArea.getWidth()), 20));
+                juce::jmin (220, kitArea.getWidth()), ctrlH));
     }
 
     // =========================================================
@@ -1131,6 +1146,8 @@ void MainComponent::resized()
     // =========================================================
     const int topPadRowY = strip.getY();
     strip.removeFromTop (padRowH);
+
+
 
     strip.removeFromTop (kGap);
 
@@ -1210,6 +1227,7 @@ void MainComponent::buttonClicked(juce::Button* button)
     {
         performPanicReset();
     }
+
     else if (button == &testToneButton)
     {
         toggleSineWave();

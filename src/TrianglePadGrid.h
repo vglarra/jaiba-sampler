@@ -154,11 +154,15 @@ public:
         }
 
         // Pad number: bottom-left on the top row, top-left on the bottom row.
+        // Font scales with the pad height so the numbers stay readable when the
+        // rows are compacted.
+        const float numSize = juce::jlimit (8.0f, 12.0f, b.getHeight() * 0.40f);
         g.setColour (juce::Colour (0xFFFFDD44));
-        g.setFont (juce::Font (12.0f, juce::Font::bold));
-        const int numY = (direction == Direction::Down) ? (int) b.getBottom() - 17
-                                                        : (int) b.getY() + 2;
-        g.drawText (juce::String (padIndex + 1), (int) b.getX() + 6, numY, 30, 14,
+        g.setFont (juce::Font (numSize, juce::Font::bold));
+        const int numH = (int) numSize + 2;
+        const int numY = (direction == Direction::Down) ? (int) b.getBottom() - numH - 1
+                                                        : (int) b.getY() + 1;
+        g.drawText (juce::String (padIndex + 1), (int) b.getX() + 6, numY, 30, numH,
                     juce::Justification::left, false);
 
         // Sample name on the opposite side of the number.
@@ -169,12 +173,14 @@ public:
             if (dn.length() > 18) dn = dn.substring (0, 15) + "...";
 
             g.setColour (juce::Colours::white);
-            g.setFont (juce::Font (9.0f));
+            const float nameSize = juce::jlimit (7.0f, 9.0f, b.getHeight() * 0.28f);
+            g.setFont (juce::Font (nameSize));
 
-            const int textY = (direction == Direction::Down) ? (int) b.getY() + 2
-                                                             : (int) b.getBottom() - 17;
+            const int nameH = (int) nameSize + 2;
+            const int textY = (direction == Direction::Down) ? (int) b.getY() + 1
+                                                             : (int) b.getBottom() - nameH - 1;
             auto textArea = juce::Rectangle<int> ((int) b.getX() + 6, textY,
-                                                  (int) b.getWidth() - 12, 14);
+                                                  (int) b.getWidth() - 12, nameH);
             g.drawFittedText (dn, textArea, juce::Justification::left, 1);
         }
     }
@@ -478,16 +484,41 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced (8, 0);
-        // Keep this width in sync with MainComponent::resized(), which skips the
-        // same span before laying out the kit/session controls on this row.
-        auto left = area.removeFromLeft (260);
-        bankDownBtn.setBounds (left.removeFromLeft (36).withSizeKeepingCentre (32, 20));
-        left.removeFromLeft (4);
-        bankLabel.setBounds   (left.removeFromLeft (180).withSizeKeepingCentre (176, 20));
-        left.removeFromLeft (4);
-        bankUpBtn.setBounds   (left.removeFromLeft (36).withSizeKeepingCentre (32, 20));
+
+        // Compact mode shrinks the bank controls to fit a thin row; the
+        // maximised row is taller than the old 40 px, so its controls are
+        // correspondingly bigger.
+        const int ctrlH  = compact ? 16 : 30;
+        const int spanW  = compact ? 210 : 330;
+        const int btnW   = compact ? 28 : 56;
+        const int lblW   = compact ? 140 : 200;
+
+        // Keep these widths in sync with MainComponent::resized(), which skips
+        // the same span before laying out the kit/session controls on this row.
+        auto left = area.removeFromLeft (spanW);
+        bankDownBtn.setBounds (left.removeFromLeft (btnW).withSizeKeepingCentre (btnW - 4, ctrlH));
+        left.removeFromLeft (compact ? 3 : 4);
+        bankLabel.setBounds   (left.removeFromLeft (lblW).withSizeKeepingCentre (lblW - 4, ctrlH));
+        left.removeFromLeft (compact ? 3 : 4);
+        bankUpBtn.setBounds   (left.removeFromLeft (btnW).withSizeKeepingCentre (btnW - 4, ctrlH));
+
+        bankLabel.setFont (juce::Font (juce::FontOptions (compact ? 9.0f : 13.0f, juce::Font::bold)));
         // Right area left for gjmStatusLabel (MainComponent child, overlaid on this row)
     }
+
+    // Bank-control-row compaction, driven by MainComponent's toggle.
+    void setCompact (bool shouldBeCompact)
+    {
+        if (compact == shouldBeCompact)
+            return;
+        compact = shouldBeCompact;
+        resized();
+        repaint();
+    }
+
+    bool isCompact() const { return compact; }
+
+    int getBankSpanWidth() const { return compact ? 210 : 330; }
 
     // Fired with the new 1-based bank index whenever the user presses Up or Down.
     std::function<void(int)> onBankChanged;
@@ -525,6 +556,7 @@ public:
     int getCurrentBank() const { return currentBank; }
 
 private:
+    bool compact = false;
     juce::TextButton bankUpBtn, bankDownBtn;
     juce::Label      bankLabel;
     juce::String     bankSuffix;   // kit name / "no_name" / "empty" for the current bank
