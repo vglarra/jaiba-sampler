@@ -893,6 +893,10 @@ private:
     void loadPatternFromPad();   // shows popup menu, loads into recQuantised
 
     // ===== UI theme =====
+    // Horizontal waveform zoom that survives pad switches (global editing
+    // preference, not per-pad). Initialised from the saved settings.
+    double globalZoomLevel = 1.0;
+
     UiTheme uiTheme = UiTheme::Dark;
     // SafePointer, not raw Label*: some labels (tooltips, transient dialogs)
     // are destroyed during the session and must not be touched again.

@@ -51,6 +51,7 @@ MainComponent::MainComponent()
     
     // Create configuration manager for session persistence
     configManager = std::make_unique<ConfigurationManager>();
+    globalZoomLevel = (double) configManager->getZoomLevel();
     
     // Create the model
     sampleListModel = std::make_unique<SampleListModel>(*this);
@@ -121,6 +122,21 @@ MainComponent::MainComponent()
         // Never call loadSampleFileAsync here; that reads from disk and causes multi-second lag.
 
         const auto t0 = static_cast<juce::int64>(juce::Time::getMillisecondCounter());
+
+        // Zoom is a global editing preference: remember the zoom the user is
+        // working at and re-apply it once the pad has finished loading (the
+        // load path itself may reset the zoom to 1.0 for a new sample).
+        {
+            const double zoomToKeep = globalZoomLevel;
+            juce::MessageManager::callAsync (
+                [safe = juce::Component::SafePointer<MainComponent> (this), zoomToKeep]()
+                {
+                    if (safe == nullptr)
+                        return;
+                    safe->globalZoomLevel = zoomToKeep;
+                    safe->sampleCard.restoreZoomAndScroll (zoomToKeep, 0.0f);
+                });
+        }
 
         // ── Step 1: Capture outgoing pad state (in-memory, no disk flush) ──
         // MUST happen BEFORE padSelectionSource is changed.  When we were on a G pad,
@@ -208,9 +224,10 @@ MainComponent::MainComponent()
             if (settings.endPointSeconds > 0.0)
                 sampleCard.setEndPoint (settings.endPointSeconds);
 
-            // Restore zoom / scroll position.
-            sampleCard.restoreZoomAndScroll (settings.zoomLevel,
-                                             settings.zoomScrollPosition);
+            // Zoom is a global editing preference: do NOT restore the pad's own
+            // saved zoom here. SampleCard keeps its current zoom factor across
+            // setWaveform() calls, so switching pads leaves the zoom untouched
+            // and only the container/scroll are rebuilt for the new sample.
 
             // Reset folder navigation state to this pad's folder.
             // folderAudioFiles is cleared so the lazy-scan in loadNext/PrevSample
@@ -416,6 +433,7 @@ MainComponent::MainComponent()
       // Save zoom level and scroll position whenever they change interactively
       sampleCard.onZoomStateChanged = [this](double zoomLevel, float normalizedScroll)
       {
+          globalZoomLevel = zoomLevel;
           if (configManager != nullptr)
           {
               configManager->saveZoomLevel((float)zoomLevel);
@@ -4103,6 +4121,7 @@ void MainComponent::loadSampleFileAsync(const juce::File& file, bool autoPlay, b
             // Navigation or startup: restore previously saved zoom and scroll
             const float savedZoom   = configManager != nullptr ? configManager->getZoomLevel() : 1.0f;
             const float savedScroll = configManager != nullptr ? configManager->getZoomScrollPosition() : 0.0f;
+            globalZoomLevel = (double) savedZoom;
             if (savedZoom > 1.001f)
             {
                 sampleCard.restoreZoomAndScroll((double)savedZoom, savedScroll);
@@ -8038,6 +8057,15 @@ void MainComponent::restoreLastSavedSetup()
         loadGjmFromFile (session);
         // Always open on the sample view regardless of the tab saved in the session.
         sampleCard.setActiveTabQuiet (0);
+
+        // Restore the global zoom preference saved at the end of the last session.
+        const float savedZoom   = configManager->getZoomLevel();
+        const float savedScroll = configManager->getZoomScrollPosition();
+        if (savedZoom > 1.001f)
+        {
+            globalZoomLevel = (double) savedZoom;
+            sampleCard.restoreZoomAndScroll ((double) savedZoom, savedScroll);
+        }
         return;
     }
 

@@ -991,6 +991,8 @@ juce::TextButton::ConnectedOnRight);
                 waveformViewport.setViewPosition (juce::jlimit (0, maxScroll, target), 0);
             }
 
+            updateZoomInfo();
+
             if (onZoomStateChanged)
                 onZoomStateChanged(waveformZoomLevel, getScrollPositionNormalized());
         };
@@ -5663,6 +5665,9 @@ public:
         if (seqContent != nullptr) seqContent->setMetronomeBpm (bpm);
     }
 
+    // Current horizontal zoom factor (1.0 = 100%).
+    double getWaveformZoomLevel() const { return waveformZoomLevel; }
+
     // Restore saved zoom level and scroll position after a sample load.
     // Must be called after setWaveform() so the container is already sized.
     void restoreZoomAndScroll(double zoomLevel, float normalizedScroll)
@@ -5675,6 +5680,7 @@ public:
         const int viewportW  = waveformViewport.getWidth();
         const int maxScroll  = juce::jmax(0, containerW - viewportW);
         waveformViewport.setViewPosition((int)(normalizedScroll * (float)maxScroll), 0);
+        updateZoomInfo();
     }
 
     // Fired whenever zoom or scroll changes interactively.
@@ -5917,13 +5923,15 @@ private:
 
     void layoutEqTabContent(juce::Rectangle<int>& area)
     {
-        // Left column: 44px for the pad gain knob + label below it.
-        auto gainCol = area.removeFromLeft(44);
-        area.removeFromLeft(2);  // 2px gap before EQDisplay
+        // Left column: gain knob with its name beside it (same idea as ADSR),
+        // so the knob can use the full height of the EQ content area.
+        const int colW = juce::jlimit (96, 170, area.getWidth() / 7);
+        auto gainCol = area.removeFromLeft (colW);
+        area.removeFromLeft (6);   // gap before EQDisplay
 
-        const int labelH = 14;
-        eqGainLabel.setBounds(gainCol.removeFromBottom(labelH).reduced(1, 0));
-        eqGainKnob.setBounds(gainCol.reduced(4));
+        auto knobArea = gainCol.reduced (2);
+        eqGainLabel.setBounds (knobArea.removeFromLeft (46));
+        eqGainKnob.setBounds  (knobArea.reduced (2));
 
         // EQDisplay fills the remaining area.
         if (eqDisplay != nullptr)
