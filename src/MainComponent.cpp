@@ -3517,6 +3517,8 @@ void MainComponent::applyUiTheme (UiTheme theme)
         collect (*this);
     }
 
+    sampleCard.refreshScrollbarColours();
+
     for (auto& entry : themedLabels)
         if (entry.first != nullptr)
             entry.first->setColour (juce::Label::textColourId,

@@ -644,7 +644,10 @@ juce::TextButton::ConnectedOnRight);
         waveformViewport.setScrollBarsShown(true, false); // Show vertical scroll bar? false, show horizontal? true
         waveformViewport.setScrollOnDragEnabled(false); // Disabled so waveform can capture mouse for marker drag
         waveformViewport.setLookAndFeel(&bigScrollbarLAF);
+        defaultScrollbarThumb = waveformViewport.getHorizontalScrollBar()
+                                    .findColour (juce::ScrollBar::thumbColourId);
         addAndMakeVisible(waveformViewport);
+        refreshScrollbarColours();
 
         // ===== Waveform zoom buttons =====
         for (auto* b : { &waveAmpPlusButton, &waveAmpMinusButton,
@@ -844,15 +847,16 @@ juce::TextButton::ConnectedOnRight);
         addAndMakeVisible(stepDescriptionLabel);
 
         // Volume knob — neutral gray, same compact style as Master Vol
-        volumeKnob.setLookAndFeel(&compactKnobLaf);
-        volumeKnob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        // Horizontal slider instead of a knob: same touch target, less height.
+        volumeKnob.setLookAndFeel(nullptr);
+        volumeKnob.setSliderStyle(juce::Slider::LinearHorizontal);
         volumeKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         volumeKnob.setRange(0.0, 1.0, 0.01);
         volumeKnob.setValue(1.0, juce::dontSendNotification);
-        volumeKnob.setTooltip("Volume (drag up/down)");
-        volumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCECECE)); // neutral gray fill
-        volumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
-        volumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFF1E1E1E)); // dark indicator on gray
+        volumeKnob.setTooltip("Volume (drag)");
+        volumeKnob.setColour(juce::Slider::backgroundColourId, juce::Colour(0xFF2A2A2A));
+        volumeKnob.setColour(juce::Slider::trackColourId,      juce::Colour(0xFFCECECE));
+        volumeKnob.setColour(juce::Slider::thumbColourId,      juce::Colour(0xFFF0F0F0));
         volumeKnob.setDoubleClickReturnValue(true, 1.0); // double-click resets to 100%
         volumeKnob.onValueChange = [this] {
             float v = (float)volumeKnob.getValue();
@@ -1808,9 +1812,9 @@ juce::TextButton::ConnectedOnRight);
         // Add margin around the entire card content (10px on each side)
         area.reduce(10, 10);
         
-        // ===== TOP ROW: uniform height matches tab buttons (24px bar, 20px buttons) =====
-        constexpr int kTopBtnH = 20; // same as kBtnH in Controls tab
-        auto topRow = area.removeFromTop(24); // matches tab bar height
+        // ===== TOP ROW: slightly taller so the volume slider has room =====
+        constexpr int kTopBtnH = 24; // same as kBtnH in Controls tab
+        auto topRow = area.removeFromTop(30);
 
         // + button on left (40px wide)
         addButton.setBounds(topRow.removeFromLeft(40).withSizeKeepingCentre(36, kTopBtnH));
@@ -1835,15 +1839,16 @@ juce::TextButton::ConnectedOnRight);
         // Gap before Vol knob
         topRow.removeFromLeft(8);
 
-        // Vol knob with left label and right percentage display
-        // Layout: [Vol label (28px)] [knob (20x20)] [value% (32px)]
+        // Volume: [Vol label] [horizontal slider] [percentage]
         {
-            auto volLabelCol = topRow.removeFromLeft(28);
-            volumeLabel.setBounds(volLabelCol.withSizeKeepingCentre(26, kTopBtnH));
-            auto volKnobCol = topRow.removeFromLeft(20);
-            volumeKnob.setBounds(volKnobCol.withSizeKeepingCentre(kTopBtnH, kTopBtnH));
-            auto volValueCol = topRow.removeFromLeft(32);
-            volValueLabel.setBounds(volValueCol.withSizeKeepingCentre(30, kTopBtnH));
+            volumeLabel.setBounds (topRow.removeFromLeft (30).withSizeKeepingCentre (28, kTopBtnH));
+
+            const int sliderW = juce::jlimit (120, 190, topRow.getWidth() - 330);
+            auto volSliderCol = topRow.removeFromLeft (sliderW);
+            volumeKnob.setBounds (volSliderCol.withSizeKeepingCentre (sliderW - 4, 22));
+
+            auto volValueCol = topRow.removeFromLeft (38);
+            volValueLabel.setBounds (volValueCol.withSizeKeepingCentre (36, kTopBtnH));
         }
 
         // Gap after Vol knob area
@@ -1877,11 +1882,11 @@ juce::TextButton::ConnectedOnRight);
         const bool seqTabActive = (activeTab == 4);
         // The ADSR tab gives its knobs more room by shrinking the waveform,
         // EQ splits 50/50, the Seq tab hides the waveform entirely.
-        const int nonWaveOverhead = (activeTab == 1) ? 252 : 200;
+        const int nonWaveOverhead = (activeTab == 1) ? 258 : 206;
 
         // EQ tab: 50/50 normally, biased towards the graph when expanded.
         const int waveformHeight = (activeTab == 2)
-            ? juce::jmax(kMinWaveformH, (int) ((getHeight() - 120) * (expandedView ? 0.42 : 0.5)))
+            ? juce::jmax(kMinWaveformH, (int) ((getHeight() - 126) * (expandedView ? 0.42 : 0.5)))
             : (seqTabActive ? 0 : juce::jmax(kMinWaveformH, getHeight() - nonWaveOverhead));
         
         // ===== CRITICAL FIX #1: Reserve scrollbar space in viewport bounds =====
@@ -4828,6 +4833,7 @@ void adjustPitchUp()
     juce::ListenerList<Listener> listeners;
     int fixedViewportWidth = 700;  // Will be updated in resized()
     bool expandedView = false;
+    juce::Colour defaultScrollbarThumb { 0xFF4D9FFF };  // stock thumb colour
     double waveformZoomLevel = 1.0;
 
     // ===== REC TAB PANEL =====
@@ -5679,6 +5685,17 @@ public:
         expandedView = shouldBeExpanded;
         resized();
         repaint();
+    }
+
+    // Redraw the waveform scrollbar in the current theme. Terminal skins get
+    // a red thumb; the Dark skin keeps the stock LookAndFeel colour.
+    void refreshScrollbarColours()
+    {
+        auto& sb = waveformViewport.getHorizontalScrollBar();
+        sb.setColour (juce::ScrollBar::thumbColourId,
+                      Theme::isTerminal() ? juce::Colour (0xFFE03C3C)
+                                          : defaultScrollbarThumb);
+        sb.repaint();
     }
 
     // Current horizontal zoom factor (1.0 = 100%).
