@@ -317,7 +317,7 @@ MainComponent::MainComponent()
     baseTuningLabel.setColour(juce::Label::textColourId,       juce::Colour(0xFFCECECE));
     baseTuningLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xFF363636));
     baseTuningLabel.setFont(juce::Font(14.0f));
-    baseTuningLabel.setTooltip("Base tuning: A4 reference frequency. Drag up/down (Shift = coarse 1 Hz steps)");
+    baseTuningLabel.setTooltip("Base tuning: A4 reference frequency. Drag up/down (Shift = coarse 1 Hz steps). Double-tap = 440 Hz");
     baseTuningLabel.onHzChanged = [this](double newHz)
     {
         // Propagate to SampleCard (Tune button uses this)
@@ -333,6 +333,13 @@ MainComponent::MainComponent()
     };
     addAndMakeVisible(baseTuningLabel);
 
+    // Restore the saved A4 reference frequency and apply it everywhere.
+    {
+        const double savedHz = juce::jlimit (400.0, 480.0, configManager->getBaseTuningHz());
+        baseTuningLabel.setHz (savedHz);
+        baseTuningLabel.onHzChanged (savedHz);
+    }
+
       testToneButton.setButtonText("Test tone");
       testToneButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF4A4A4A));
       testToneButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCECECE));
@@ -345,11 +352,11 @@ MainComponent::MainComponent()
     masterVolumeKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     masterVolumeKnob.setRange(0.0, 1.0, 0.01);
     masterVolumeKnob.setValue(0.7, juce::dontSendNotification);
-    masterVolumeKnob.setTooltip("Master Volume");
+    masterVolumeKnob.setTooltip("Master Volume. Double-tap = 50%");
     masterVolumeKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xFFCECECE));
     masterVolumeKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xFF0A0A0A));
     masterVolumeKnob.setColour(juce::Slider::thumbColourId, juce::Colour(0xFF1E1E1E)); // dark indicator on light fill
-    masterVolumeKnob.setDoubleClickReturnValue(true, 1.0); // double-click resets to 100%
+    masterVolumeKnob.setDoubleClickReturnValue(true, 0.5); // double-tap = 50% (emergency level)
     masterVolumeKnob.onValueChange = [this] {
         float v = (float)masterVolumeKnob.getValue();
         masterVolumeGain.store(v);
@@ -373,6 +380,10 @@ MainComponent::MainComponent()
     masterVolValueLabel.setFont(juce::Font(13.0f));
     masterVolValueLabel.setColour(juce::Label::textColourId, juce::Colour(0xFFFFFFFF));
     addAndMakeVisible(masterVolValueLabel);
+
+    // Restore the saved master volume (falls back to the 70% default).
+    masterVolumeKnob.setValue (juce::jlimit (0.0, 1.0, (double) configManager->getMasterVolume()),
+                               juce::sendNotificationSync);
 
       // Add MIDI activity light to the title area
       addAndMakeVisible(midiActivityLight);

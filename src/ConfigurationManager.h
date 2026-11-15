@@ -126,6 +126,7 @@ public:
     void saveMasterVolume(float volume)
     {
         propertiesFile->setValue("masterVolume", (double)volume);
+        flush();
     }
 
     float getMasterVolume()
@@ -206,6 +207,7 @@ public:
     void saveBaseTuningHz(double hz)
     {
         propertiesFile->setValue("baseTuningHz", hz);
+        flush();
     }
 
     double getBaseTuningHz()

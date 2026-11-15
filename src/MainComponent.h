@@ -386,6 +386,7 @@ private:
     public:
         std::function<void(double newHz)> onHzChanged;
         std::function<void()>            onDragFinished;
+        std::function<void()>            onDoubleClick;
 
         void mouseEnter(const juce::MouseEvent&) override
         { isHovered = true; setMouseCursor(juce::MouseCursor::UpDownResizeCursor); repaint(); }
@@ -407,6 +408,22 @@ private:
 
         void mouseUp(const juce::MouseEvent& e) override
         {
+            // Two quick taps at (nearly) the same spot snap back to A4 = 440 Hz.
+            const juce::int64 now = juce::Time::currentTimeMillis();
+            if (lastTapTime > 0 && now - lastTapTime < 350
+                && std::abs (e.getScreenPosition().y - lastTapY) < 10)
+            {
+                lastTapTime = 0;
+                setHz (440.0);
+                if (onHzChanged) onHzChanged (currentHz);
+                if (onDragFinished) onDragFinished();
+                isDragging = false;
+                repaint();
+                return;
+            }
+            lastTapTime = now;
+            lastTapY    = e.getScreenPosition().y;
+
             int deltaY = dragStartY - e.getScreenPosition().y;
             double step = e.mods.isShiftDown() ? 1.0 : 0.1;
             double raw  = hzAtDragStart + deltaY * step;
@@ -438,6 +455,8 @@ private:
         int    dragStartY     = 0;
         bool   isHovered      = false;
         bool   isDragging     = false;
+        juce::int64 lastTapTime = 0;
+        int    lastTapY      = 0;
     };
 
     //==============================================================================
