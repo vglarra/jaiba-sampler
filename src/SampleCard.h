@@ -1334,6 +1334,10 @@ juce::TextButton::ConnectedOnRight);
         tabNextButton.onClick = [this] { changeControlsPage(+1); };
 
         seqContent = std::make_unique<SeqControlPanel>();
+        seqContent->onMaximizeToggled = [this] (bool on)
+        {
+            if (onMaximizeRequested) onMaximizeRequested (on);
+        };
         seqContent->onEdited = [this] { if (onSequenceEdited) onSequenceEdited(); };
         // Metro controls on the Seq tab drive the same listeners the Rec tab uses,
         // so both tabs control one metronome (kept in sync by MainComponent).
@@ -5719,6 +5723,15 @@ public:
     // Fired whenever zoom or scroll changes interactively.
     // Hook this in MainComponent to save zoom state to disk.
     std::function<void(double zoomLevel, float normalizedScroll)> onZoomStateChanged;
+
+    // Fired when the Seq tab asks for the full-window (maximised) view.
+    std::function<void (bool)> onMaximizeRequested;
+
+    void setSeqMaximized (bool on)
+    {
+        if (seqContent != nullptr)
+            seqContent->setMaximized (on);
+    }
 
     // Wired by MainComponent to return the current playback position normalized [0,1]
     // over the full sample, or -1 if no voice is active.  Read 60 times per second.

@@ -916,6 +916,7 @@ private:
     // Horizontal waveform zoom that survives pad switches (global editing
     // preference, not per-pad). Initialised from the saved settings.
     double globalZoomLevel = 1.0;
+    bool   seqMaximized = false;   // Seq tab: sample card fills the window
 
     UiTheme uiTheme = UiTheme::Dark;
     // SafePointer, not raw Label*: some labels (tooltips, transient dialogs)

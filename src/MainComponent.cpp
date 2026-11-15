@@ -440,7 +440,15 @@ MainComponent::MainComponent()
       sampleCard.getPrevButton().addListener(this);
       sampleCard.getNextButton().addListener(this);
 
-      // Add listener for MIDI note changes
+      // Seq tab "Max" toggle → full-window card.
+    sampleCard.onMaximizeRequested = [this] (bool on)
+    {
+        seqMaximized = on;
+        sampleCard.setSeqMaximized (on);
+        resized();
+    };
+
+    // Add listener for MIDI note changes
       sampleCard.addListener(this);
 
       // Save zoom level and scroll position whenever they change interactively
@@ -1070,6 +1078,17 @@ void MainComponent::resized()
     const int fixedRowsH   = fixedRowsFor (padRowH);
     const int dynamicCardH = juce::jmax (kCardMinH, getHeight() - fixedRowsH);
 
+    // Seq "Max" button: the sample card covers the whole window.
+    if (seqMaximized)
+    {
+        sampleCard.setExpandedView (true);
+        sampleCard.toFront (false);
+        sampleCard.setBounds (getLocalBounds());
+        fftVisualizer.setBounds (sampleCard.getBounds());
+        isResizing = false;
+        return;
+    }
+
     // The pad rows are always compact, so the card always uses its expanded
     // tab rules; the bank row toggle only trades card height for bigger controls.
     sampleCard.setExpandedView (true);
@@ -1381,6 +1400,8 @@ void MainComponent::showAudioDeviceSettings()
 
 void MainComponent::updateDeviceInfo()
 {
+
+
 
     // MIDI restore retry: the saved device may only become enumerable after
     // app startup, so try on each 500 ms tick while armed.

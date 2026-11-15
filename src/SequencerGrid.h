@@ -15,18 +15,53 @@
 //   [ fixed row header (150) ][ ruler                        ]
 //   [ fixed row header        ][ scrolling 16-row step grid   ]
 //==============================================================================
+// Thicker horizontal slider used by the sequencer's two level controls, so the
+// track and thumb are easy to grab on the touch panel.
+struct SeqThickSliderLAF : public juce::LookAndFeel_V4
+{
+    void drawLinearSlider (juce::Graphics& g, int x, int y, int w, int h,
+                           float sliderPos, float, float,
+                           juce::Slider::SliderStyle style, juce::Slider& slider) override
+    {
+        if (style != juce::Slider::LinearHorizontal)
+        {
+            juce::LookAndFeel_V4::drawLinearSlider (g, x, y, w, h, sliderPos, 0.0f, 1.0f, style, slider);
+            return;
+        }
+
+        const float trackH = 12.0f;
+        const float cy     = (float) y + (float) h * 0.5f;
+        auto track = juce::Rectangle<float> ((float) x + 6.0f, cy - trackH * 0.5f,
+                                             (float) w - 12.0f, trackH);
+
+        g.setColour (slider.findColour (juce::Slider::backgroundColourId));
+        g.fillRoundedRectangle (track, trackH * 0.5f);
+
+        auto filled = track.withRight (juce::jlimit (track.getX(), track.getRight(), sliderPos));
+        g.setColour (slider.findColour (juce::Slider::trackColourId));
+        g.fillRoundedRectangle (filled, trackH * 0.5f);
+
+        const float thumbR = juce::jmin (13.0f, (float) h * 0.45f);
+        g.setColour (slider.findColour (juce::Slider::thumbColourId));
+        g.fillEllipse (sliderPos - thumbR, cy - thumbR, thumbR * 2.0f, thumbR * 2.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.35f));
+        g.drawEllipse (sliderPos - thumbR, cy - thumbR, thumbR * 2.0f, thumbR * 2.0f, 1.0f);
+    }
+};
+
 class SeqControlPanel : public juce::Component,
                         private juce::Timer
 {
 public:
-    static constexpr int kRowHDefault = 13;   // used until the first layout pass
+    static constexpr int kRowHDefault = 15;   // used until the first layout pass
     // Rows have no upper bound: they grow to fill a maximised window.  The floor
     // only matters when the window is too short for 16 tracks, which then scrolls.
-    static constexpr int kMinRowH     = 12;
-    static constexpr int kRulerH   = 12;
+    static constexpr int kMinRowH     = 13;
+    static constexpr int kTouchRowH   = 26;   // minimum touch-friendly track height
+    static constexpr int kRulerH   = 16;
     static constexpr int kHeaderW  = 150;
-    static constexpr int kStepW    = 20;
-    static constexpr int kToolbarH = 20;   // per row; there are two
+    static constexpr int kStepW    = 26;
+    static constexpr int kToolbarH = 40;   // per row; there are two (touch sized, +20%)
 
     // Row-header column split (within kHeaderW).
     static constexpr int kNumW   = 22;
@@ -36,6 +71,15 @@ public:
     //==========================================================================
     // Fired whenever the pattern is edited (MainComponent marks the kit dirty).
     std::function<void()> onEdited;
+
+    // Maximise / restore the sample card (full-window sequencer view).
+    std::function<void (bool)> onMaximizeToggled;
+
+    void setMaximized (bool on)
+    {
+        maxButton.setToggleState (on, juce::dontSendNotification);
+        maxButton.setButtonText (on ? "Restore" : "Max");
+    }
 
     // Metronome — mirrors the Rec tab's controls.  BPM is supplied by the owner
     // (the bank/global tempo), so this panel never invents one.
@@ -175,11 +219,17 @@ private:
         int   pressY      = 0;
         bool  velDragging = false;
 
-        // Click-to-erase is deferred by the double-click window, because JUCE
-        // delivers mouseDoubleClick *after* mouseUp: erasing on mouseUp would
-        // destroy the hit before a double-click could reset its velocity.
+        // Legacy deferred-erase state (unused since the gesture rules changed:
+        // a single tap keeps the hit, a double-tap deletes it, a drag edits
+        // velocity).  Kept only so timerCallback stays harmless.
         int pendingRemoveRow  = -1;
         int pendingRemoveTick = -1;
+
+        // Double-tap-to-delete tracking (works for touch, which does not always
+        // produce JUCE's mouseDoubleClick event).
+        int          lastTapRow  = -1;
+        int          lastTapTick = -1;
+        juce::int64  lastTapMs   = 0;
 
         void timerCallback() override;
         std::vector<SeqHit>::iterator findHit (int row, int tick);
@@ -309,6 +359,7 @@ private:
     // Session options: click phase sync + the sequencer's master level.
     juce::TextButton syncButton { "Sync" };
     juce::Label      seqVolumeLabel;
+    SeqThickSliderLAF thickSliderLaf;
     juce::Slider     seqVolumeSlider;
 
     // Metronome accent grouping.
@@ -318,6 +369,7 @@ private:
     // setup and only removes the steps; Reset wipes the setup too.
     juce::TextButton eraseButton { "Erase" };
     juce::TextButton clearButton { "Reset" };
+    juce::TextButton maxButton   { "Max" };
 
     /** The time signatures offered, in menu order. */
     static juce::StringArray timeSigChoices()
@@ -368,6 +420,12 @@ inline SeqControlPanel::SeqControlPanel()
     styleBtn (stopButton, juce::Colour (0xFFCC4444));
     styleBtn (recButton,  juce::Colour (0xFFCC4444));
 
+    // Distinct, always-visible colours for the two transport buttons.
+    playButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF1E8C46));
+    playButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+    stopButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xFF9E2B2B));
+    stopButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+
     // Phase 1 built the shell; playback is live now, recording is Phase 3.
     stopButton.setEnabled (false);   // enabled while playing
     playButton.setTooltip ("Play the pattern");
@@ -392,6 +450,18 @@ inline SeqControlPanel::SeqControlPanel()
 
     for (auto* b : { &playButton, &stopButton, &recButton })
         addAndMakeVisible (*b);
+
+    // Maximise toggle: expands the sample card to the whole window.
+    styleBtn (maxButton, juce::Colour (0xFF2E7BD6));
+    maxButton.setClickingTogglesState (true);
+    maxButton.setTooltip ("Maximise / restore the sequencer view");
+    maxButton.onClick = [this]
+    {
+        const bool on = maxButton.getToggleState();
+        maxButton.setButtonText (on ? "Restore" : "Max");
+        if (onMaximizeToggled) onMaximizeToggled (on);
+    };
+    addAndMakeVisible (maxButton);
 
     // ---- Snap ----
     snapBox.setTooltip ("Grid resolution");
@@ -538,6 +608,7 @@ inline SeqControlPanel::SeqControlPanel()
     metronomeVolumeSlider.setColour (juce::Slider::backgroundColourId, juce::Colour (0xFF3A3A3A));
     metronomeVolumeSlider.setColour (juce::Slider::trackColourId,      juce::Colour (0xFF00CF7F));
     metronomeVolumeSlider.setColour (juce::Slider::thumbColourId,      juce::Colour (0xFFCECECE));
+    metronomeVolumeSlider.setLookAndFeel (&thickSliderLaf);
     metronomeVolumeSlider.setTooltip ("Metronome volume");
     metronomeVolumeSlider.onValueChange = [this]
     {
@@ -578,6 +649,7 @@ inline SeqControlPanel::SeqControlPanel()
     seqVolumeSlider.setColour (juce::Slider::backgroundColourId, juce::Colour (0xFF3A3A3A));
     seqVolumeSlider.setColour (juce::Slider::trackColourId,      juce::Colour (0xFFB87800));
     seqVolumeSlider.setColour (juce::Slider::thumbColourId,      juce::Colour (0xFFCECECE));
+    seqVolumeSlider.setLookAndFeel (&thickSliderLaf);
     seqVolumeSlider.setTooltip ("Sequencer master level (balances Seq against the pads)");
     seqVolumeSlider.onValueChange = [this]
     {
@@ -647,6 +719,7 @@ inline SeqControlPanel::SeqControlPanel()
 
     gridViewport.setViewedComponent (&gridCanvas, false);
     gridViewport.setScrollBarsShown (true, true);
+    gridViewport.setScrollBarThickness (16);   // finger-friendly vertical/horizontal bar
     gridViewport.setScrollOnDragEnabled (false);
     gridViewport.onScrolled = [this] (int x, int y)
     {
@@ -659,6 +732,12 @@ inline SeqControlPanel::SeqControlPanel()
 
     addAndMakeVisible (headerCanvas);
     addAndMakeVisible (ruler);
+
+    // Touch-first UI: no component here should take keyboard focus, otherwise
+    // JUCE paints its blue focus outline over the controls.
+    setWantsKeyboardFocus (false);
+    for (auto* c : getChildren())
+        c->setWantsKeyboardFocus (false);
 }
 
 //==============================================================================
@@ -924,45 +1003,52 @@ inline void SeqControlPanel::resized()
     // ---- Row 1: transport + levels ----
     {
         auto bar = area.removeFromTop (kToolbarH);
-        playButton.setBounds (bar.removeFromLeft (38).reduced (1));
-        stopButton.setBounds (bar.removeFromLeft (34).reduced (1));
-        recButton .setBounds (bar.removeFromLeft (34).reduced (1));
+        playButton.setBounds (bar.removeFromLeft (80).reduced (1));
+        stopButton.setBounds (bar.removeFromLeft (78).reduced (1));
+        recButton .setBounds (bar.removeFromLeft (70).reduced (1));
         bar.removeFromLeft (8);
-        metronomeButton.setBounds (bar.removeFromLeft (46).reduced (1));
+        metronomeButton.setBounds (bar.removeFromLeft (76).reduced (1));
         bar.removeFromLeft (2);
-        metronomeVolumeSlider.setBounds (bar.removeFromLeft (60).reduced (0, 3));
+        metronomeVolumeSlider.setBounds (bar.removeFromLeft (150).reduced (0, 6));
         bar.removeFromLeft (8);
-        syncButton.setBounds (bar.removeFromLeft (40).reduced (1));
+        syncButton.setBounds (bar.removeFromLeft (50).reduced (1));
         bar.removeFromLeft (8);
-        seqVolumeLabel.setBounds (bar.removeFromLeft (52).reduced (0, 3));
+        seqVolumeLabel.setBounds (bar.removeFromLeft (52).reduced (0, 5));
         bar.removeFromLeft (4);
-        seqVolumeSlider.setBounds (bar.removeFromLeft (90).reduced (0, 3));
+        seqVolumeSlider.setBounds (bar.removeFromLeft (150).reduced (0, 6));
         bar.removeFromLeft (8);
         sigBox.setBounds (bar.removeFromLeft (66).reduced (1, 0));
-        clearButton.setBounds (bar.removeFromRight (52).reduced (1));
+        maxButton.setBounds (bar.removeFromRight (68).reduced (1));
         bar.removeFromRight (4);
-        eraseButton.setBounds (bar.removeFromRight (52).reduced (1));
+        clearButton.setBounds (bar.removeFromRight (60).reduced (1));
+        bar.removeFromRight (4);
+        eraseButton.setBounds (bar.removeFromRight (60).reduced (1));
     }
+
+    // Breathing room under the transport row (wider gap than above it).
+    area.removeFromTop (10);
 
     // ---- Row 2: pattern + song ----
     {
         auto bar = area.removeFromTop (kToolbarH);
-        snapBox.setBounds (bar.removeFromLeft (76).reduced (1, 0));
+        snapBox.setBounds (bar.removeFromLeft (84).reduced (1, 0));
         bar.removeFromLeft (4);
-        barsBox.setBounds (bar.removeFromLeft (56).reduced (1, 0));
+        barsBox.setBounds (bar.removeFromLeft (84).reduced (1, 0));
         bar.removeFromLeft (4);
-        tapButton.setBounds (bar.removeFromLeft (34).reduced (1));
-        bar.removeFromLeft (3);
-        bpmLabel.setBounds (bar.removeFromLeft (60));
+        tapButton.setBounds (bar.removeFromLeft (46).reduced (1));
         bar.removeFromLeft (4);
-        tempoCombo.setBounds (bar.removeFromLeft (96).reduced (1, 0));
-        bar.removeFromLeft (3);
-        songMenuButton.setBounds (bar.removeFromLeft (22).reduced (1));
+        bpmLabel.setBounds (bar.removeFromLeft (66));
+        bar.removeFromLeft (4);
+        tempoCombo.setBounds (bar.removeFromLeft (110).reduced (1, 0));
+        bar.removeFromLeft (4);
+        songMenuButton.setBounds (bar.removeFromLeft (30).reduced (1));
         bar.removeFromLeft (8);
-        modeButton.setBounds (bar.removeFromLeft (58).reduced (1));
+        modeButton.setBounds (bar.removeFromLeft (74).reduced (1));
         bar.removeFromLeft (4);
-        lockButton.setBounds (bar.removeFromLeft (40).reduced (1));
+        lockButton.setBounds (bar.removeFromLeft (52).reduced (1));
     }
+
+    area.removeFromTop (4);   // same margin underneath the pattern row
 
     auto rulerRow = area.removeFromTop (kRulerH);
     ruler.setBounds (rulerRow.withTrimmedLeft (kHeaderW));
@@ -985,7 +1071,10 @@ inline void SeqControlPanel::resized()
     const int availH   = juce::jmax (1, area.getHeight())
                        - SequencerLayout::scrollbarReserve (contentW, area.getWidth(), sbH);
 
-    rowH = SequencerLayout::rowHeightFor (availH, SeqPattern::kTracks, kMinRowH);
+    // Rows keep a touch-friendly minimum height; if the 16 tracks no longer fit
+    // the viewport becomes vertically scrollable (header scrolls in step with it).
+    rowH = juce::jmax (kTouchRowH,
+                       SequencerLayout::rowHeightFor (availH, SeqPattern::kTracks, kMinRowH));
 
     gridCanvas.rowH   = rowH;
     headerCanvas.rowH = rowH;
@@ -1221,13 +1310,45 @@ inline void SeqControlPanel::GridCanvas::mouseUp (const juce::MouseEvent& e)
 
     if (! velDragging)
     {
-        // Plain click on a hit: erase it, but only after the double-click window
-        // has passed, so a double-click can still reset the velocity instead.
-        pendingRemoveRow  = pressRow;
-        pendingRemoveTick = pressTick;
+        // A single tap on an existing hit leaves it alone.  A second quick tap on
+        // the same cell deletes it; dragging (velocity edit) is handled above.
+        const auto now = juce::Time::currentTimeMillis();
+        const auto timeout = (juce::int64) juce::jmax (250, juce::MouseEvent::getDoubleClickTimeout());
 
-        startTimer (juce::jmax (120, juce::MouseEvent::getDoubleClickTimeout()));
+        const bool doubleTap = (pressRow == lastTapRow
+                                && pressTick == lastTapTick
+                                && lastTapMs > 0
+                                && now - lastTapMs < timeout);
+
+        if (doubleTap)
+        {
+            auto it = findHit (pressRow, pressTick);
+            if (it != pattern->tracks[pressRow].hits.end())
+            {
+                pattern->tracks[pressRow].hits.erase (it);
+                repaint();
+                if (onEdited) onEdited();
+            }
+            lastTapRow  = -1;
+            lastTapTick = -1;
+            lastTapMs   = 0;
+        }
+        else
+        {
+            lastTapRow  = pressRow;
+            lastTapTick = pressTick;
+            lastTapMs   = now;
+        }
     }
+    else
+    {
+        lastTapRow  = -1;
+        lastTapTick = -1;
+        lastTapMs   = 0;
+    }
+
+    pendingRemoveRow  = -1;
+    pendingRemoveTick = -1;
 
     pressRow    = -1;
     velDragging = false;
@@ -1255,8 +1376,8 @@ inline void SeqControlPanel::GridCanvas::mouseDoubleClick (const juce::MouseEven
 {
     if (pattern == nullptr || ! editable) return;
 
-    // The first click queued an erase; this press was a double-click, so cancel it
-    // and treat the gesture as "reset this hit's velocity" instead.
+    // Desktop double-click: delete the hit.  On touch the same gesture is
+    // detected in mouseUp (see above), so whichever arrives first wins.
     stopTimer();
     pendingRemoveRow  = -1;
     pendingRemoveTick = -1;
@@ -1273,7 +1394,7 @@ inline void SeqControlPanel::GridCanvas::mouseDoubleClick (const juce::MouseEven
                             { return h.tick >= tick0 && h.tick < tick0 + tps; });
     if (it == hits.end()) return;
 
-    it->velocity = SequencerVelocity::kDefault;
+    hits.erase (it);
 
     repaint();
     if (onEdited) onEdited();
