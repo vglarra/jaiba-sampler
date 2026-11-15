@@ -4558,7 +4558,7 @@ void adjustPitchUp()
             {
                 auto b = getLocalBounds().toFloat().reduced (1.0f);
 
-                auto colour = Theme::isTerminal() ? juce::Colour (0xFF41FF7A)
+                auto colour = Theme::isTerminal() ? Theme::accent()
                                                   : juce::Colour (0xFFE0E0E0);
                 if (down)         colour = colour.brighter (0.35f);
                 if (highlighted)  colour = colour.brighter (0.15f);

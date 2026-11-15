@@ -894,7 +894,9 @@ private:
 
     // ===== UI theme =====
     UiTheme uiTheme = UiTheme::Dark;
-    std::vector<std::pair<juce::Label*, juce::Colour>> themedLabels;
+    // SafePointer, not raw Label*: some labels (tooltips, transient dialogs)
+    // are destroyed during the session and must not be touched again.
+    std::vector<std::pair<juce::Component::SafePointer<juce::Label>, juce::Colour>> themedLabels;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

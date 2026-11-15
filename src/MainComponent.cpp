@@ -16,6 +16,33 @@
 
 
 //==============================================================================
+static juce::String themeName (UiTheme t)
+{
+    switch (t)
+    {
+        case UiTheme::Green: return "green";
+        case UiTheme::Amber: return "amber";
+        case UiTheme::Cyan:  return "cyan";
+        case UiTheme::White: return "white";
+        case UiTheme::Dark:
+        default:             return "dark";
+    }
+}
+
+static UiTheme themeFromName (const juce::String& name)
+{
+    const auto n = name.trim().toLowerCase();
+    if (n == "green" || n == "terminal") return UiTheme::Green;   // "terminal" = legacy value
+    if (n == "amber")                    return UiTheme::Amber;
+    if (n == "cyan")                     return UiTheme::Cyan;
+    if (n == "white")                    return UiTheme::White;
+    return UiTheme::Dark;
+}
+
+// Defined near the bottom of this file; declared here because the status timer
+// (which runs before it in the file) needs it.
+static double readCpuTemperatureC();
+
 MainComponent::MainComponent()
     : sampleListBox("samples", nullptr),
       cpuTimer(*this),
@@ -547,11 +574,10 @@ MainComponent::MainComponent()
     applySeqOptions();
 
     // Restore the last UI theme (defaults to Dark).
-    UiTheme startTheme = UiTheme::Dark;
-    if (configManager != nullptr
-        && configManager->getPropertiesFile()->getValue ("uiTheme") == "terminal")
-        startTheme = UiTheme::Terminal;
-    applyUiTheme (startTheme);
+    const auto savedTheme = configManager != nullptr
+        ? configManager->getPropertiesFile()->getValue ("uiTheme")
+        : juce::String ("dark");
+    applyUiTheme (themeFromName (savedTheme));
 }
 
 MainComponent::~MainComponent()
@@ -1308,6 +1334,7 @@ void MainComponent::showAudioDeviceSettings()
 
 void MainComponent::updateDeviceInfo()
 {
+
     // MIDI restore retry: the saved device may only become enumerable after
     // app startup, so try on each 500 ms tick while armed.
     maybeRestoreMidiDevice();
@@ -1401,6 +1428,10 @@ void MainComponent::updateDeviceInfo()
                       << "  " << juce::String (dev->getCurrentBufferSizeSamples()) << " smp";
             title << "  |  " << midiInfo
                   << "  |  CPU: " << juce::String (lastCPU, 1) << "%";
+
+            const double cpuTempC = readCpuTemperatureC();
+            if (cpuTempC > 0.0)
+                title << "  " << juce::String (cpuTempC, 0) << juce::String::charToString ((juce::juce_wchar) 0x00B0) << "C";
             if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
                 dw->setName (title);
         }
@@ -1408,6 +1439,43 @@ void MainComponent::updateDeviceInfo()
         // Reset counter to avoid overflow
         if (cpuUpdateCounter >= 1000) cpuUpdateCounter = 0;
     }
+}
+
+//==============================================================================
+// CPU package temperature (Linux): x86_pkg_temp thermal zone, falling back to
+// the coretemp hwmon sensor. Returns -1 when no sensor is available.
+static double readCpuTemperatureC()
+{
+#if JUCE_LINUX
+    for (int i = 0; i < 32; ++i)
+    {
+        const juce::File zone ("/sys/class/thermal/thermal_zone" + juce::String (i));
+        if (! zone.isDirectory())
+            continue;
+
+        if (zone.getChildFile ("type").loadFileAsString().trim() == "x86_pkg_temp")
+        {
+            const double milli = zone.getChildFile ("temp").loadFileAsString().getDoubleValue();
+            if (milli > 0.0)
+                return milli / 1000.0;
+        }
+    }
+
+    for (int i = 0; i < 32; ++i)
+    {
+        const juce::File hwmon ("/sys/class/hwmon/hwmon" + juce::String (i));
+        if (! hwmon.isDirectory())
+            continue;
+
+        if (hwmon.getChildFile ("name").loadFileAsString().trim() == "coretemp")
+        {
+            const double milli = hwmon.getChildFile ("temp1_input").loadFileAsString().getDoubleValue();
+            if (milli > 0.0)
+                return milli / 1000.0;
+        }
+    }
+#endif
+    return -1.0;
 }
 
 //==============================================================================
@@ -3414,8 +3482,9 @@ void MainComponent::applyUiTheme (UiTheme theme)
     }
 
     for (auto& entry : themedLabels)
-        entry.first->setColour (juce::Label::textColourId,
-                                theme == UiTheme::Terminal ? Theme::text() : entry.second);
+        if (entry.first != nullptr)
+            entry.first->setColour (juce::Label::textColourId,
+                                    theme != UiTheme::Dark ? Theme::text() : entry.second);
 
     std::function<void (juce::Component&)> repaintTree = [&] (juce::Component& c)
     {
@@ -3427,8 +3496,7 @@ void MainComponent::applyUiTheme (UiTheme theme)
 
     if (configManager != nullptr)
     {
-        configManager->getPropertiesFile()->setValue ("uiTheme",
-            theme == UiTheme::Terminal ? "terminal" : "dark");
+        configManager->getPropertiesFile()->setValue ("uiTheme", themeName (theme));
         configManager->flush();
     }
 }
@@ -3456,8 +3524,11 @@ void MainComponent::showSettingsMenu()
     }
 
     juce::PopupMenu themeMenu;
-    themeMenu.addItem (20, "Dark (default)", true, uiTheme == UiTheme::Dark);
-    themeMenu.addItem (21, "Terminal Green", true, uiTheme == UiTheme::Terminal);
+    themeMenu.addItem (20, "Dark (default)",  true, uiTheme == UiTheme::Dark);
+    themeMenu.addItem (21, "Terminal Green",  true, uiTheme == UiTheme::Green);
+    themeMenu.addItem (22, "Terminal Amber",  true, uiTheme == UiTheme::Amber);
+    themeMenu.addItem (23, "Terminal Cyan",   true, uiTheme == UiTheme::Cyan);
+    themeMenu.addItem (24, "Terminal White",  true, uiTheme == UiTheme::White);
 
     juce::PopupMenu menu;
     menu.addItem(1, "Audio Settings");
@@ -3480,9 +3551,9 @@ void MainComponent::showSettingsMenu()
                            {
                                showMidiDeviceSettings();
                            }
-                           else if (result == 20 || result == 21)
+                           else if (result >= 20 && result <= 24)
                            {
-                               applyUiTheme (result == 21 ? UiTheme::Terminal : UiTheme::Dark);
+                               applyUiTheme ((UiTheme) (result - 20));
                            }
                            else if (result >= 10 && result <= 13)
                            {
