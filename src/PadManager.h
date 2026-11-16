@@ -5,6 +5,7 @@
 #include <atomic>
 
 #include "PadAudioEngine.h"
+#include "MasterEq.h"
 #include "PadSettings.h"
 
 //==============================================================================
@@ -58,6 +59,7 @@ public:
 
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate)
     {
+        masterEq.prepare (sampleRate);
         // Cache for lazily-created engines that arrive after prepareToPlay.
         lastBlockSize  = samplesPerBlockExpected;
         lastSampleRate = sampleRate;
@@ -109,6 +111,10 @@ public:
                 e->renderNextBlock(outputBuffer, emptyMidi, startSample, numSamples);
             }
         }
+
+        // Master EQ runs before the volume trim, so the knob stays a clean
+        // output level and the EQ curve is independent of it.
+        masterEq.process (outputBuffer, startSample, numSamples);
 
         // Apply master volume last — scales the fully mixed output.
         float mg = masterVolumeGain.load();
@@ -221,6 +227,9 @@ public:
     //==========================================================================
     // Master volume — applied post-mix
 
+    // Master-bus 3-band EQ (applied before the master volume).
+    MasterEqProcessor& getMasterEq() { return masterEq; }
+
     void setMasterVolume(float gain)
     {
         masterVolumeGain.store(juce::jlimit(0.0f, 1.0f, gain));
@@ -282,6 +291,7 @@ private:
     std::array<std::unique_ptr<PadAudioEngine>, kMaxPads>       engines;
     std::array<std::unique_ptr<PadAudioEngine>, kNumGlobalPads> globalEngines;
     std::atomic<float> masterVolumeGain { 0.7f };
+    MasterEqProcessor  masterEq;
 
     // Cached audio device params for lazily-created engines.
     int    lastBlockSize  = 0;

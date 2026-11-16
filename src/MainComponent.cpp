@@ -427,6 +427,61 @@ MainComponent::MainComponent()
       fftVisualizer.setVisible(false);
       fftVisualizer.stopVisualizer();
 
+      // ── Master EQ: restore saved bands and wire the VIZ EQ editor ──────────
+      {
+          float f[3], g[3];
+          int   m[3];
+          for (int i = 0; i < 3; ++i)
+          {
+              f[i] = configManager->getMasterEqFreq(i);
+              g[i] = configManager->getMasterEqGain(i);
+              m[i] = configManager->getMasterEqMode(i);
+              padManager.getMasterEq().setBand(i, f[i], g[i]);
+              padManager.getMasterEq().setBandMode(i, m[i]);
+          }
+          const bool en = configManager->getMasterEqEnabled();
+          padManager.getMasterEq().setEnabled(en);
+          fftVisualizer.setMasterEqBands(f, g, m, en);
+      }
+
+      fftVisualizer.onMasterEqBandChanged = [this](int band, float freq, float gainDb)
+      {
+          padManager.getMasterEq().setBand(band, freq, gainDb);
+      };
+
+      fftVisualizer.onMasterEqEditFinished = [this]
+      {
+          for (int i = 0; i < 3; ++i)
+              configManager->saveMasterEqBand(i,
+                                              padManager.getMasterEq().getBandFreq(i),
+                                              padManager.getMasterEq().getBandGain(i));
+      };
+
+      fftVisualizer.onMasterEqBandModeChanged = [this](int band, int mode)
+      {
+          padManager.getMasterEq().setBandMode(band, mode);
+          configManager->saveMasterEqMode(band, mode);
+      };
+
+      fftVisualizer.onMasterEqReset = [this]
+      {
+          // The view already reset its own state; mirror it into the DSP + settings.
+          for (int i = 0; i < 3; ++i)
+          {
+              static const float defF[3] = { 100.0f, 1000.0f, 8000.0f };
+              padManager.getMasterEq().setBand(i, defF[i], 0.0f);
+              padManager.getMasterEq().setBandMode(i, 2);
+              configManager->saveMasterEqBand(i, defF[i], 0.0f);
+              configManager->saveMasterEqMode(i, 2);
+          }
+      };
+
+      fftVisualizer.onMasterEqEnabledChanged = [this](bool on)
+      {
+          padManager.getMasterEq().setEnabled(on);
+          configManager->saveMasterEqEnabled(on);
+      };
+
       // Persist the SENS knob value as it's changed (in-memory; flushed with
       // the rest of the settings store).
       fftVisualizer.onSensitivityChanged = [this](float v)

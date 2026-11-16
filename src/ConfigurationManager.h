@@ -255,6 +255,51 @@ public:
         return propertiesFile->getDoubleValue("gridResolution", -1.0);
     }
 
+    // Master-bus EQ (3 bands, pre master volume)
+    void saveMasterEqEnabled(bool on)
+    {
+        propertiesFile->setValue("masterEqEn", on ? "1" : "0");
+        flush();
+    }
+    bool getMasterEqEnabled()
+    {
+        return propertiesFile->getValue("masterEqEn", "1") == "1";
+    }
+
+    void saveMasterEqBand(int index, float freq, float gainDb)
+    {
+        const juce::String i (juce::jlimit (0, 2, index) + 1);
+        propertiesFile->setValue("masterEq" + i + "f", (double) freq);
+        propertiesFile->setValue("masterEq" + i + "g", (double) gainDb);
+        flush();
+    }
+
+    void saveMasterEqMode(int index, int mode)
+    {
+        const int i = juce::jlimit (0, 2, index);
+        propertiesFile->setValue("masterEq" + juce::String (i + 1) + "m", mode);
+        flush();
+    }
+
+    int getMasterEqMode(int index)
+    {
+        const int i = juce::jlimit (0, 2, index);
+        return propertiesFile->getIntValue("masterEq" + juce::String (i + 1) + "m", 2);
+    }
+
+    float getMasterEqFreq(int index)
+    {
+        static const float defs[3] = { 100.0f, 1000.0f, 8000.0f };
+        const int i = juce::jlimit (0, 2, index);
+        return (float) propertiesFile->getDoubleValue("masterEq" + juce::String (i + 1) + "f", defs[i]);
+    }
+
+    float getMasterEqGain(int index)
+    {
+        const int i = juce::jlimit (0, 2, index);
+        return (float) propertiesFile->getDoubleValue("masterEq" + juce::String (i + 1) + "g", 0.0);
+    }
+
     void saveZoomLevel(float zoomLevel)
     {
         propertiesFile->setValue("zoomLevel", (double)zoomLevel);

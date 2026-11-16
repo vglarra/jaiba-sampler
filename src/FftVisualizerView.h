@@ -2,16 +2,17 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
+#include "MasterEq.h"
 
 class FftVisualizerView : public juce::Component,
                           public juce::Timer
 {
 public:
-    enum class Style { Spectrum, RingsParticles, Kaleidoscope };
+    enum class Style { EqMaster, Spectrum, RingsParticles, Kaleidoscope };
 
     FftVisualizerView()
     {
-        styleButton.setButtonText ("SPECTRUM");
+        styleButton.setButtonText ("EQ");
         styleButton.setColour (juce::TextButton::buttonColourId,
                                juce::Colour (0xFF1a1a2e));
         styleButton.setColour (juce::TextButton::textColourOffId,
@@ -40,6 +41,62 @@ public:
         sensLabel.setColour (juce::Label::textColourId, juce::Colour (0xFFe040e0));
         sensLabel.setFont (juce::Font (11.0f));
         addAndMakeVisible (sensLabel);
+
+        // Master EQ enable toggle (only shown in the EQ view).
+        eqToggleButton.setClickingTogglesState (true);
+        eqToggleButton.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xFF3A3A3A));
+        eqToggleButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xFFFF4466));
+        eqToggleButton.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xFFCECECE));
+        eqToggleButton.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
+        eqToggleButton.setToggleState (true, juce::dontSendNotification);
+        eqToggleButton.onClick = [this]
+        {
+            eqEnabled = eqToggleButton.getToggleState();
+            if (onMasterEqEnabledChanged)
+                onMasterEqEnabledChanged (eqEnabled);
+            repaint();
+        };
+        addAndMakeVisible (eqToggleButton);
+
+        eqResetButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xFF4A4A4A));
+        eqResetButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFFCECECE));
+        eqResetButton.setTooltip ("Reset the master EQ to flat (100/1k/8k Hz, 0 dB, Bell)");
+        eqResetButton.onClick = [this]
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                static const float f[3] = { 100.0f, 1000.0f, 8000.0f };
+                eqFreq[(size_t) i] = f[i];
+                eqGain[(size_t) i] = 0.0f;
+                eqMode[(size_t) i] = 2;
+                if (onMasterEqBandChanged) onMasterEqBandChanged (i, f[i], 0.0f);
+            }
+            updateShapeButtonText();
+            eqCurveDirty = true;
+            if (onMasterEqReset) onMasterEqReset();
+            repaint();
+        };
+        addAndMakeVisible (eqResetButton);
+
+        eqShapeButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xFF2A2A2A));
+        eqShapeButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xFFE040A0));
+        eqShapeButton.setTooltip ("Filter shape of the selected band: Low Cut, Low Shelf, Bell, Notch, High Shelf, High Cut");
+        eqShapeButton.onClick = [this]
+        {
+            if (activeBand < 0 || activeBand > 2)
+                return;
+
+            eqMode[(size_t) activeBand] = (eqMode[(size_t) activeBand] + 1) % 6;
+            updateShapeButtonText();
+            if (onMasterEqBandModeChanged)
+                onMasterEqBandModeChanged (activeBand, eqMode[(size_t) activeBand]);
+            eqCurveDirty = true;
+            repaint();
+        };
+        addAndMakeVisible (eqShapeButton);
+
+        updateShapeButtonText();
+        updateStyleUi();   // EQ view is the default → SENS hidden
     }
 
     ~FftVisualizerView() override
@@ -79,6 +136,9 @@ public:
 
         sensitivityKnob.setBounds (10, 10, 36, 36);
         sensLabel.setBounds (8, 47, 40, 14);
+        eqToggleButton.setBounds (10, 8, 72, 28);
+        eqResetButton.setBounds  (88, 8, 76, 28);
+        eqShapeButton.setBounds  (170, 8, 96, 28);
     }
 
     // Returns the current visualizer sensitivity (multiplies FFT bin values
@@ -97,11 +157,35 @@ public:
     // Fired whenever the user changes the SENS knob — used to persist the value.
     std::function<void (float)> onSensitivityChanged;
 
+    // ── Master EQ (edited in the EQ view, applied by the audio engine) ──────
+    std::function<void (int band, float freq, float gainDb)> onMasterEqBandChanged;
+    std::function<void (bool)> onMasterEqEnabledChanged;
+    std::function<void (int band, int mode)> onMasterEqBandModeChanged;
+    std::function<void()>       onMasterEqEditFinished;
+    std::function<void()>       onMasterEqReset;
+
+    void setMasterEqBands (const float freqs[3], const float gains[3],
+                           const int modes[3], bool shouldBeEnabled)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            eqFreq[(size_t) i] = freqs[i];
+            eqGain[(size_t) i] = gains[i];
+            eqMode[(size_t) i] = modes[i];
+        }
+        eqEnabled = shouldBeEnabled;
+        eqToggleButton.setToggleState (eqEnabled, juce::dontSendNotification);
+        updateShapeButtonText();
+        eqCurveDirty = true;
+        repaint();
+    }
+
     void paint (juce::Graphics& g) override
     {
         g.fillAll (juce::Colour (0xFF050510));
         switch (currentStyle)
         {
+            case Style::EqMaster:      drawEqMaster (g);       break;
             case Style::Spectrum:      drawSpectrum (g);       break;
             case Style::Kaleidoscope:  drawKaleidoscope (g);   break;
             case Style::RingsParticles: drawRingsParticles (g); break;
@@ -126,10 +210,31 @@ private:
     float smoothedScope[numBins] = {};  // FftThread-owned running average
     float scopeData[numBins] = {};      // shared snapshot, guarded by scopeLock
     float displayScope[numBins] = {};   // message-thread-only copy used for painting
+
+    // Real master-output level in dBFS per bin (smoothed), used by the EQ view.
+    float smoothedDb[numBins] = {};
+    float dbScope[numBins] = {};
+    float displayDb[numBins] = {};
     juce::SpinLock scopeLock;
 
     juce::TextButton styleButton;
-    Style currentStyle = Style::Spectrum;
+    Style currentStyle = Style::EqMaster;
+
+    // Master EQ band state edited by the graph.
+    static constexpr float kEqMinDb = -24.0f, kEqMaxDb = 24.0f;
+    float eqFreq[3] { 100.0f, 1000.0f, 8000.0f };
+    float eqGain[3] { 0.0f, 0.0f, 0.0f };
+    int   eqMode[3] { 2, 2, 2 };          // 0 LowCut … 5 HighCut, 2 = Bell
+    bool  eqEnabled = true;
+    int   activeBand = 0;                  // selected band (shape button target)
+    juce::TextButton eqToggleButton { "EQ ON" };
+
+    // Cached EQ response path — rebuilt only when the bands or the plot change.
+    juce::Path eqCurvePath, eqFillPath;
+    bool eqCurveDirty = true;
+    juce::Rectangle<float> eqCurvePlot;
+    juce::TextButton eqResetButton  { "Reset" };
+    juce::TextButton eqShapeButton  { "Bell" };
     float phase = 0.0f;
 
     // Sensitivity control — top-left of the visualizer. Scales FFT bin values
@@ -171,10 +276,32 @@ private:
 
     FftThread fftThread { *this };
 
+    void updateShapeButtonText()
+    {
+        const int b = juce::jlimit (0, 2, activeBand);
+        eqShapeButton.setButtonText (masterEqModeName (eqMode[(size_t) b]));
+    }
+
+    void updateStyleUi()
+    {
+        // The EQ view shows real dBFS values, so the display sensitivity knob
+        // has no meaning there.
+        const bool showSens = (currentStyle != Style::EqMaster);
+        sensitivityKnob.setVisible (showSens);
+        sensLabel.setVisible (showSens);
+        eqToggleButton.setVisible (! showSens);
+        eqResetButton.setVisible (! showSens);
+        eqShapeButton.setVisible (! showSens);
+    }
+
     void toggleStyle()
     {
         switch (currentStyle)
         {
+            case Style::EqMaster:
+                currentStyle = Style::Spectrum;
+                styleButton.setButtonText ("SPECTRUM");
+                break;
             case Style::Spectrum:
                 currentStyle = Style::RingsParticles;
                 styleButton.setButtonText ("RINGS");
@@ -184,10 +311,213 @@ private:
                 styleButton.setButtonText ("KALEIDO");
                 break;
             case Style::Kaleidoscope:
-                currentStyle = Style::Spectrum;
-                styleButton.setButtonText ("SPECTRUM");
+                currentStyle = Style::EqMaster;
+                styleButton.setButtonText ("EQ");
                 break;
         }
+
+        updateStyleUi();
+    }
+
+    // Master EQ view: three editable bands over a faint master spectrum.
+    juce::Rectangle<float> eqPlot() const
+    {
+        auto area = getLocalBounds().toFloat().reduced (6.0f);
+        return area.withTrimmedTop (36.0f).withTrimmedLeft (36.0f).withTrimmedBottom (14.0f);
+    }
+
+    float eqYForDb (juce::Rectangle<float> plot, float db) const
+    {
+        const float t = juce::jlimit (0.0f, 1.0f, (kEqMaxDb - db) / (kEqMaxDb - kEqMinDb));
+        return plot.getY() + t * plot.getHeight();
+    }
+
+    float eqXForHz (juce::Rectangle<float> plot, float hz) const
+    {
+        const float t = juce::jlimit (0.0f, 1.0f,
+                                      std::log (juce::jmax (20.0f, hz) / 20.0f) / std::log (1000.0f));
+        return plot.getX() + t * plot.getWidth();
+    }
+
+    void rebuildEqCurve (juce::Rectangle<float> plot)
+    {
+        MasterEqCoeffs bandCoeffs[3];
+        for (int i = 0; i < 3; ++i)
+            bandCoeffs[i] = makeEqCoeffs (eqFreq[(size_t) i], eqGain[(size_t) i], 1.0f,
+                                          eqMode[(size_t) i], 48000.0);
+
+        eqCurvePath.clear();
+        eqFillPath.clear();
+
+        const int w = juce::jmax (1, (int) plot.getWidth());
+        for (int px = 0; px < w; ++px)
+        {
+            const double frac = (double) px / (double) juce::jmax (1, w - 1);
+            const float  hz   = (float) (20.0 * std::pow (1000.0, frac));
+
+            float db = 0.0f;
+            for (int i = 0; i < 3; ++i)
+                db += juce::Decibels::gainToDecibels (biquadMagnitude (bandCoeffs[i], hz, 48000.0), -100.0f);
+
+            const float y = eqYForDb (plot, db);
+            const float x = plot.getX() + (float) px;
+
+            if (px == 0)
+            {
+                eqCurvePath.startNewSubPath (x, y);
+                eqFillPath.startNewSubPath (x, plot.getBottom());
+                eqFillPath.lineTo (x, y);
+            }
+            else
+            {
+                eqCurvePath.lineTo (x, y);
+                eqFillPath.lineTo (x, y);
+            }
+        }
+
+        eqFillPath.lineTo (plot.getRight(), plot.getBottom());
+        eqFillPath.closeSubPath();
+    }
+
+    void drawEqMaster (juce::Graphics& g)
+    {
+        auto area = getLocalBounds().toFloat().reduced (6.0f);
+        auto plot = eqPlot();
+
+        g.setColour (juce::Colour (0xFF0D0D0D));
+        g.fillRect (plot);
+        g.setColour (juce::Colour (0xFF333333));
+        g.drawRect (plot, 1.0f);
+
+        // Gain grid (+24 … -24 dB), same scale as the per-pad EQ graph.
+        for (float db = kEqMaxDb; db >= kEqMinDb - 0.1f; db -= 12.0f)
+        {
+            const float y = eqYForDb (plot, db);
+            g.setColour (std::abs (db) < 0.1f ? juce::Colour (0xFF555555) : juce::Colour (0xFF2E2E2E));
+            g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
+            g.setColour (juce::Colour (0xFFBBBBBB));
+            g.setFont (juce::Font (9.0f));
+            g.drawText ((db > 0.0f ? "+" : "") + juce::String ((int) db) + " dB",
+                        (int) area.getX(), (int) y - 6, 34, 12,
+                        juce::Justification::centredRight);
+        }
+
+        // Log-frequency grid.
+        for (float f : { 100.0f, 1000.0f, 10000.0f })
+        {
+            const float x = eqXForHz (plot, f);
+            g.setColour (juce::Colour (0xFF2E2E2E));
+            g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
+            g.setColour (juce::Colour (0xFFBBBBBB));
+            g.setFont (juce::Font (9.0f));
+            g.drawText (f >= 1000.0f ? juce::String (f / 1000.0f, 0) + "k" : juce::String ((int) f),
+                        (int) x - 20, (int) plot.getBottom() + 2, 40, 12,
+                        juce::Justification::centred);
+        }
+
+        const int   w     = juce::jmax (1, (int) plot.getWidth());
+        const float binHz = 24000.0f / (float) numBins;
+
+        // Faint real master spectrum behind the curve (no labels: the axis is gain).
+        {
+            juce::Path spectrum;
+            for (int px = 0; px < w; ++px)
+            {
+                const double frac = (double) px / (double) juce::jmax (1, w - 1);
+                const double f    = 20.0 * std::pow (1000.0, frac);
+                const int    bin  = juce::jlimit (1, numBins - 1, (int) (f / binHz));
+                const float  db   = juce::jlimit (-80.0f, 0.0f, displayDb[(size_t) bin]);
+                const float  y    = plot.getBottom() - (db + 80.0f) / 80.0f * plot.getHeight();
+                const float  x    = plot.getX() + (float) px;
+                if (px == 0) spectrum.startNewSubPath (x, y);
+                else         spectrum.lineTo (x, y);
+            }
+            g.setColour (juce::Colour (0x33AAAAAA));
+            g.strokePath (spectrum, juce::PathStrokeType (1.0f));
+        }
+
+        // EQ response curve — rebuilt only when the bands or plot change, so a
+        // drag does not re-run trig maths for every pixel at 60 fps.
+        if (eqCurveDirty || eqCurvePlot != plot)
+        {
+            rebuildEqCurve (plot);
+            eqCurveDirty = false;
+            eqCurvePlot  = plot;
+        }
+
+        g.setColour (juce::Colour (eqEnabled ? 0x22FF4466 : 0x15885566));
+        g.fillPath (eqFillPath);
+        g.setColour (juce::Colour (eqEnabled ? 0xFFFF4466 : 0xFF885566));
+        g.strokePath (eqCurvePath, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved,
+                                                         juce::PathStrokeType::rounded));
+
+        // Band handles.
+        for (int i = 0; i < 3; ++i)
+        {
+            const float x = eqXForHz (plot, eqFreq[(size_t) i]);
+            const float y = eqYForDb (plot, eqGain[(size_t) i]);
+            const bool  active = (i == activeBand);
+
+            g.setColour (juce::Colour (active ? 0xFF44E8FF : 0xFF00CFFF));
+            g.fillEllipse (x - 9.0f, y - 9.0f, 18.0f, 18.0f);
+            g.setColour (juce::Colours::black);
+            g.setFont (juce::Font (11.0f, juce::Font::bold));
+            g.drawText (juce::String (i + 1),
+                        juce::Rectangle<float> (x - 9.0f, y - 9.0f, 18.0f, 18.0f),
+                        juce::Justification::centred);
+        }
+
+        g.setColour (juce::Colour (0xFFBBBBBB));
+        g.setFont (juce::Font (10.0f));
+        g.drawText ("MASTER EQ", (int) plot.getX() + 6, (int) plot.getY() + 4, 120, 14,
+                    juce::Justification::left);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (currentStyle != Style::EqMaster)
+            return;
+
+        const auto plot = eqPlot();
+        float best = 32.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            const float x = eqXForHz (plot, eqFreq[(size_t) i]);
+            const float y = eqYForDb (plot, eqGain[(size_t) i]);
+            const float d = e.position.getDistanceFrom ({ x, y });
+            if (d < best) { best = d; activeBand = i; }
+        }
+        updateShapeButtonText();
+        repaint();
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (currentStyle != Style::EqMaster || activeBand < 0)
+            return;
+
+        const auto plot = eqPlot();
+        const float fx = juce::jlimit (0.0f, 1.0f,
+                                       (e.position.x - plot.getX()) / juce::jmax (1.0f, plot.getWidth()));
+        const float fy = juce::jlimit (0.0f, 1.0f,
+                                       (e.position.y - plot.getY()) / juce::jmax (1.0f, plot.getHeight()));
+
+        eqFreq[(size_t) activeBand] = 20.0f * std::pow (1000.0f, fx);
+        eqGain[(size_t) activeBand] = kEqMaxDb - fy * (kEqMaxDb - kEqMinDb);
+
+        if (onMasterEqBandChanged)
+            onMasterEqBandChanged (activeBand, eqFreq[(size_t) activeBand], eqGain[(size_t) activeBand]);
+
+        eqCurveDirty = true;
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (activeBand >= 0 && onMasterEqEditFinished)
+            onMasterEqEditFinished();
+
+        repaint();
     }
 
     // Runs on FftThread — drains FIFO, performs FFT, compresses to numBins
@@ -217,10 +547,16 @@ private:
             // Curve low-level signal upward for a punchier, more reactive display.
             val = std::pow (val, 0.6f);
             smoothedScope[i] = smoothedScope[i] * 0.75f + val * 0.25f;
+
+            // Unscaled magnitude -> real dBFS, smoothed in the dB domain.
+            const float raw = fftData[(int) mapped] / (float) (fftSize / 2);
+            const float db  = juce::Decibels::gainToDecibels (raw, -100.0f);
+            smoothedDb[i]   = smoothedDb[i] * 0.82f + db * 0.18f;
         }
 
         const juce::SpinLock::ScopedLockType sl (scopeLock);
         std::copy (std::begin (smoothedScope), std::end (smoothedScope), scopeData);
+        std::copy (std::begin (smoothedDb), std::end (smoothedDb), dbScope);
     }
 
     // Timer only advances the animation phase, snapshots scopeData for
@@ -230,6 +566,7 @@ private:
         {
             const juce::SpinLock::ScopedLockType sl (scopeLock);
             std::copy (std::begin (scopeData), std::end (scopeData), displayScope);
+            std::copy (std::begin (dbScope),   std::end (dbScope),   displayDb);
         }
 
         phase += 0.012f;
